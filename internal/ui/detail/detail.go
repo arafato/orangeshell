@@ -476,8 +476,12 @@ func (m Model) calcMaxScroll() int {
 	if m.detail == nil {
 		return 0
 	}
-	// title + sep + fields + help
-	totalLines := 2 + len(m.detail.Fields) + 2
+	// title + sep + fields + extra content + help
+	extraLines := 0
+	if m.detail.ExtraContent != "" {
+		extraLines = len(strings.Split(m.detail.ExtraContent, "\n"))
+	}
+	totalLines := 2 + len(m.detail.Fields) + extraLines + 2
 	contentHeight := m.height - 4
 	if contentHeight < 1 {
 		contentHeight = 1
@@ -644,6 +648,15 @@ func (m Model) viewDetail(maxHeight int) string {
 
 	allLines := []string{title, sep}
 	allLines = append(allLines, fieldLines...)
+
+	// Append ExtraContent (e.g. D1 schema diagram) if present
+	if d.ExtraContent != "" {
+		extraLines := strings.Split(d.ExtraContent, "\n")
+		for _, el := range extraLines {
+			allLines = append(allLines, theme.DimStyle.Render(el))
+		}
+	}
+
 	allLines = append(allLines, help)
 
 	visibleHeight := maxHeight

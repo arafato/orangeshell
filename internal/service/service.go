@@ -15,7 +15,8 @@ type Resource struct {
 // ResourceDetail holds the full detail for a single resource, rendered in the detail drill-down view.
 type ResourceDetail struct {
 	Resource
-	Fields []DetailField // Ordered list of key-value fields to display
+	Fields       []DetailField // Ordered list of key-value fields to display
+	ExtraContent string        // Optional multi-line content rendered below fields (e.g. schema diagram)
 }
 
 // DetailField is a single labeled value in a detail view.

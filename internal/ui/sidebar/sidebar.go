@@ -24,7 +24,6 @@ func DefaultServices() []Service {
 		{Name: "Pages", Icon: "P"},
 		{Name: "Queues", Icon: "Q"},
 		{Name: "Hyperdrive", Icon: "H"},
-		{Name: "Durable Objects", Icon: "O"},
 	}
 }
 

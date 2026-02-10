@@ -40,8 +40,8 @@ const (
 )
 
 type initDashboardMsg struct {
-	client      *api.Client
-	accountName string
+	client   *api.Client
+	accounts []api.Account
 }
 
 type errMsg struct {
@@ -98,7 +98,7 @@ func NewModel(cfg *config.Config) Model {
 
 	m := Model{
 		setup:    setup.New(cfg),
-		header:   header.New("", cfg.AuthMethod),
+		header:   header.New(cfg.AuthMethod),
 		sidebar:  sb,
 		detail:   det,
 		search:   search.New(),
@@ -138,17 +138,9 @@ func (m Model) initDashboardCmd() tea.Cmd {
 			return errMsg{err}
 		}
 
-		accountName := m.cfg.AccountID
-		for _, acc := range accounts {
-			if acc.ID == m.cfg.AccountID {
-				accountName = acc.Name
-				break
-			}
-		}
-
 		return initDashboardMsg{
-			client:      client,
-			accountName: accountName,
+			client:   client,
+			accounts: accounts,
 		}
 	}
 }
@@ -168,21 +160,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case initDashboardMsg:
 		m.client = msg.client
-		m.header.SetAccount(msg.accountName)
 		m.phase = PhaseDashboard
 		m.layout()
 
-		// Register services now that client is available
-		workersSvc := svc.NewWorkersService(msg.client.CF, m.cfg.AccountID)
-		m.registry.Register(workersSvc)
+		// Build header account tabs from the full accounts list
+		headerAccounts := make([]header.Account, len(msg.accounts))
+		for i, acc := range msg.accounts {
+			headerAccounts[i] = header.Account{ID: acc.ID, Name: acc.Name}
+		}
+		m.header.SetAccounts(headerAccounts, m.cfg.AccountID)
 
-		kvSvc := svc.NewKVService(msg.client.CF, m.cfg.AccountID)
-		m.registry.Register(kvSvc)
+		// Register services for the active account
+		m.registerServices(m.cfg.AccountID)
 
-		r2Svc := svc.NewR2Service(msg.client.CF, m.cfg.AccountID)
-		m.registry.Register(r2Svc)
-
-		// Load resources for the initially selected service.
+		// Load resources for the initially selected service
 		serviceName := m.sidebar.SelectedService()
 		m.detail.SetService(serviceName)
 		loadCmd := tea.Cmd(func() tea.Msg {
@@ -306,7 +297,7 @@ func (m Model) updateSetup(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.setup.Done() {
 		m.cfg = m.setup.Config()
-		m.header = header.New("", m.cfg.AuthMethod)
+		m.header = header.New(m.cfg.AuthMethod)
 		m.phase = PhaseDashboard
 		m.layout()
 		return m, m.initDashboardCmd()
@@ -338,6 +329,16 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds := m.fetchUncachedForSearch()
 			if len(cmds) > 0 {
 				return m, tea.Batch(cmds...)
+			}
+			return m, nil
+		case "]":
+			if m.header.NextAccount() {
+				return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
+			}
+			return m, nil
+		case "[":
+			if m.header.PrevAccount() {
+				return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
 			}
 			return m, nil
 		}
@@ -517,6 +518,51 @@ func (m Model) loadResourceDetail(serviceName, resourceID string) tea.Cmd {
 			Err:         err,
 		}
 	}
+}
+
+// registerServices creates and registers all service implementations for the given accountID.
+// Clears any existing services first, then sets the registry's active account for caching.
+func (m *Model) registerServices(accountID string) {
+	m.registry.ClearServices()
+	m.registry.SetAccountID(accountID)
+
+	workersSvc := svc.NewWorkersService(m.client.CF, accountID)
+	m.registry.Register(workersSvc)
+
+	kvSvc := svc.NewKVService(m.client.CF, accountID)
+	m.registry.Register(kvSvc)
+
+	r2Svc := svc.NewR2Service(m.client.CF, accountID)
+	m.registry.Register(r2Svc)
+}
+
+// switchAccount handles switching to a different account. Re-registers services with the
+// new accountID, loads the currently selected sidebar service, and shows cached data
+// instantly if we've visited this account before.
+func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
+	m.cfg.AccountID = accountID
+	m.registerServices(accountID)
+
+	// Reset detail panel for the current sidebar service
+	serviceName := m.sidebar.SelectedService()
+
+	// If we have cached data for this account+service, show it instantly
+	entry := m.registry.GetCache(serviceName)
+	if entry != nil {
+		m.detail.SetServiceWithCache(serviceName, entry.Resources)
+	} else {
+		m.detail.SetService(serviceName)
+	}
+
+	// Update search items with whatever is cached for this account
+	m.search.SetItems(m.registry.AllSearchItems())
+
+	// Load fresh data from the API
+	loadCmd := tea.Cmd(func() tea.Msg {
+		return detail.LoadResourcesMsg{ServiceName: serviceName}
+	})
+
+	return tea.Batch(loadCmd, m.detail.SpinnerInit())
 }
 
 // navigateTo switches the sidebar to a service and loads the detail for a specific resource.

@@ -48,18 +48,22 @@ type CacheEntry struct {
 }
 
 // Registry holds all registered service implementations, keyed by sidebar name,
-// and an in-memory session cache of resource lists per service.
+// and an in-memory session cache of resource lists per service per account.
+// Caches are retained across account switches so switching back is instant.
 type Registry struct {
-	services map[string]Service
-	order    []string // insertion order for sidebar display
-	cache    map[string]*CacheEntry
+	services  map[string]Service
+	order     []string // insertion order for sidebar display
+	accountID string   // currently active account
+
+	// Per-account caches: accountID → serviceName → CacheEntry
+	accountCaches map[string]map[string]*CacheEntry
 }
 
 // NewRegistry creates an empty service registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		services: make(map[string]Service),
-		cache:    make(map[string]*CacheEntry),
+		services:      make(map[string]Service),
+		accountCaches: make(map[string]map[string]*CacheEntry),
 	}
 }
 
@@ -82,17 +86,43 @@ func (r *Registry) Names() []string {
 	return r.order
 }
 
-// GetCache returns the cached resources for a service, or nil if not cached.
-func (r *Registry) GetCache(serviceName string) *CacheEntry {
-	return r.cache[serviceName]
+// SetAccountID sets the active account for cache operations.
+func (r *Registry) SetAccountID(accountID string) {
+	r.accountID = accountID
+	// Ensure a cache map exists for this account
+	if _, ok := r.accountCaches[accountID]; !ok {
+		r.accountCaches[accountID] = make(map[string]*CacheEntry)
+	}
 }
 
-// SetCache stores resources in the session cache for a service.
+// cache returns the cache map for the active account.
+func (r *Registry) cache() map[string]*CacheEntry {
+	c, ok := r.accountCaches[r.accountID]
+	if !ok {
+		c = make(map[string]*CacheEntry)
+		r.accountCaches[r.accountID] = c
+	}
+	return c
+}
+
+// GetCache returns the cached resources for a service in the active account, or nil if not cached.
+func (r *Registry) GetCache(serviceName string) *CacheEntry {
+	return r.cache()[serviceName]
+}
+
+// SetCache stores resources in the session cache for a service in the active account.
 func (r *Registry) SetCache(serviceName string, resources []Resource) {
-	r.cache[serviceName] = &CacheEntry{
+	r.cache()[serviceName] = &CacheEntry{
 		Resources: resources,
 		FetchedAt: time.Now(),
 	}
+}
+
+// ClearServices removes all registered services but keeps cached data.
+// Used when switching accounts — services will be re-registered with the new accountID.
+func (r *Registry) ClearServices() {
+	r.services = make(map[string]Service)
+	r.order = nil
 }
 
 // RegisteredNames returns all registered (integrated) service names.
@@ -108,8 +138,9 @@ func (r *Registry) RegisteredNames() []string {
 // Uses the session cache so search results are available immediately.
 func (r *Registry) AllSearchItems() []Resource {
 	var all []Resource
+	c := r.cache()
 	for _, name := range r.order {
-		if entry := r.cache[name]; entry != nil {
+		if entry := c[name]; entry != nil {
 			all = append(all, entry.Resources...)
 		} else {
 			// Fall back to service's own cache (e.g. WorkersService.cached)
@@ -118,4 +149,10 @@ func (r *Registry) AllSearchItems() []Resource {
 		}
 	}
 	return all
+}
+
+// HasCacheForAccount returns whether any cached data exists for the given account.
+func (r *Registry) HasCacheForAccount(accountID string) bool {
+	c, ok := r.accountCaches[accountID]
+	return ok && len(c) > 0
 }

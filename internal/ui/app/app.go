@@ -127,12 +127,19 @@ func (m Model) initDashboardCmd() tea.Cmd {
 			return errMsg{err}
 		}
 
+		ctx := context.Background()
+
+		// Validate credentials first — this refreshes expired OAuth tokens.
+		// Must happen before creating the SDK client so it gets the fresh token.
+		if err := authenticator.Validate(ctx); err != nil {
+			return errMsg{err}
+		}
+
 		client, err := api.NewClient(authenticator, m.cfg)
 		if err != nil {
 			return errMsg{err}
 		}
 
-		ctx := context.Background()
 		accounts, err := client.ListAccounts(ctx)
 		if err != nil {
 			return errMsg{err}

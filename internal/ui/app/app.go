@@ -594,6 +594,9 @@ func (m *Model) registerServices(accountID string) {
 
 	r2Svc := svc.NewR2Service(m.client.CF, accountID)
 	m.registry.Register(r2Svc)
+
+	d1Svc := svc.NewD1Service(m.client.CF, accountID)
+	m.registry.Register(d1Svc)
 }
 
 // switchAccount handles switching to a different account. Re-registers services with the

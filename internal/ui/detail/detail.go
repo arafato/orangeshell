@@ -734,6 +734,15 @@ func (m Model) View() string {
 		content = m.viewDetail(contentHeight)
 	}
 
+	// Truncate content to contentHeight lines to prevent the bordered box from
+	// growing beyond its allocated space. lipgloss Height() is a minimum, not
+	// a maximum — it won't truncate overflow from multi-line field values.
+	contentLines := strings.Split(content, "\n")
+	if len(contentLines) > contentHeight {
+		contentLines = contentLines[:contentHeight]
+		content = strings.Join(contentLines, "\n")
+	}
+
 	return borderStyle.
 		Width(m.width - 2).
 		Height(contentHeight).

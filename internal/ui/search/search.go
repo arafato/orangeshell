@@ -218,10 +218,5 @@ func (m Model) View(termWidth, termHeight int) string {
 		Width(popupWidth).
 		Render(content)
 
-	// Center the popup on screen
-	return lipgloss.Place(termWidth, termHeight,
-		lipgloss.Center, lipgloss.Center,
-		popup,
-		lipgloss.WithWhitespaceChars(" "),
-	)
+	return popup
 }

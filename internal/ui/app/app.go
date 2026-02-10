@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/oarafat/orangeshell/internal/api"
 	"github.com/oarafat/orangeshell/internal/auth"
@@ -943,16 +945,23 @@ func (m Model) View() string {
 }
 
 func (m Model) viewDashboard() string {
-	// If search overlay is active, render it on top
+	// If an overlay is active, render the dashboard dimmed with the popup centered on top
 	if m.showSearch {
-		return m.search.View(m.width, m.height)
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.search.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
 	}
-
-	// If action popup is active, render it on top
 	if m.showActions {
-		return m.actionsPopup.View(m.width, m.height)
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.actionsPopup.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
 	}
 
+	return m.renderDashboardContent()
+}
+
+// renderDashboardContent renders the normal dashboard (header, sidebar, detail, help, status).
+func (m Model) renderDashboardContent() string {
 	headerView := m.header.View()
 	sidebarView := m.sidebar.View()
 	detailView := m.detail.View()
@@ -960,19 +969,78 @@ func (m Model) viewDashboard() string {
 	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, detailView)
 	helpText := m.renderHelp()
 
-	statusView := ""
+	parts := []string{headerView, content, helpText}
 	if m.toastMsg != "" && time.Now().Before(m.toastExpiry) {
-		statusView = "\n" + theme.SuccessStyle.Render(fmt.Sprintf(" ✓ %s ", m.toastMsg))
+		parts = append(parts, theme.SuccessStyle.Render(fmt.Sprintf(" ✓ %s ", m.toastMsg)))
 	} else if m.err != nil {
-		statusView = "\n" + theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s ", m.err.Error()))
+		parts = append(parts, theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s ", m.err.Error())))
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		headerView,
-		content,
-		helpText,
-		statusView,
-	)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// dimContent applies ANSI dim (faint) styling to every line of the rendered string.
+// It wraps each line with the SGR dim code (\033[2m) and a full reset at the end.
+// This causes the terminal to render all text at reduced brightness.
+func dimContent(s string) string {
+	const dimOn = "\033[2m"
+	const reset = "\033[0m"
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		// Wrap the entire line: dim-on at the start, reset at the end.
+		// Any inner resets in the line will cancel dimming mid-line, so we
+		// also inject dim-on after every reset sequence we find.
+		lines[i] = dimOn + strings.ReplaceAll(line, reset, reset+dimOn) + reset
+	}
+	return strings.Join(lines, "\n")
+}
+
+// overlayCenter composites a foreground popup centered on top of a dimmed background.
+// Lines outside the popup's Y range show the dimmed background as-is.
+// Lines inside the popup's Y range splice the popup content into the dimmed
+// background using ANSI-aware string truncation, preserving the dimmed background
+// on the left and right sides of the popup.
+func overlayCenter(bg, fg string, termWidth, termHeight int) string {
+	bgLines := strings.Split(bg, "\n")
+	fgLines := strings.Split(fg, "\n")
+
+	// Pad or truncate background to exactly termHeight lines
+	for len(bgLines) < termHeight {
+		bgLines = append(bgLines, "")
+	}
+	bgLines = bgLines[:termHeight]
+
+	fgHeight := len(fgLines)
+	fgWidth := 0
+	for _, line := range fgLines {
+		if w := lipgloss.Width(line); w > fgWidth {
+			fgWidth = w
+		}
+	}
+
+	startY := (termHeight - fgHeight) / 2
+	startX := (termWidth - fgWidth) / 2
+	if startY < 0 {
+		startY = 0
+	}
+	if startX < 0 {
+		startX = 0
+	}
+
+	result := make([]string, termHeight)
+	for i := 0; i < termHeight; i++ {
+		if i >= startY && i < startY+fgHeight {
+			fgIdx := i - startY
+			// Splice: dimmed-bg-left + popup-line + dimmed-bg-right
+			bgLeft := ansi.Truncate(bgLines[i], startX, "")
+			bgRight := ansi.TruncateLeft(bgLines[i], startX+fgWidth, "")
+			result[i] = bgLeft + fgLines[fgIdx] + bgRight
+		} else {
+			result[i] = bgLines[i]
+		}
+	}
+
+	return strings.Join(result, "\n")
 }
 
 func (m Model) renderHelp() string {

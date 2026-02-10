@@ -248,6 +248,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.detail.SetDetail(msg.Detail, msg.Err)
+		// If this is a D1 detail, initialize the SQL console and load schema async
+		if msg.Err == nil && msg.ServiceName == "D1" && msg.Detail != nil {
+			inputCmd := m.detail.InitD1Console(msg.ResourceID)
+			schemaCmd := m.loadD1Schema(msg.ResourceID)
+			return m, tea.Batch(inputCmd, schemaCmd, m.detail.SpinnerInit())
+		}
 		return m, nil
 
 	case detail.BackgroundRefreshMsg:
@@ -299,6 +305,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case detail.TailStoppedMsg:
 		m.stopTail()
+		return m, nil
+
+	// D1 SQL console messages
+	case detail.D1QueryMsg:
+		if m.client == nil {
+			return m, nil
+		}
+		return m, m.executeD1Query(msg.DatabaseID, msg.SQL)
+
+	case detail.D1QueryResultMsg:
+		m.detail.SetD1QueryResult(msg.Result, msg.Err)
+		// If the query changed the DB, auto-refresh the schema
+		if msg.Result != nil && msg.Result.ChangedDB {
+			m.detail.SetD1SchemaLoading()
+			dbID := m.detail.D1DatabaseID()
+			return m, tea.Batch(m.loadD1Schema(dbID), m.detail.SpinnerInit())
+		}
+		return m, nil
+
+	case detail.D1SchemaLoadMsg:
+		return m, m.loadD1Schema(msg.DatabaseID)
+
+	case detail.D1SchemaLoadedMsg:
+		// Staleness check: only apply if we're still on this database
+		if msg.DatabaseID != m.detail.D1DatabaseID() {
+			return m, nil
+		}
+		m.detail.SetD1Schema(msg.Schema, msg.Err)
 		return m, nil
 
 	case tickRefreshMsg:
@@ -479,9 +513,10 @@ func (m *Model) fetchUncachedForSearch() []tea.Cmd {
 
 // switchToService handles switching to a service, using cached data if available.
 func (m *Model) switchToService(name string) tea.Cmd {
-	// Stop any active tail session when switching services
+	// Stop any active tail/D1 session when switching services
 	m.stopTail()
 	m.detail.ClearTail()
+	m.detail.ClearD1()
 
 	entry := m.registry.GetCache(name)
 	if entry != nil {
@@ -606,6 +641,7 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	// Stop any active tail session
 	m.stopTail()
 	m.detail.ClearTail()
+	m.detail.ClearD1()
 
 	m.cfg.AccountID = accountID
 	m.registerServices(accountID)
@@ -662,6 +698,48 @@ func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
 	m.detail.SetFocused(true)
 
 	return tea.Batch(loadCmd, detailCmd)
+}
+
+// --- D1 SQL console helpers ---
+
+// executeD1Query returns a command that runs a SQL query against a D1 database.
+func (m Model) executeD1Query(databaseID, sql string) tea.Cmd {
+	d1Svc := m.getD1Service()
+	if d1Svc == nil {
+		return func() tea.Msg {
+			return detail.D1QueryResultMsg{Err: fmt.Errorf("D1 service not available")}
+		}
+	}
+	return func() tea.Msg {
+		result, err := d1Svc.ExecuteQuery(databaseID, sql)
+		return detail.D1QueryResultMsg{Result: result, Err: err}
+	}
+}
+
+// loadD1Schema returns a command that loads the schema for a D1 database.
+func (m Model) loadD1Schema(databaseID string) tea.Cmd {
+	d1Svc := m.getD1Service()
+	if d1Svc == nil {
+		return func() tea.Msg {
+			return detail.D1SchemaLoadedMsg{DatabaseID: databaseID, Err: fmt.Errorf("D1 service not available")}
+		}
+	}
+	return func() tea.Msg {
+		schema, err := d1Svc.QuerySchemaRendered(databaseID)
+		return detail.D1SchemaLoadedMsg{DatabaseID: databaseID, Schema: schema, Err: err}
+	}
+}
+
+// getD1Service retrieves the D1Service from the registry (type-asserted).
+func (m Model) getD1Service() *svc.D1Service {
+	s := m.registry.Get("D1")
+	if s == nil {
+		return nil
+	}
+	if d1s, ok := s.(*svc.D1Service); ok {
+		return d1s
+	}
+	return nil
 }
 
 // --- Tail lifecycle helpers ---

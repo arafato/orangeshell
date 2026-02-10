@@ -11,6 +11,13 @@ import (
 	"github.com/cloudflare/cloudflare-go/v6/d1"
 )
 
+// D1QueryResult holds the result of executing a SQL query against a D1 database.
+type D1QueryResult struct {
+	Output    string // formatted ASCII table or "Query OK" for mutations
+	Meta      string // "Rows: 2 | Duration: 0.5ms"
+	ChangedDB bool   // true if the query mutated the DB (triggers schema refresh)
+}
+
 // D1Service implements the Service interface for Cloudflare D1 SQL databases.
 type D1Service struct {
 	client    *cloudflare.Client
@@ -71,7 +78,8 @@ func (s *D1Service) List() ([]Resource, error) {
 	return resources, nil
 }
 
-// Get fetches full details for a single D1 database by UUID.
+// Get fetches metadata for a single D1 database by UUID.
+// Schema is loaded separately via QuerySchemaRendered (lazy/async).
 func (s *D1Service) Get(id string) (*ResourceDetail, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -92,42 +100,16 @@ func (s *D1Service) Get(id string) (*ResourceDetail, error) {
 		},
 	}
 
-	detail.Fields = append(detail.Fields, DetailField{
-		Label: "Database ID",
-		Value: db.UUID,
-	})
-	detail.Fields = append(detail.Fields, DetailField{
-		Label: "Name",
-		Value: db.Name,
-	})
-	detail.Fields = append(detail.Fields, DetailField{
-		Label: "Created",
-		Value: db.CreatedAt.Format(time.RFC3339),
-	})
-	detail.Fields = append(detail.Fields, DetailField{
-		Label: "Version",
-		Value: db.Version,
-	})
-	detail.Fields = append(detail.Fields, DetailField{
-		Label: "File Size",
-		Value: formatFileSize(db.FileSize),
-	})
-	detail.Fields = append(detail.Fields, DetailField{
-		Label: "Tables",
-		Value: fmt.Sprintf("%.0f", db.NumTables),
-	})
-	detail.Fields = append(detail.Fields, DetailField{
-		Label: "Read Replication",
-		Value: string(db.ReadReplication.Mode),
-	})
-
-	// Query the database schema and render a diagram
-	schema, schemaErr := s.querySchema(ctx, id)
-	if schemaErr != nil {
-		detail.ExtraContent = fmt.Sprintf("\n  ── Schema ─────────────────────\n\n  Could not load schema: %s", schemaErr)
-	} else {
-		detail.ExtraContent = renderSchema(schema)
-	}
+	// Compact metadata — these will be rendered as 2 rows in the D1 detail view
+	detail.Fields = append(detail.Fields,
+		DetailField{Label: "Database ID", Value: db.UUID},
+		DetailField{Label: "Name", Value: db.Name},
+		DetailField{Label: "Created", Value: db.CreatedAt.Format(time.RFC3339)},
+		DetailField{Label: "Version", Value: db.Version},
+		DetailField{Label: "File Size", Value: formatFileSize(db.FileSize)},
+		DetailField{Label: "Tables", Value: fmt.Sprintf("%.0f", db.NumTables)},
+		DetailField{Label: "Replication", Value: string(db.ReadReplication.Mode)},
+	)
 
 	return detail, nil
 }
@@ -137,6 +119,187 @@ func (s *D1Service) SearchItems() []Resource {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cached
+}
+
+// ExecuteQuery runs a SQL query against a D1 database and returns formatted results.
+func (s *D1Service) ExecuteQuery(id, sql string) (*D1QueryResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := s.client.D1.Database.Raw(ctx, id, d1.DatabaseRawParams{
+		AccountID: cloudflare.F(s.accountID),
+		Body: d1.DatabaseRawParamsBodyD1SingleQuery{
+			Sql: cloudflare.F(sql),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	results := resp.Result
+	if len(results) == 0 {
+		return &D1QueryResult{Output: "No results", Meta: ""}, nil
+	}
+
+	r := results[0]
+	meta := formatQueryMeta(r.Meta)
+
+	// If the query didn't return columns, it was a mutation (CREATE, INSERT, etc.)
+	if len(r.Results.Columns) == 0 {
+		output := "Query OK"
+		if r.Meta.Changes > 0 {
+			output = fmt.Sprintf("Query OK, %.0f row(s) affected", r.Meta.Changes)
+		}
+		return &D1QueryResult{
+			Output:    output,
+			Meta:      meta,
+			ChangedDB: r.Meta.ChangedDB,
+		}, nil
+	}
+
+	// Format as ASCII table
+	output := formatASCIITable(r.Results.Columns, r.Results.Rows)
+
+	return &D1QueryResult{
+		Output:    output,
+		Meta:      meta,
+		ChangedDB: r.Meta.ChangedDB,
+	}, nil
+}
+
+// QuerySchemaRendered introspects the database schema and returns a rendered tree diagram.
+func (s *D1Service) QuerySchemaRendered(id string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tables, err := s.querySchema(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return renderSchema(tables), nil
+}
+
+// --- Query helpers ---
+
+func formatQueryMeta(meta d1.DatabaseRawResponseMeta) string {
+	parts := []string{}
+	if meta.RowsRead > 0 {
+		parts = append(parts, fmt.Sprintf("Read: %.0f", meta.RowsRead))
+	}
+	if meta.RowsWritten > 0 {
+		parts = append(parts, fmt.Sprintf("Written: %.0f", meta.RowsWritten))
+	}
+	if meta.Duration > 0 {
+		parts = append(parts, fmt.Sprintf("%.1fms", meta.Duration))
+	}
+	if meta.Changes > 0 {
+		parts = append(parts, fmt.Sprintf("Changes: %.0f", meta.Changes))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// formatASCIITable renders columns and rows as an aligned ASCII table.
+func formatASCIITable(columns []string, rows [][]interface{}) string {
+	if len(columns) == 0 {
+		return "(empty result)"
+	}
+
+	// Convert all values to strings and calculate column widths
+	colWidths := make([]int, len(columns))
+	for i, c := range columns {
+		colWidths[i] = len(c)
+	}
+
+	strRows := make([][]string, len(rows))
+	for i, row := range rows {
+		strRow := make([]string, len(columns))
+		for j := 0; j < len(columns); j++ {
+			var val string
+			if j < len(row) {
+				val = cellToString(row[j])
+			}
+			strRow[j] = val
+			if len(val) > colWidths[j] {
+				colWidths[j] = len(val)
+			}
+		}
+		strRows[i] = strRow
+	}
+
+	// Cap column widths to prevent excessively wide tables
+	maxColWidth := 30
+	for i := range colWidths {
+		if colWidths[i] > maxColWidth {
+			colWidths[i] = maxColWidth
+		}
+	}
+
+	var b strings.Builder
+
+	// Header
+	b.WriteString(renderTableRow(columns, colWidths))
+	b.WriteString("\n")
+
+	// Separator
+	sepParts := make([]string, len(columns))
+	for i, w := range colWidths {
+		sepParts[i] = strings.Repeat("─", w)
+	}
+	b.WriteString("├─")
+	b.WriteString(strings.Join(sepParts, "─┼─"))
+	b.WriteString("─┤\n")
+
+	// Data rows
+	for _, row := range strRows {
+		b.WriteString(renderTableRow(row, colWidths))
+		b.WriteString("\n")
+	}
+
+	// Row count
+	b.WriteString(fmt.Sprintf("(%d row%s)", len(rows), pluralS(len(rows))))
+
+	return b.String()
+}
+
+func renderTableRow(values []string, widths []int) string {
+	parts := make([]string, len(values))
+	for i, v := range values {
+		w := widths[i]
+		if len(v) > w {
+			v = v[:w-1] + "…"
+		}
+		parts[i] = fmt.Sprintf("%-*s", w, v)
+	}
+	return "│ " + strings.Join(parts, " │ ") + " │"
+}
+
+func cellToString(v interface{}) string {
+	if v == nil {
+		return "NULL"
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64:
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%.0f", val)
+		}
+		return fmt.Sprintf("%g", val)
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func formatD1Summary(db d1.DatabaseListResponse) string {
@@ -223,11 +386,9 @@ func (s *D1Service) querySchema(ctx context.Context, databaseID string) ([]schem
 					Name: strVal(cr, "name"),
 					Type: strVal(cr, "type"),
 				}
-				// notnull: 0 or 1
 				if numVal(cr, "notnull") == 1 {
 					col.NotNull = true
 				}
-				// pk: 0 means not PK, >0 means PK (column index in composite PK)
 				if numVal(cr, "pk") > 0 {
 					col.PK = true
 				}
@@ -269,13 +430,11 @@ func (s *D1Service) queryD1(ctx context.Context, databaseID, sql string) ([]map[
 		return nil, err
 	}
 
-	// The response is a paginated list of QueryResult; we expect one result set.
 	results := resp.Result
 	if len(results) == 0 {
 		return nil, nil
 	}
 
-	// results[0].Results is []interface{}, each element is map[string]interface{}
 	var rows []map[string]interface{}
 	for _, r := range results[0].Results {
 		if m, ok := r.(map[string]interface{}); ok {
@@ -312,24 +471,23 @@ func numVal(row map[string]interface{}, key string) float64 {
 // renderSchema produces an ASCII tree diagram of the database schema.
 func renderSchema(tables []schemaTable) string {
 	if len(tables) == 0 {
-		return "\n  ── Schema ─────────────────────\n\n  No tables found"
+		return "No tables found"
 	}
 
 	var b strings.Builder
-	b.WriteString("\n  ── Schema ─────────────────────\n")
 
 	// Build a lookup of FK relationships for the relations summary
 	var allFKs []string
 
 	for _, t := range tables {
-		b.WriteString(fmt.Sprintf("\n  %s\n", t.Name))
+		b.WriteString(fmt.Sprintf("%s\n", t.Name))
 
-		// Build FK lookup for this table: fromCol → "→ toTable.toCol"
+		// Build FK lookup for this table
 		fkMap := make(map[string]string)
 		for _, fk := range t.FKs {
-			ref := fmt.Sprintf("→ %s.%s", fk.ToTable, fk.ToCol)
+			ref := fmt.Sprintf("-> %s.%s", fk.ToTable, fk.ToCol)
 			fkMap[fk.FromCol] = ref
-			allFKs = append(allFKs, fmt.Sprintf("  %s.%s → %s.%s", t.Name, fk.FromCol, fk.ToTable, fk.ToCol))
+			allFKs = append(allFKs, fmt.Sprintf("  %s.%s -> %s.%s", t.Name, fk.FromCol, fk.ToTable, fk.ToCol))
 		}
 
 		// Calculate max column name width for alignment
@@ -344,13 +502,11 @@ func renderSchema(tables []schemaTable) string {
 		}
 
 		for i, c := range t.Columns {
-			// Tree branch character
 			branch := "├─"
 			if i == len(t.Columns)-1 {
 				branch = "└─"
 			}
 
-			// PK/FK tag
 			tag := "  "
 			if c.PK {
 				tag = "PK"
@@ -358,37 +514,35 @@ func renderSchema(tables []schemaTable) string {
 				tag = "FK"
 			}
 
-			// Column type
 			colType := c.Type
 			if colType == "" {
 				colType = "ANY"
 			}
 
-			// NOT NULL annotation
 			notNull := ""
 			if c.NotNull && !c.PK {
 				notNull = " NOT NULL"
 			}
 
-			// FK reference
 			fkRef := ""
 			if ref, ok := fkMap[c.Name]; ok {
 				fkRef = "  " + ref
 			}
 
-			line := fmt.Sprintf("  %s %s %-*s  %-8s%s%s",
+			line := fmt.Sprintf("%s %s %-*s  %-8s%s%s",
 				branch, tag, maxNameLen, c.Name, colType, notNull, fkRef)
 			b.WriteString(line + "\n")
 		}
+		b.WriteString("\n")
 	}
 
 	// Relations summary
 	if len(allFKs) > 0 {
-		b.WriteString("\n  Relations\n")
+		b.WriteString("Relations\n")
 		for _, fk := range allFKs {
-			b.WriteString(fmt.Sprintf("  %s\n", fk))
+			b.WriteString(fk + "\n")
 		}
 	}
 
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }

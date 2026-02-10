@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/oarafat/orangeshell/internal/service"
@@ -76,6 +77,29 @@ type (
 	}
 	// TailStoppedMsg indicates the tail was stopped (cleanup complete).
 	TailStoppedMsg struct{}
+
+	// D1 SQL console messages
+
+	// D1QueryMsg requests the app to execute a SQL query against a D1 database.
+	D1QueryMsg struct {
+		DatabaseID string
+		SQL        string
+	}
+	// D1QueryResultMsg carries the result of a SQL query.
+	D1QueryResultMsg struct {
+		Result *service.D1QueryResult
+		Err    error
+	}
+	// D1SchemaLoadMsg requests the app to load the schema for a D1 database.
+	D1SchemaLoadMsg struct {
+		DatabaseID string
+	}
+	// D1SchemaLoadedMsg carries the rendered schema diagram.
+	D1SchemaLoadedMsg struct {
+		DatabaseID string
+		Schema     string
+		Err        error
+	}
 )
 
 // Model represents the right-side detail panel.
@@ -111,6 +135,17 @@ type Model struct {
 	tailStarting bool // true while waiting for TailStartedMsg
 	tailScroll   int  // scroll offset within log console (0 = pinned to bottom)
 	tailError    string
+
+	// D1 SQL console state
+	d1Input      textinput.Model // SQL text input
+	d1Active     bool            // true when D1 console is initialized
+	d1Output     []string        // accumulated output lines (query results)
+	d1Querying   bool            // true while a query is in flight
+	d1DatabaseID string          // current database UUID
+
+	// D1 Schema pane state
+	d1Schema        string // rendered schema text (empty = not loaded)
+	d1SchemaLoading bool   // true while schema is being fetched
 
 	// Loading spinner
 	spinner spinner.Model
@@ -345,6 +380,81 @@ func (m Model) CurrentDetailName() string {
 	return ""
 }
 
+// --- D1 SQL Console helpers ---
+
+// InitD1Console initializes the D1 SQL console for a database.
+func (m *Model) InitD1Console(databaseID string) tea.Cmd {
+	m.d1Active = true
+	m.d1DatabaseID = databaseID
+	m.d1Output = nil
+	m.d1Querying = false
+	m.d1Schema = ""
+	m.d1SchemaLoading = true
+
+	ti := textinput.New()
+	ti.Prompt = "sql> "
+	ti.PromptStyle = theme.D1PromptStyle
+	ti.TextStyle = theme.ValueStyle
+	ti.PlaceholderStyle = theme.DimStyle
+	ti.Placeholder = "SELECT * FROM ..."
+	ti.CharLimit = 0
+	m.d1Input = ti
+	return m.d1Input.Focus()
+}
+
+// D1DatabaseID returns the current D1 database UUID.
+func (m Model) D1DatabaseID() string {
+	return m.d1DatabaseID
+}
+
+// D1Active returns whether the D1 console is active.
+func (m Model) D1Active() bool {
+	return m.d1Active
+}
+
+// SetD1Schema sets the schema content for the D1 detail view.
+func (m *Model) SetD1Schema(schema string, err error) {
+	m.d1SchemaLoading = false
+	if err != nil {
+		m.d1Schema = fmt.Sprintf("Error: %s", err)
+	} else {
+		m.d1Schema = schema
+	}
+}
+
+// SetD1SchemaLoading marks the schema as loading (for auto-refresh after mutation).
+func (m *Model) SetD1SchemaLoading() {
+	m.d1SchemaLoading = true
+}
+
+// SetD1QueryResult appends query results to the output area.
+func (m *Model) SetD1QueryResult(result *service.D1QueryResult, err error) {
+	m.d1Querying = false
+	if err != nil {
+		m.d1Output = append(m.d1Output, theme.ErrorStyle.Render(fmt.Sprintf("Error: %s", err)))
+		m.d1Output = append(m.d1Output, "")
+		return
+	}
+	// Append the output lines
+	outputLines := strings.Split(result.Output, "\n")
+	m.d1Output = append(m.d1Output, outputLines...)
+	if result.Meta != "" {
+		m.d1Output = append(m.d1Output, theme.D1MetaStyle.Render(result.Meta))
+	}
+	m.d1Output = append(m.d1Output, "") // blank separator between queries
+}
+
+// ClearD1 resets all D1 console state (used on navigation away).
+func (m *Model) ClearD1() {
+	m.d1Active = false
+	m.d1Output = nil
+	m.d1Querying = false
+	m.d1DatabaseID = ""
+	m.d1Schema = ""
+	m.d1SchemaLoading = false
+	m.d1Input.Blur()
+}
+
 // NavigateToDetail switches directly to the detail view for a resource (used by search).
 func (m *Model) NavigateToDetail(resourceID string) {
 	m.mode = viewDetail
@@ -362,7 +472,7 @@ func (m Model) SpinnerInit() tea.Cmd {
 
 // IsLoading returns whether the detail panel is in a loading state (spinner should run).
 func (m Model) IsLoading() bool {
-	return m.loading || m.detailLoading || m.tailStarting
+	return m.loading || m.detailLoading || m.tailStarting || m.d1SchemaLoading || m.d1Querying
 }
 
 // UpdateSpinner forwards a message to the embedded spinner and returns the updated model + cmd.
@@ -384,6 +494,19 @@ func (m Model) SelectedResource() *service.Resource {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if !m.focused {
 		return m, nil
+	}
+
+	// When D1 console is active, forward all messages to the textinput for cursor blink
+	if m.d1Active && m.mode == viewDetail {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			return m.updateD1(msg)
+		default:
+			// Forward cursor blink and other messages to textinput
+			var cmd tea.Cmd
+			m.d1Input, cmd = m.d1Input.Update(msg)
+			return m, cmd
+		}
 	}
 
 	switch msg := msg.(type) {
@@ -469,6 +592,39 @@ func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// updateD1 handles key events when the D1 SQL console is active.
+func (m Model) updateD1(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		// Back to list, clear D1 state
+		m.mode = viewList
+		m.detail = nil
+		m.detailErr = nil
+		m.detailID = ""
+		m.scrollOffset = 0
+		m.ClearD1()
+		return m, nil
+	case tea.KeyEnter:
+		// Submit the SQL query
+		sql := strings.TrimSpace(m.d1Input.Value())
+		if sql == "" || m.d1Querying {
+			return m, nil
+		}
+		m.d1Querying = true
+		m.d1Output = append(m.d1Output, theme.D1PromptStyle.Render("sql> ")+theme.ValueStyle.Render(sql))
+		m.d1Input.Reset()
+		dbID := m.d1DatabaseID
+		return m, func() tea.Msg {
+			return D1QueryMsg{DatabaseID: dbID, SQL: sql}
+		}
+	}
+
+	// Forward all other keys to the textinput
+	var cmd tea.Cmd
+	m.d1Input, cmd = m.d1Input.Update(msg)
+	return m, cmd
 }
 
 // calcMaxScroll computes the maximum scroll offset for the detail view.
@@ -643,7 +799,12 @@ func (m Model) viewDetail(maxHeight int) string {
 		return m.viewDetailWithTail(maxHeight, title, sep, fieldLines)
 	}
 
-	// Non-Workers: original layout
+	// For D1, split layout: SQL console on left, schema on right
+	if m.service == "D1" && m.d1Active {
+		return m.viewDetailWithD1(maxHeight, title, sep, fieldLines)
+	}
+
+	// Other services: original layout
 	help := "\n" + theme.DimStyle.Render("  esc/backspace back  |  j/k scroll")
 
 	allLines := []string{title, sep}
@@ -724,6 +885,229 @@ func (m Model) viewDetailWithTail(maxHeight int, title, sep string, fieldLines [
 	logLines := m.renderLogConsole(logConsoleHeight)
 
 	return strings.Join(visibleFields, "\n") + "\n" + strings.Join(logLines, "\n")
+}
+
+// viewDetailWithD1 renders the D1 detail layout:
+// - Top: title + separator + compact metadata (2 rows)
+// - Bottom: left (SQL console) | right (schema pane)
+func (m Model) viewDetailWithD1(maxHeight int, title, sep string, fieldLines []string) string {
+	// -- Top region: title + sep + compact metadata --
+	// Render metadata as 2 compact rows instead of 7 individual lines
+	topLines := []string{title, sep}
+	topLines = append(topLines, m.renderD1CompactFields()...)
+
+	metaHeight := len(topLines)
+
+	// Separator between metadata and the split pane
+	panesSepWidth := m.width - 6
+	if panesSepWidth < 0 {
+		panesSepWidth = 0
+	}
+	panesSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
+		fmt.Sprintf(" %s", strings.Repeat("─", panesSepWidth)))
+	topLines = append(topLines, panesSep)
+	metaHeight++
+
+	// -- Bottom region: left/right split --
+	paneHeight := maxHeight - metaHeight
+	if paneHeight < 5 {
+		paneHeight = 5
+	}
+
+	// Calculate widths: ~50/50 split within the available detail panel width
+	innerWidth := m.width - 4 // subtract border chars
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+	leftWidth := innerWidth / 2
+	rightWidth := innerWidth - leftWidth - 1 // -1 for the vertical divider
+
+	leftPane := m.renderD1SQLConsole(leftWidth, paneHeight)
+	rightPane := m.renderD1SchemaPane(rightWidth, paneHeight)
+
+	// Join left and right with a vertical divider
+	divider := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render("│")
+	splitPane := joinSideBySide(leftPane, rightPane, divider, leftWidth, paneHeight)
+
+	return strings.Join(topLines, "\n") + "\n" + splitPane
+}
+
+// renderD1CompactFields renders metadata as 2 compact rows.
+func (m Model) renderD1CompactFields() []string {
+	if m.detail == nil {
+		return nil
+	}
+
+	fields := m.detail.Fields
+	fieldMap := make(map[string]string)
+	for _, f := range fields {
+		fieldMap[f.Label] = f.Value
+	}
+
+	// Row 1: Database ID, Name, Version
+	row1Parts := []string{}
+	if v, ok := fieldMap["Database ID"]; ok {
+		row1Parts = append(row1Parts, fmt.Sprintf("%s %s",
+			theme.LabelStyle.Render("ID"), theme.ValueStyle.Render(truncateRunes(v, 16))))
+	}
+	if v, ok := fieldMap["Name"]; ok {
+		row1Parts = append(row1Parts, fmt.Sprintf("%s %s",
+			theme.LabelStyle.Render("Name"), theme.ValueStyle.Render(v)))
+	}
+	if v, ok := fieldMap["Version"]; ok {
+		row1Parts = append(row1Parts, fmt.Sprintf("%s %s",
+			theme.LabelStyle.Render("Ver"), theme.ValueStyle.Render(v)))
+	}
+
+	// Row 2: Created, File Size, Tables, Replication
+	row2Parts := []string{}
+	if v, ok := fieldMap["Created"]; ok {
+		// Show just the date part
+		if len(v) > 10 {
+			v = v[:10]
+		}
+		row2Parts = append(row2Parts, fmt.Sprintf("%s %s",
+			theme.LabelStyle.Render("Created"), theme.ValueStyle.Render(v)))
+	}
+	if v, ok := fieldMap["File Size"]; ok {
+		row2Parts = append(row2Parts, fmt.Sprintf("%s %s",
+			theme.LabelStyle.Render("Size"), theme.ValueStyle.Render(v)))
+	}
+	if v, ok := fieldMap["Tables"]; ok {
+		row2Parts = append(row2Parts, fmt.Sprintf("%s %s",
+			theme.LabelStyle.Render("Tables"), theme.ValueStyle.Render(v)))
+	}
+	if v, ok := fieldMap["Replication"]; ok {
+		row2Parts = append(row2Parts, fmt.Sprintf("%s %s",
+			theme.LabelStyle.Render("Repl"), theme.ValueStyle.Render(v)))
+	}
+
+	var rows []string
+	if len(row1Parts) > 0 {
+		rows = append(rows, "  "+strings.Join(row1Parts, "   "))
+	}
+	if len(row2Parts) > 0 {
+		rows = append(rows, "  "+strings.Join(row2Parts, "   "))
+	}
+	return rows
+}
+
+// renderD1SQLConsole renders the SQL console left pane as a list of lines.
+func (m Model) renderD1SQLConsole(width, height int) []string {
+	header := theme.D1SchemaTitleStyle.Render("SQL Console")
+
+	// Help at the bottom
+	help := theme.DimStyle.Render("esc back | enter query")
+
+	// Input line
+	inputLine := m.d1Input.View()
+	if m.d1Querying {
+		inputLine = fmt.Sprintf("%s %s", m.spinner.View(), theme.DimStyle.Render("Running..."))
+	}
+
+	// Available lines for output (minus header, input, help)
+	outputHeight := height - 3
+	if outputHeight < 1 {
+		outputHeight = 1
+	}
+
+	// Build output lines, wrapped/truncated to width
+	var outputLines []string
+	for _, line := range m.d1Output {
+		// Truncate long lines to fit the pane width
+		if utf8.RuneCountInString(line) > width-1 {
+			runes := []rune(line)
+			line = string(runes[:width-2]) + "…"
+		}
+		outputLines = append(outputLines, line)
+	}
+
+	// Show most recent output that fits (scroll to bottom)
+	if len(outputLines) > outputHeight {
+		outputLines = outputLines[len(outputLines)-outputHeight:]
+	}
+
+	// Build the pane
+	lines := []string{header}
+
+	// Pad output to fill available space
+	for len(outputLines) < outputHeight {
+		outputLines = append([]string{""}, outputLines...)
+	}
+	lines = append(lines, outputLines...)
+	lines = append(lines, inputLine)
+	lines = append(lines, help)
+
+	// Ensure exact height
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+
+	return lines
+}
+
+// renderD1SchemaPane renders the schema diagram right pane as a list of lines.
+func (m Model) renderD1SchemaPane(width, height int) []string {
+	header := theme.D1SchemaTitleStyle.Render("Schema")
+
+	lines := []string{header}
+
+	if m.d1SchemaLoading {
+		lines = append(lines, fmt.Sprintf("%s %s", m.spinner.View(), theme.DimStyle.Render("Loading schema...")))
+	} else if m.d1Schema == "" {
+		lines = append(lines, theme.DimStyle.Render("No tables found"))
+	} else {
+		schemaLines := strings.Split(m.d1Schema, "\n")
+		for _, sl := range schemaLines {
+			if utf8.RuneCountInString(sl) > width-1 {
+				runes := []rune(sl)
+				sl = string(runes[:width-2]) + "…"
+			}
+			lines = append(lines, sl)
+		}
+	}
+
+	// Pad to exact height
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+
+	return lines
+}
+
+// joinSideBySide joins two panes (as line arrays) side by side with a divider.
+// leftWidth is used to pad left lines to a fixed column so the divider aligns.
+func joinSideBySide(left, right []string, divider string, leftWidth, height int) string {
+	var result []string
+	for i := 0; i < height; i++ {
+		l := ""
+		if i < len(left) {
+			l = left[i]
+		}
+		r := ""
+		if i < len(right) {
+			r = right[i]
+		}
+		// Pad left to fixed width using rune count for ANSI-safe padding
+		visLen := runeWidth(l)
+		if visLen < leftWidth {
+			l = l + strings.Repeat(" ", leftWidth-visLen)
+		}
+		result = append(result, l+divider+r)
+	}
+	return strings.Join(result, "\n")
+}
+
+// runeWidth returns the visible rune count of a string (approximate — doesn't strip ANSI).
+// For our use case, lipgloss-styled strings have ANSI sequences, so we use lipgloss.Width.
+func runeWidth(s string) int {
+	return lipgloss.Width(s)
 }
 
 // renderLogConsole renders the tail log console region.

@@ -107,4 +107,34 @@ var (
 	LogLevelSystem = lipgloss.NewStyle().
 			Foreground(ColorGray).
 			Italic(true)
+
+	// D1 SQL console styles
+	D1PromptStyle = lipgloss.NewStyle().
+			Foreground(ColorOrange).
+			Bold(true)
+
+	D1TableBorderStyle = lipgloss.NewStyle().
+				Foreground(ColorDarkGray)
+
+	D1MetaStyle = lipgloss.NewStyle().
+			Foreground(ColorGray).
+			Italic(true)
+
+	D1SchemaTitleStyle = lipgloss.NewStyle().
+				Foreground(ColorOrange).
+				Bold(true)
+
+	D1SchemaTableStyle = lipgloss.NewStyle().
+				Foreground(ColorWhite).
+				Bold(true)
+
+	D1SchemaColStyle = lipgloss.NewStyle().
+				Foreground(ColorGray)
+
+	D1SchemaTagStyle = lipgloss.NewStyle().
+				Foreground(ColorBlue).
+				Bold(true)
+
+	D1SchemaFKRefStyle = lipgloss.NewStyle().
+				Foreground(ColorOrangeDim)
 )

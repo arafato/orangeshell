@@ -17,12 +17,23 @@ type ResourceDetail struct {
 	Resource
 	Fields       []DetailField // Ordered list of key-value fields to display
 	ExtraContent string        // Optional multi-line content rendered below fields (e.g. schema diagram)
+	Bindings     []BindingInfo // Structured binding data (Workers only, for navigation)
 }
 
 // DetailField is a single labeled value in a detail view.
 type DetailField struct {
 	Label string
 	Value string
+}
+
+// BindingInfo describes a single resource binding on a Worker.
+type BindingInfo struct {
+	Name        string // JS variable name (e.g. "MY_KV")
+	Type        string // Raw binding type (e.g. "kv_namespace")
+	TypeDisplay string // Human-readable type (e.g. "KV Namespace")
+	Detail      string // Type-specific detail (e.g. "ns:abc123")
+	NavService  string // Target service name for navigation (empty if non-navigable)
+	NavResource string // Target resource ID for navigation
 }
 
 // Service defines the interface that every Cloudflare service integration must implement.

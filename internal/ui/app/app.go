@@ -14,6 +14,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/auth"
 	"github.com/oarafat/orangeshell/internal/config"
 	svc "github.com/oarafat/orangeshell/internal/service"
+	"github.com/oarafat/orangeshell/internal/ui/actions"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/search"
@@ -66,12 +67,14 @@ type Model struct {
 	keys    theme.KeyMap
 
 	// State
-	phase      Phase
-	focus      Focus
-	showSearch bool
-	cfg        *config.Config
-	client     *api.Client
-	registry   *svc.Registry
+	phase        Phase
+	focus        Focus
+	showSearch   bool
+	showActions  bool
+	actionsPopup actions.Model
+	cfg          *config.Config
+	client       *api.Client
+	registry     *svc.Registry
 
 	// Dimensions
 	width  int
@@ -378,6 +381,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showSearch = false
 		return m, nil
 
+	// Action popup messages
+	case actions.SelectMsg:
+		m.showActions = false
+		return m, m.handleActionSelect(msg.Item)
+
+	case actions.CloseMsg:
+		m.showActions = false
+		return m, nil
+
 	case spinner.TickMsg:
 		if m.detail.IsLoading() {
 			cmd := m.detail.UpdateSpinner(msg)
@@ -417,6 +429,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSearch(msg)
 	}
 
+	// If action popup is active, route everything there
+	if m.showActions {
+		return m.updateActions(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
 		// Forward mouse events to the detail panel regardless of focus (for copy-on-click)
@@ -441,6 +458,12 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmds...)
 			}
 			return m, nil
+		case "ctrl+p":
+			if m.detail.InDetailView() {
+				m.showActions = true
+				m.actionsPopup = m.buildActionsPopup()
+				return m, nil
+			}
 		case "]":
 			if m.header.NextAccount() {
 				return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
@@ -820,6 +843,94 @@ func (m *Model) stopTail() {
 	}()
 }
 
+// --- Action popup helpers ---
+
+// updateActions forwards messages to the action popup when it's active.
+func (m Model) updateActions(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.actionsPopup, cmd = m.actionsPopup.Update(msg)
+	return m, cmd
+}
+
+// buildActionsPopup creates the action popup for the current detail view.
+func (m Model) buildActionsPopup() actions.Model {
+	serviceName := m.detail.Service()
+	resourceName := m.detail.CurrentDetailName()
+	title := fmt.Sprintf("%s — Actions", resourceName)
+
+	var items []actions.Item
+
+	switch serviceName {
+	case "Workers":
+		items = m.buildWorkerActions()
+	default:
+		// Other services: no actions yet, but the framework is ready
+	}
+
+	return actions.New(title, items)
+}
+
+// buildWorkerActions builds the action items for a Worker detail view.
+func (m Model) buildWorkerActions() []actions.Item {
+	var items []actions.Item
+
+	// Actions section
+	tailLabel := "Start tail logs"
+	if m.detail.TailActive() {
+		tailLabel = "Stop tail logs"
+	}
+	items = append(items, actions.Item{
+		Label:   tailLabel,
+		Section: "Actions",
+		Action:  "tail_toggle",
+	})
+
+	// Bindings section
+	rd := m.detail.ResourceDetail()
+	if rd != nil && len(rd.Bindings) > 0 {
+		for _, b := range rd.Bindings {
+			items = append(items, actions.Item{
+				Label:       b.Name,
+				Description: b.TypeDisplay,
+				Section:     "Bindings",
+				NavService:  b.NavService,
+				NavResource: b.NavResource,
+				Disabled:    b.NavService == "",
+			})
+		}
+	}
+
+	return items
+}
+
+// handleActionSelect dispatches the selected action from the popup.
+func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
+	// Navigation to a bound resource
+	if item.NavService != "" && item.NavResource != "" {
+		return m.navigateTo(item.NavService, item.NavResource)
+	}
+
+	// Named actions
+	switch item.Action {
+	case "tail_toggle":
+		if m.detail.TailActive() || m.tailSession != nil {
+			// Stop tailing
+			m.stopTail()
+			m.detail.ClearTail()
+			return nil
+		}
+		// Start tailing
+		if m.detail.IsWorkersDetail() && m.client != nil {
+			scriptName := m.detail.CurrentDetailName()
+			accountID := m.registry.ActiveAccountID()
+			m.detail.SetTailStarting()
+			return m.startTailCmd(accountID, scriptName)
+		}
+	}
+
+	return nil
+}
+
 // View renders the full application.
 func (m Model) View() string {
 	switch m.phase {
@@ -835,6 +946,11 @@ func (m Model) viewDashboard() string {
 	// If search overlay is active, render it on top
 	if m.showSearch {
 		return m.search.View(m.width, m.height)
+	}
+
+	// If action popup is active, render it on top
+	if m.showActions {
+		return m.actionsPopup.View(m.width, m.height)
 	}
 
 	headerView := m.header.View()

@@ -71,22 +71,49 @@ func (s *WorkersService) List() ([]Resource, error) {
 	return resources, nil
 }
 
-// getSettings fetches worker settings with panic recovery.
-// The cloudflare-go/v6 SDK has a bug in its union deserializer for the Placement
-// field that panics on certain API responses. We recover from it gracefully.
-func (s *WorkersService) getSettings(ctx context.Context, id string) (settings *workers.ScriptScriptAndVersionSettingGetResponse, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			settings = nil
-			err = fmt.Errorf("SDK panic deserializing settings for %s (cloudflare-go/v6 bug): %v", id, r)
-		}
-	}()
+// safeSettingsResponse is a hand-rolled struct for the worker settings endpoint.
+// We use this instead of the SDK's generated type because the SDK has a bug in its
+// union deserializer for the Placement field that panics on certain API responses.
+// By using client.Get() with this struct, we bypass the buggy deserialization.
+type safeSettingsResponse struct {
+	Result safeSettings `json:"result"`
+}
 
-	settings, err = s.client.Workers.Scripts.ScriptAndVersionSettings.Get(ctx, id,
-		workers.ScriptScriptAndVersionSettingGetParams{
-			AccountID: cloudflare.F(s.accountID),
-		})
-	return
+type safeSettings struct {
+	Bindings           []safeBinding      `json:"bindings"`
+	CompatibilityDate  string             `json:"compatibility_date"`
+	CompatibilityFlags []string           `json:"compatibility_flags"`
+	TailConsumers      []safeTailConsumer `json:"tail_consumers"`
+}
+
+type safeBinding struct {
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	NamespaceID  string `json:"namespace_id,omitempty"`
+	ID           string `json:"id,omitempty"`
+	BucketName   string `json:"bucket_name,omitempty"`
+	ClassName    string `json:"class_name,omitempty"`
+	Service      string `json:"service,omitempty"`
+	QueueName    string `json:"queue_name,omitempty"`
+	Dataset      string `json:"dataset,omitempty"`
+	IndexName    string `json:"index_name,omitempty"`
+	WorkflowName string `json:"workflow_name,omitempty"`
+	Pipeline     string `json:"pipeline,omitempty"`
+}
+
+type safeTailConsumer struct {
+	Service string `json:"service"`
+}
+
+// getSettings fetches worker settings using a safe struct to avoid SDK deserialization panics.
+func (s *WorkersService) getSettings(ctx context.Context, id string) (*safeSettings, error) {
+	path := fmt.Sprintf("/accounts/%s/workers/scripts/%s/settings", s.accountID, id)
+	var resp safeSettingsResponse
+	err := s.client.Get(ctx, path, nil, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get settings for %s: %w", id, err)
+	}
+	return &resp.Result, nil
 }
 
 // Get fetches detailed info for a single worker by script name.
@@ -170,7 +197,7 @@ func (s *WorkersService) Get(id string) (*ResourceDetail, error) {
 		})
 	}
 
-	// Build detail fields from settings (may be nil if SDK panicked)
+	// Build detail fields from settings (may be nil if the API call failed)
 	if settings != nil {
 		if settings.CompatibilityDate != "" {
 			detail.Fields = append(detail.Fields, DetailField{
@@ -185,19 +212,12 @@ func (s *WorkersService) Get(id string) (*ResourceDetail, error) {
 			})
 		}
 
-		// Bindings — access safely since Placement union may be partially initialized
+		// Bindings — parse into structured data and also format for display
 		if len(settings.Bindings) > 0 {
+			detail.Bindings = parseBindings(settings.Bindings)
 			detail.Fields = append(detail.Fields, DetailField{
 				Label: "Bindings",
-				Value: formatBindings(settings.Bindings),
-			})
-		}
-
-		// Placement — guard against zero-value from partial deserialization
-		if settings.Placement.Mode.Mode != "" {
-			detail.Fields = append(detail.Fields, DetailField{
-				Label: "Placement",
-				Value: string(settings.Placement.Mode.Mode),
+				Value: formatBindingsFromInfo(detail.Bindings),
 			})
 		}
 
@@ -218,7 +238,7 @@ func (s *WorkersService) Get(id string) (*ResourceDetail, error) {
 	if settingsErr != nil {
 		detail.Fields = append(detail.Fields, DetailField{
 			Label: "Note",
-			Value: "Some settings unavailable (SDK deserialization issue)",
+			Value: fmt.Sprintf("Settings unavailable: %s", settingsErr),
 		})
 	}
 
@@ -249,38 +269,81 @@ func formatWorkerSummary(w workers.ScriptListResponse) string {
 	return strings.Join(parts, " | ")
 }
 
-func formatBindings(bindings []workers.ScriptScriptAndVersionSettingGetResponseBinding) string {
+// parseBindings converts safe binding structs into structured BindingInfo with navigation targets.
+func parseBindings(bindings []safeBinding) []BindingInfo {
+	var result []BindingInfo
+	for _, b := range bindings {
+		bi := BindingInfo{
+			Name: b.Name,
+			Type: b.Type,
+		}
+
+		switch bi.Type {
+		case "kv_namespace":
+			bi.TypeDisplay = "KV Namespace"
+			bi.Detail = fmt.Sprintf("ns:%s", b.NamespaceID)
+			bi.NavService = "KV"
+			bi.NavResource = b.NamespaceID
+		case "d1":
+			bi.TypeDisplay = "D1 Database"
+			bi.Detail = fmt.Sprintf("db:%s", b.ID)
+			bi.NavService = "D1"
+			bi.NavResource = b.ID
+		case "r2_bucket":
+			bi.TypeDisplay = "R2 Bucket"
+			bi.Detail = b.BucketName
+			bi.NavService = "R2"
+			bi.NavResource = b.BucketName
+		case "service":
+			bi.TypeDisplay = "Service Binding"
+			bi.Detail = b.Service
+			bi.NavService = "Workers"
+			bi.NavResource = b.Service
+		case "durable_object_namespace":
+			bi.TypeDisplay = "Durable Object"
+			bi.Detail = b.ClassName
+		case "queue":
+			bi.TypeDisplay = "Queue"
+			bi.Detail = b.QueueName
+		case "hyperdrive":
+			bi.TypeDisplay = "Hyperdrive"
+			bi.Detail = b.ID
+		case "ai":
+			bi.TypeDisplay = "Workers AI"
+			bi.Detail = "Workers AI"
+		case "analytics_engine":
+			bi.TypeDisplay = "Analytics Engine"
+			bi.Detail = b.Dataset
+		case "vectorize":
+			bi.TypeDisplay = "Vectorize"
+			bi.Detail = b.IndexName
+		case "secret_text":
+			bi.TypeDisplay = "Secret"
+			bi.Detail = "(value hidden)"
+		case "plain_text":
+			bi.TypeDisplay = "Plain Text"
+			bi.Detail = "(value hidden)"
+		case "workflow":
+			bi.TypeDisplay = "Workflow"
+			bi.Detail = b.WorkflowName
+		default:
+			bi.TypeDisplay = bi.Type
+			bi.Detail = bi.Type
+		}
+
+		result = append(result, bi)
+	}
+	return result
+}
+
+// formatBindingsFromInfo formats structured BindingInfo into a multi-line display string.
+func formatBindingsFromInfo(bindings []BindingInfo) string {
 	if len(bindings) == 0 {
 		return "(none)"
 	}
-
 	var lines []string
 	for _, b := range bindings {
-		bindingType := string(b.Type)
-		detail := ""
-		switch bindingType {
-		case "kv_namespace":
-			detail = fmt.Sprintf("ns:%s", b.NamespaceID)
-		case "d1":
-			detail = fmt.Sprintf("db:%s", b.ID)
-		case "r2_bucket":
-			detail = b.BucketName
-		case "durable_object_namespace":
-			detail = b.ClassName
-		case "service":
-			detail = b.Service
-		case "queue":
-			detail = b.QueueName
-		case "hyperdrive":
-			detail = b.ID
-		case "ai":
-			detail = "Workers AI"
-		case "secret_text", "plain_text":
-			detail = "(value hidden)"
-		default:
-			detail = bindingType
-		}
-		lines = append(lines, fmt.Sprintf("  %s [%s] %s", b.Name, bindingType, detail))
+		lines = append(lines, fmt.Sprintf("  %s [%s] %s", b.Name, b.Type, b.Detail))
 	}
 	return "\n" + strings.Join(lines, "\n")
 }

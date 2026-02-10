@@ -158,4 +158,21 @@ var (
 	// Copy icon style (for clickable ID/Name fields)
 	CopyIconStyle = lipgloss.NewStyle().
 			Foreground(ColorGray)
+
+	// Action popup styles
+	ActionSectionStyle = lipgloss.NewStyle().
+				Foreground(ColorOrange).
+				Bold(true)
+
+	ActionItemStyle = lipgloss.NewStyle().
+			Foreground(ColorWhite)
+
+	ActionDescStyle = lipgloss.NewStyle().
+			Foreground(ColorGray)
+
+	ActionDisabledStyle = lipgloss.NewStyle().
+				Foreground(ColorDarkGray)
+
+	ActionNavArrowStyle = lipgloss.NewStyle().
+				Foreground(ColorOrangeDim)
 )

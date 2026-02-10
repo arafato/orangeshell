@@ -412,6 +412,16 @@ func (m Model) CurrentDetailName() string {
 	return ""
 }
 
+// ResourceDetail returns the full resource detail, or nil if not loaded.
+func (m Model) ResourceDetail() *service.ResourceDetail {
+	return m.detail
+}
+
+// InDetailView returns true if the detail panel is in the detail drill-down view.
+func (m Model) InDetailView() bool {
+	return m.mode == viewDetail && m.detail != nil
+}
+
 // --- D1 SQL Console helpers ---
 
 // InitD1Console initializes the D1 SQL console for a database.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -113,7 +114,7 @@ func NewModel(cfg *config.Config) Model {
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
 	if m.phase == PhaseDashboard {
-		return m.initDashboardCmd()
+		return tea.Batch(m.initDashboardCmd(), m.detail.SpinnerInit())
 	}
 	return nil
 }
@@ -182,21 +183,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.registry.Register(r2Svc)
 
 		// Load resources for the initially selected service.
-		// Detail panel is already in loading state from NewLoading(), so just
-		// emit the load command directly.
 		serviceName := m.sidebar.SelectedService()
+		m.detail.SetService(serviceName)
 		loadCmd := tea.Cmd(func() tea.Msg {
 			return detail.LoadResourcesMsg{ServiceName: serviceName}
 		})
 
-		// Start the periodic background refresh ticker
+		// Start the periodic background refresh ticker and the spinner
 		tickCmd := m.scheduleRefreshTick()
 
-		var cmds []tea.Cmd
-		if loadCmd != nil {
-			cmds = append(cmds, loadCmd)
-		}
-		cmds = append(cmds, tickCmd)
+		cmds := []tea.Cmd{loadCmd, tickCmd, m.detail.SpinnerInit()}
 		return m, tea.Batch(cmds...)
 
 	case errMsg:
@@ -239,7 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadServiceResources(msg.ServiceName)
 
 	case detail.LoadDetailMsg:
-		return m, m.loadResourceDetail(msg.ServiceName, msg.ResourceID)
+		return m, tea.Batch(m.loadResourceDetail(msg.ServiceName, msg.ResourceID), m.detail.SpinnerInit())
 
 	case detail.DetailLoadedMsg:
 		// Staleness check: ignore if the user has switched services or resources
@@ -284,6 +280,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case search.CloseMsg:
 		m.showSearch = false
+		return m, nil
+
+	case spinner.TickMsg:
+		if m.detail.IsLoading() {
+			cmd := m.detail.UpdateSpinner(msg)
+			return m, cmd
+		}
 		return m, nil
 	}
 
@@ -428,9 +431,17 @@ func (m *Model) fetchUncachedForSearch() []tea.Cmd {
 func (m *Model) switchToService(name string) tea.Cmd {
 	entry := m.registry.GetCache(name)
 	if entry != nil {
-		return m.detail.SetServiceWithCache(name, entry.Resources)
+		cmd := m.detail.SetServiceWithCache(name, entry.Resources)
+		if m.detail.IsLoading() {
+			return tea.Batch(cmd, m.detail.SpinnerInit())
+		}
+		return cmd
 	}
-	return m.detail.SetService(name)
+	cmd := m.detail.SetService(name)
+	if cmd != nil {
+		return tea.Batch(cmd, m.detail.SpinnerInit())
+	}
+	return nil
 }
 
 // scheduleRefreshTick returns a command that sends a tickRefreshMsg after the refresh interval.

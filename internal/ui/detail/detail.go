@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/oarafat/orangeshell/internal/service"
@@ -78,11 +79,24 @@ type Model struct {
 
 	// Scroll offset for detail view
 	scrollOffset int
+
+	// Loading spinner
+	spinner spinner.Model
+}
+
+// newSpinner creates a styled spinner using the Dot style.
+func newSpinner() spinner.Model {
+	s := spinner.New()
+	s.Spinner = spinner.Points
+	s.Style = lipgloss.NewStyle().Foreground(theme.ColorOrange)
+	return s
 }
 
 // New creates a new detail panel model.
 func New() Model {
-	return Model{}
+	return Model{
+		spinner: newSpinner(),
+	}
 }
 
 // NewLoading creates a detail panel model pre-set to loading state for a service.
@@ -91,6 +105,7 @@ func NewLoading(serviceName string) Model {
 	return Model{
 		service: serviceName,
 		loading: true,
+		spinner: newSpinner(),
 	}
 }
 
@@ -234,6 +249,23 @@ func (m *Model) NavigateToDetail(resourceID string) {
 	m.scrollOffset = 0
 }
 
+// SpinnerInit returns the command to start the spinner ticking.
+func (m Model) SpinnerInit() tea.Cmd {
+	return m.spinner.Tick
+}
+
+// IsLoading returns whether the detail panel is in a loading state (spinner should run).
+func (m Model) IsLoading() bool {
+	return m.loading || m.detailLoading
+}
+
+// UpdateSpinner forwards a message to the embedded spinner and returns the updated model + cmd.
+func (m *Model) UpdateSpinner(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	m.spinner, cmd = m.spinner.Update(msg)
+	return cmd
+}
+
 // SelectedResource returns the currently highlighted resource, if any.
 func (m Model) SelectedResource() *service.Resource {
 	if m.mode == viewList && len(m.resources) > 0 && m.cursor < len(m.resources) {
@@ -370,7 +402,7 @@ func (m Model) viewList(maxHeight int) string {
 	}
 
 	if m.loading {
-		body := theme.DimStyle.Render("\n  Loading...")
+		body := fmt.Sprintf("\n  %s %s", m.spinner.View(), theme.DimStyle.Render("Loading resources..."))
 		return fmt.Sprintf("%s\n%s\n%s", title, sep, body)
 	}
 
@@ -444,7 +476,7 @@ func (m Model) viewList(maxHeight int) string {
 
 func (m Model) viewDetail(maxHeight int) string {
 	if m.detailLoading {
-		title := theme.TitleStyle.Render("  Loading...")
+		title := fmt.Sprintf("  %s %s", m.spinner.View(), theme.DimStyle.Render("Loading details..."))
 		return title
 	}
 

@@ -81,6 +81,11 @@ func (r *Registry) Get(name string) Service {
 	return r.services[name]
 }
 
+// ActiveAccountID returns the currently active account ID.
+func (r *Registry) ActiveAccountID() string {
+	return r.accountID
+}
+
 // Names returns all registered service names in order.
 func (r *Registry) Names() []string {
 	return r.order

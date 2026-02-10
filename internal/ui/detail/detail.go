@@ -29,6 +29,7 @@ type (
 	// ResourcesLoadedMsg carries the loaded resources back.
 	ResourcesLoadedMsg struct {
 		ServiceName   string
+		AccountID     string // account this response belongs to (for staleness checks)
 		Resources     []service.Resource
 		Err           error
 		NotIntegrated bool // true only when the service has no backend integration
@@ -48,6 +49,7 @@ type (
 	// BackgroundRefreshMsg carries updated resources from a background refresh.
 	BackgroundRefreshMsg struct {
 		ServiceName string
+		AccountID   string // account this response belongs to (for staleness checks)
 		Resources   []service.Resource
 		Err         error
 	}
@@ -128,6 +130,13 @@ func (m Model) Focused() bool {
 // Service returns the currently displayed service name (for staleness checks).
 func (m Model) Service() string {
 	return m.service
+}
+
+// ResetService clears the current service name so that a subsequent SetService or
+// SetServiceWithCache call for the same service name won't be skipped.
+// Used when switching accounts — the service name stays the same but the data changes.
+func (m *Model) ResetService() {
+	m.service = ""
 }
 
 // SetService updates which service to display. Resets state and triggers load.

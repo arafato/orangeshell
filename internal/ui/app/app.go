@@ -197,6 +197,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Service data messages
 	case detail.ResourcesLoadedMsg:
+		// Staleness check: discard responses from a different account
+		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+			return m, nil
+		}
 		// Cache the result regardless of which service is displayed
 		if msg.Err == nil && msg.Resources != nil {
 			m.registry.SetCache(msg.ServiceName, msg.Resources)
@@ -237,6 +241,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case detail.BackgroundRefreshMsg:
+		// Staleness check: discard responses from a different account
+		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+			return m, nil
+		}
 		// Cache the refreshed result
 		if msg.Err == nil && msg.Resources != nil {
 			m.registry.SetCache(msg.ServiceName, msg.Resources)
@@ -454,13 +462,15 @@ func (m Model) scheduleRefreshTick() tea.Cmd {
 
 // backgroundRefresh creates a command that fetches resources for a service in the background.
 // Returns a BackgroundRefreshMsg instead of ResourcesLoadedMsg to avoid interfering with
-// the normal load flow.
+// the normal load flow. Captures the current accountID so stale responses can be discarded.
 func (m Model) backgroundRefresh(serviceName string) tea.Cmd {
+	accountID := m.registry.ActiveAccountID()
 	return func() tea.Msg {
 		s := m.registry.Get(serviceName)
 		if s == nil {
 			return detail.BackgroundRefreshMsg{
 				ServiceName: serviceName,
+				AccountID:   accountID,
 				Resources:   nil,
 				Err:         nil,
 			}
@@ -469,6 +479,7 @@ func (m Model) backgroundRefresh(serviceName string) tea.Cmd {
 		resources, err := s.List()
 		return detail.BackgroundRefreshMsg{
 			ServiceName: serviceName,
+			AccountID:   accountID,
 			Resources:   resources,
 			Err:         err,
 		}
@@ -476,12 +487,15 @@ func (m Model) backgroundRefresh(serviceName string) tea.Cmd {
 }
 
 // loadServiceResources creates a command that fetches resources from a registered service.
+// Captures the current accountID so stale responses can be discarded.
 func (m Model) loadServiceResources(serviceName string) tea.Cmd {
+	accountID := m.registry.ActiveAccountID()
 	return func() tea.Msg {
 		s := m.registry.Get(serviceName)
 		if s == nil {
 			return detail.ResourcesLoadedMsg{
 				ServiceName:   serviceName,
+				AccountID:     accountID,
 				Resources:     nil,
 				Err:           nil,
 				NotIntegrated: true,
@@ -491,6 +505,7 @@ func (m Model) loadServiceResources(serviceName string) tea.Cmd {
 		resources, err := s.List()
 		return detail.ResourcesLoadedMsg{
 			ServiceName: serviceName,
+			AccountID:   accountID,
 			Resources:   resources,
 			Err:         err,
 		}
@@ -543,8 +558,9 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.cfg.AccountID = accountID
 	m.registerServices(accountID)
 
-	// Reset detail panel for the current sidebar service
+	// Force detail panel to accept new data even though the service name may be the same
 	serviceName := m.sidebar.SelectedService()
+	m.detail.ResetService()
 
 	// If we have cached data for this account+service, show it instantly
 	entry := m.registry.GetCache(serviceName)

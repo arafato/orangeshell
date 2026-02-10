@@ -167,16 +167,12 @@ func (s *D1Service) ExecuteQuery(id, sql string) (*D1QueryResult, error) {
 	}, nil
 }
 
-// QuerySchemaRendered introspects the database schema and returns a rendered tree diagram.
-func (s *D1Service) QuerySchemaRendered(id string) (string, error) {
+// QuerySchema introspects the database schema and returns structured table data.
+func (s *D1Service) QuerySchema(id string) ([]SchemaTable, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	tables, err := s.querySchema(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	return renderSchema(tables), nil
+	return s.querySchema(ctx, id)
 }
 
 // --- Query helpers ---
@@ -332,30 +328,30 @@ func formatFileSize(bytes float64) string {
 
 // --- D1 Schema Introspection ---
 
-// schemaTable represents a database table with its columns and foreign keys.
-type schemaTable struct {
+// SchemaTable represents a database table with its columns and foreign keys.
+type SchemaTable struct {
 	Name    string
-	Columns []schemaColumn
-	FKs     []schemaFK
+	Columns []SchemaColumn
+	FKs     []SchemaFK
 }
 
-// schemaColumn represents a single column in a table.
-type schemaColumn struct {
+// SchemaColumn represents a single column in a table.
+type SchemaColumn struct {
 	Name    string
 	Type    string
 	NotNull bool
 	PK      bool
 }
 
-// schemaFK represents a foreign key relationship.
-type schemaFK struct {
+// SchemaFK represents a foreign key relationship.
+type SchemaFK struct {
 	FromCol string
 	ToTable string
 	ToCol   string
 }
 
 // querySchema introspects a D1 database's schema by querying sqlite_master and PRAGMAs.
-func (s *D1Service) querySchema(ctx context.Context, databaseID string) ([]schemaTable, error) {
+func (s *D1Service) querySchema(ctx context.Context, databaseID string) ([]SchemaTable, error) {
 	// Step 1: Get all user table names
 	tableNames, err := s.queryD1(ctx, databaseID,
 		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name")
@@ -367,7 +363,7 @@ func (s *D1Service) querySchema(ctx context.Context, databaseID string) ([]schem
 		return nil, nil
 	}
 
-	var tables []schemaTable
+	var tables []SchemaTable
 
 	for _, row := range tableNames {
 		tableName, _ := row["name"].(string)
@@ -375,14 +371,14 @@ func (s *D1Service) querySchema(ctx context.Context, databaseID string) ([]schem
 			continue
 		}
 
-		table := schemaTable{Name: tableName}
+		table := SchemaTable{Name: tableName}
 
 		// Step 2: Get columns via PRAGMA table_info
 		colRows, err := s.queryD1(ctx, databaseID,
 			fmt.Sprintf("PRAGMA table_info('%s')", tableName))
 		if err == nil {
 			for _, cr := range colRows {
-				col := schemaColumn{
+				col := SchemaColumn{
 					Name: strVal(cr, "name"),
 					Type: strVal(cr, "type"),
 				}
@@ -401,7 +397,7 @@ func (s *D1Service) querySchema(ctx context.Context, databaseID string) ([]schem
 			fmt.Sprintf("PRAGMA foreign_key_list('%s')", tableName))
 		if err == nil {
 			for _, fr := range fkRows {
-				fk := schemaFK{
+				fk := SchemaFK{
 					FromCol: strVal(fr, "from"),
 					ToTable: strVal(fr, "table"),
 					ToCol:   strVal(fr, "to"),
@@ -469,7 +465,7 @@ func numVal(row map[string]interface{}, key string) float64 {
 }
 
 // renderSchema produces an ASCII tree diagram of the database schema.
-func renderSchema(tables []schemaTable) string {
+func renderSchema(tables []SchemaTable) string {
 	if len(tables) == 0 {
 		return "No tables found"
 	}

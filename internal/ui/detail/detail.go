@@ -94,10 +94,10 @@ type (
 	D1SchemaLoadMsg struct {
 		DatabaseID string
 	}
-	// D1SchemaLoadedMsg carries the rendered schema diagram.
+	// D1SchemaLoadedMsg carries the structured schema data.
 	D1SchemaLoadedMsg struct {
 		DatabaseID string
-		Schema     string
+		Tables     []service.SchemaTable
 		Err        error
 	}
 )
@@ -144,8 +144,9 @@ type Model struct {
 	d1DatabaseID string          // current database UUID
 
 	// D1 Schema pane state
-	d1Schema        string // rendered schema text (empty = not loaded)
-	d1SchemaLoading bool   // true while schema is being fetched
+	d1SchemaTables  []service.SchemaTable // structured schema data (nil = not loaded)
+	d1SchemaErr     string                // schema load error message
+	d1SchemaLoading bool                  // true while schema is being fetched
 
 	// Loading spinner
 	spinner spinner.Model
@@ -388,7 +389,8 @@ func (m *Model) InitD1Console(databaseID string) tea.Cmd {
 	m.d1DatabaseID = databaseID
 	m.d1Output = nil
 	m.d1Querying = false
-	m.d1Schema = ""
+	m.d1SchemaTables = nil
+	m.d1SchemaErr = ""
 	m.d1SchemaLoading = true
 
 	ti := textinput.New()
@@ -412,13 +414,15 @@ func (m Model) D1Active() bool {
 	return m.d1Active
 }
 
-// SetD1Schema sets the schema content for the D1 detail view.
-func (m *Model) SetD1Schema(schema string, err error) {
+// SetD1Schema sets the schema data for the D1 detail view.
+func (m *Model) SetD1Schema(tables []service.SchemaTable, err error) {
 	m.d1SchemaLoading = false
 	if err != nil {
-		m.d1Schema = fmt.Sprintf("Error: %s", err)
+		m.d1SchemaErr = err.Error()
+		m.d1SchemaTables = nil
 	} else {
-		m.d1Schema = schema
+		m.d1SchemaErr = ""
+		m.d1SchemaTables = tables
 	}
 }
 
@@ -450,7 +454,8 @@ func (m *Model) ClearD1() {
 	m.d1Output = nil
 	m.d1Querying = false
 	m.d1DatabaseID = ""
-	m.d1Schema = ""
+	m.d1SchemaTables = nil
+	m.d1SchemaErr = ""
 	m.d1SchemaLoading = false
 	m.d1Input.Blur()
 }
@@ -1049,7 +1054,7 @@ func (m Model) renderD1SQLConsole(width, height int) []string {
 	return lines
 }
 
-// renderD1SchemaPane renders the schema diagram right pane as a list of lines.
+// renderD1SchemaPane renders the schema diagram right pane with syntax coloring.
 func (m Model) renderD1SchemaPane(width, height int) []string {
 	header := theme.D1SchemaTitleStyle.Render("Schema")
 
@@ -1057,17 +1062,12 @@ func (m Model) renderD1SchemaPane(width, height int) []string {
 
 	if m.d1SchemaLoading {
 		lines = append(lines, fmt.Sprintf("%s %s", m.spinner.View(), theme.DimStyle.Render("Loading schema...")))
-	} else if m.d1Schema == "" {
+	} else if m.d1SchemaErr != "" {
+		lines = append(lines, theme.ErrorStyle.Render(fmt.Sprintf("Error: %s", m.d1SchemaErr)))
+	} else if len(m.d1SchemaTables) == 0 {
 		lines = append(lines, theme.DimStyle.Render("No tables found"))
 	} else {
-		schemaLines := strings.Split(m.d1Schema, "\n")
-		for _, sl := range schemaLines {
-			if utf8.RuneCountInString(sl) > width-1 {
-				runes := []rune(sl)
-				sl = string(runes[:width-2]) + "…"
-			}
-			lines = append(lines, sl)
-		}
+		lines = append(lines, m.renderSchemaStyled(m.d1SchemaTables)...)
 	}
 
 	// Pad to exact height
@@ -1076,6 +1076,100 @@ func (m Model) renderD1SchemaPane(width, height int) []string {
 	}
 	if len(lines) > height {
 		lines = lines[:height]
+	}
+
+	return lines
+}
+
+// renderSchemaStyled renders structured schema data with per-element syntax coloring.
+// Returns a slice of styled lines ready for display.
+func (m Model) renderSchemaStyled(tables []service.SchemaTable) []string {
+	var lines []string
+
+	// Build a global FK list for the relations summary at the bottom
+	var allFKs []string
+
+	for ti, t := range tables {
+		// Table name header
+		lines = append(lines, theme.D1SchemaTableNameStyle.Render(t.Name))
+
+		// Build FK lookup for this table
+		fkMap := make(map[string]string)
+		for _, fk := range t.FKs {
+			ref := fmt.Sprintf("-> %s.%s", fk.ToTable, fk.ToCol)
+			fkMap[fk.FromCol] = ref
+			allFKs = append(allFKs, fmt.Sprintf("%s.%s -> %s.%s", t.Name, fk.FromCol, fk.ToTable, fk.ToCol))
+		}
+
+		// Calculate max column name width for alignment
+		maxNameLen := 0
+		for _, c := range t.Columns {
+			if len(c.Name) > maxNameLen {
+				maxNameLen = len(c.Name)
+			}
+		}
+		if maxNameLen < 4 {
+			maxNameLen = 4
+		}
+
+		for i, c := range t.Columns {
+			// Branch character
+			branchChar := "├─"
+			if i == len(t.Columns)-1 {
+				branchChar = "└─"
+			}
+			branch := theme.D1SchemaBranchStyle.Render(branchChar)
+
+			// Tag: PK, FK, or blank
+			var tag string
+			if c.PK {
+				tag = theme.D1SchemaPKTagStyle.Render("PK")
+			} else if _, isFK := fkMap[c.Name]; isFK {
+				tag = theme.D1SchemaFKTagStyle.Render("FK")
+			} else {
+				tag = "  "
+			}
+
+			// Column name (padded for alignment)
+			paddedName := fmt.Sprintf("%-*s", maxNameLen, c.Name)
+			colName := theme.D1SchemaColNameStyle.Render(paddedName)
+
+			// Column type
+			colType := c.Type
+			if colType == "" {
+				colType = "ANY"
+			}
+			colTypeStyled := theme.D1SchemaColTypeStyle.Render(fmt.Sprintf("%-8s", colType))
+
+			// NOT NULL constraint (skip for PKs since they're implicitly NOT NULL)
+			notNull := ""
+			if c.NotNull && !c.PK {
+				notNull = " " + theme.D1SchemaNotNullStyle.Render("NOT NULL")
+			}
+
+			// FK reference
+			fkRef := ""
+			if ref, ok := fkMap[c.Name]; ok {
+				fkRef = "  " + theme.D1SchemaFKRefStyle.Render(ref)
+			}
+
+			line := fmt.Sprintf("%s %s %s  %s%s%s", branch, tag, colName, colTypeStyled, notNull, fkRef)
+			lines = append(lines, line)
+		}
+
+		// Blank line between tables (but not after the last one before relations)
+		if ti < len(tables)-1 {
+			lines = append(lines, "")
+		}
+	}
+
+	// Relations summary
+	if len(allFKs) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, theme.D1SchemaTableNameStyle.Render("Relations"))
+		for _, fk := range allFKs {
+			lines = append(lines, theme.D1SchemaRelationStyle.Render("  "+fk))
+		}
 	}
 
 	return lines

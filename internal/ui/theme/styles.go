@@ -124,17 +124,34 @@ var (
 				Foreground(ColorOrange).
 				Bold(true)
 
-	D1SchemaTableStyle = lipgloss.NewStyle().
-				Foreground(ColorWhite).
+	D1SchemaTableNameStyle = lipgloss.NewStyle().
+				Foreground(ColorOrange).
 				Bold(true)
 
-	D1SchemaColStyle = lipgloss.NewStyle().
-				Foreground(ColorGray)
+	D1SchemaColNameStyle = lipgloss.NewStyle().
+				Foreground(ColorWhite)
 
-	D1SchemaTagStyle = lipgloss.NewStyle().
-				Foreground(ColorBlue).
+	D1SchemaColTypeStyle = lipgloss.NewStyle().
+				Foreground(ColorBlue)
+
+	D1SchemaPKTagStyle = lipgloss.NewStyle().
+				Foreground(ColorGreen).
 				Bold(true)
+
+	D1SchemaFKTagStyle = lipgloss.NewStyle().
+				Foreground(ColorOrangeDim).
+				Bold(true)
+
+	D1SchemaNotNullStyle = lipgloss.NewStyle().
+				Foreground(ColorRed)
 
 	D1SchemaFKRefStyle = lipgloss.NewStyle().
-				Foreground(ColorOrangeDim)
+				Foreground(ColorOrangeDim).
+				Italic(true)
+
+	D1SchemaBranchStyle = lipgloss.NewStyle().
+				Foreground(ColorDarkGray)
+
+	D1SchemaRelationStyle = lipgloss.NewStyle().
+				Foreground(ColorGray)
 )

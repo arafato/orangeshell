@@ -332,7 +332,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.DatabaseID != m.detail.D1DatabaseID() {
 			return m, nil
 		}
-		m.detail.SetD1Schema(msg.Schema, msg.Err)
+		m.detail.SetD1Schema(msg.Tables, msg.Err)
 		return m, nil
 
 	case tickRefreshMsg:
@@ -725,8 +725,8 @@ func (m Model) loadD1Schema(databaseID string) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		schema, err := d1Svc.QuerySchemaRendered(databaseID)
-		return detail.D1SchemaLoadedMsg{DatabaseID: databaseID, Schema: schema, Err: err}
+		tables, err := d1Svc.QuerySchema(databaseID)
+		return detail.D1SchemaLoadedMsg{DatabaseID: databaseID, Tables: tables, Err: err}
 	}
 }
 

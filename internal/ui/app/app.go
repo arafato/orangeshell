@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -51,6 +52,9 @@ type errMsg struct {
 // tickRefreshMsg fires periodically to trigger background refresh of all services.
 type tickRefreshMsg struct{}
 
+// toastExpireMsg fires after the toast display duration to clear the toast.
+type toastExpireMsg struct{}
+
 // Model is the root Bubble Tea model that composes all UI components.
 type Model struct {
 	// Submodels
@@ -78,6 +82,10 @@ type Model struct {
 
 	// Active tail session (nil when no tail is running)
 	tailSession *svc.TailSession
+
+	// Toast notification
+	toastMsg    string
+	toastExpiry time.Time
 }
 
 // NewModel creates the root model. If config is already set up, skips to dashboard.
@@ -335,6 +343,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail.SetD1Schema(msg.Tables, msg.Err)
 		return m, nil
 
+	case detail.CopyToClipboardMsg:
+		_ = clipboard.WriteAll(msg.Text)
+		m.toastMsg = "Copied to clipboard"
+		m.toastExpiry = time.Now().Add(2 * time.Second)
+		return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+			return toastExpireMsg{}
+		})
+
+	case toastExpireMsg:
+		if time.Now().After(m.toastExpiry) {
+			m.toastMsg = ""
+		}
+		return m, nil
+
 	case tickRefreshMsg:
 		if m.phase != PhaseDashboard || m.client == nil {
 			return m, nil
@@ -396,6 +418,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		// Forward mouse events to the detail panel regardless of focus (for copy-on-click)
+		var cmd tea.Cmd
+		m.detail, cmd = m.detail.Update(msg)
+		return m, cmd
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
@@ -495,6 +522,8 @@ func (m *Model) layout() {
 	m.header.SetWidth(m.width)
 	m.sidebar.SetSize(sidebarWidth, contentHeight)
 	m.detail.SetSize(detailWidth, contentHeight)
+	// Detail content starts after: header(1) + top border(1) = 2 rows from top of terminal
+	m.detail.SetYOffset(headerHeight + 1)
 }
 
 // fetchUncachedForSearch triggers background fetches for all registered services
@@ -815,16 +844,18 @@ func (m Model) viewDashboard() string {
 	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, detailView)
 	helpText := m.renderHelp()
 
-	errView := ""
-	if m.err != nil {
-		errView = "\n" + theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s ", m.err.Error()))
+	statusView := ""
+	if m.toastMsg != "" && time.Now().Before(m.toastExpiry) {
+		statusView = "\n" + theme.SuccessStyle.Render(fmt.Sprintf(" ✓ %s ", m.toastMsg))
+	} else if m.err != nil {
+		statusView = "\n" + theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s ", m.err.Error()))
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		headerView,
 		content,
 		helpText,
-		errView,
+		statusView,
 	)
 }
 

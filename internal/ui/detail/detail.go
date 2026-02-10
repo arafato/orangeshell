@@ -100,6 +100,11 @@ type (
 		Tables     []service.SchemaTable
 		Err        error
 	}
+
+	// CopyToClipboardMsg requests the app to copy text to the system clipboard.
+	CopyToClipboardMsg struct {
+		Text string
+	}
 )
 
 // Model represents the right-side detail panel.
@@ -150,6 +155,30 @@ type Model struct {
 
 	// Loading spinner
 	spinner spinner.Model
+
+	// Copy-on-click state
+	yOffset     int            // absolute Y of content area start (set by app)
+	copyTargets map[int]string // relative content Y → text to copy
+}
+
+// isCopyableLabel returns true if a detail field label should get a copy icon.
+func isCopyableLabel(label string) bool {
+	switch label {
+	case "Database ID", "Namespace ID", "Name", "Title", "Bucket Name":
+		return true
+	}
+	return false
+}
+
+// copyIcon returns the styled copy icon appended to copyable values.
+func copyIcon() string {
+	return " " + theme.CopyIconStyle.Render("⧉")
+}
+
+// SetYOffset sets the absolute Y coordinate of the detail content start.
+// Called by the app after layout to enable mouse click → copy target mapping.
+func (m *Model) SetYOffset(y int) {
+	m.yOffset = y
 }
 
 // newSpinner creates a styled spinner using the Dot style.
@@ -163,7 +192,8 @@ func newSpinner() spinner.Model {
 // New creates a new detail panel model.
 func New() Model {
 	return Model{
-		spinner: newSpinner(),
+		spinner:     newSpinner(),
+		copyTargets: make(map[int]string),
 	}
 }
 
@@ -171,9 +201,10 @@ func New() Model {
 // This avoids showing "Select a service" during initial authentication.
 func NewLoading(serviceName string) Model {
 	return Model{
-		service: serviceName,
-		loading: true,
-		spinner: newSpinner(),
+		service:     serviceName,
+		loading:     true,
+		spinner:     newSpinner(),
+		copyTargets: make(map[int]string),
 	}
 }
 
@@ -497,6 +528,19 @@ func (m Model) SelectedResource() *service.Resource {
 
 // Update handles events for the detail panel.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	// Handle mouse clicks for copy-on-click regardless of focus
+	if mouseMsg, ok := msg.(tea.MouseMsg); ok {
+		if mouseMsg.Button == tea.MouseButtonLeft && mouseMsg.Action == tea.MouseActionPress {
+			relY := mouseMsg.Y - m.yOffset
+			if text, found := m.copyTargets[relY]; found {
+				return m, func() tea.Msg {
+					return CopyToClipboardMsg{Text: text}
+				}
+			}
+		}
+		return m, nil
+	}
+
 	if !m.focused {
 		return m, nil
 	}
@@ -656,6 +700,12 @@ func (m Model) calcMaxScroll() int {
 
 // View renders the detail panel.
 func (m Model) View() string {
+	// Clear copy targets for this render cycle (map is a reference type,
+	// so writes from a value receiver mutate the underlying map).
+	for k := range m.copyTargets {
+		delete(m.copyTargets, k)
+	}
+
 	borderStyle := theme.BorderStyle
 	if m.focused {
 		borderStyle = theme.ActiveBorderStyle
@@ -784,7 +834,7 @@ func (m Model) viewDetail(maxHeight int) string {
 	}
 
 	d := m.detail
-	title := theme.TitleStyle.Render(fmt.Sprintf("  %s", d.Name))
+	title := theme.TitleStyle.Render(fmt.Sprintf("  %s", d.Name)) + copyIcon()
 	sepWidth := m.width - 6
 	if sepWidth < 0 {
 		sepWidth = 0
@@ -792,21 +842,33 @@ func (m Model) viewDetail(maxHeight int) string {
 	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
 		fmt.Sprintf(" %s", strings.Repeat("─", sepWidth)))
 
+	// Track which allLines indices are copyable: index → raw text to copy
+	copyLineMap := make(map[int]string)
+
+	// Title is line 0, always copyable (resource name)
+	copyLineMap[0] = d.Name
+
 	var fieldLines []string
 	for _, f := range d.Fields {
 		label := theme.LabelStyle.Render(fmt.Sprintf("  %-16s", f.Label))
 		value := theme.ValueStyle.Render(f.Value)
-		fieldLines = append(fieldLines, fmt.Sprintf("%s %s", label, value))
+		line := fmt.Sprintf("%s %s", label, value)
+		if isCopyableLabel(f.Label) {
+			line += copyIcon()
+			// Field lines start at allLines index 2 (title=0, sep=1)
+			copyLineMap[2+len(fieldLines)] = f.Value
+		}
+		fieldLines = append(fieldLines, line)
 	}
 
 	// For Workers, split layout: fields on top, log console on bottom
 	if m.service == "Workers" {
-		return m.viewDetailWithTail(maxHeight, title, sep, fieldLines)
+		return m.viewDetailWithTail(maxHeight, title, sep, fieldLines, copyLineMap)
 	}
 
 	// For D1, split layout: SQL console on left, schema on right
 	if m.service == "D1" && m.d1Active {
-		return m.viewDetailWithD1(maxHeight, title, sep, fieldLines)
+		return m.viewDetailWithD1(maxHeight, title, sep, fieldLines, copyLineMap)
 	}
 
 	// Other services: original layout
@@ -841,13 +903,17 @@ func (m Model) viewDetail(maxHeight int) string {
 	if endIdx > len(allLines) {
 		endIdx = len(allLines)
 	}
+
+	// Register copy targets for visible lines only
+	m.registerCopyTargets(copyLineMap, offset, endIdx)
+
 	visible := allLines[offset:endIdx]
 
 	return strings.Join(visible, "\n")
 }
 
 // viewDetailWithTail renders a split layout: detail fields on top, log console on bottom.
-func (m Model) viewDetailWithTail(maxHeight int, title, sep string, fieldLines []string) string {
+func (m Model) viewDetailWithTail(maxHeight int, title, sep string, fieldLines []string, copyLineMap map[int]string) string {
 	// Calculate layout split: fields get ~60%, log console gets ~40%
 	logConsoleHeight := maxHeight * 40 / 100
 	if logConsoleHeight < 5 {
@@ -881,6 +947,9 @@ func (m Model) viewDetailWithTail(maxHeight int, title, sep string, fieldLines [
 	}
 	visibleFields := fieldContent[offset:endIdx]
 
+	// Register copy targets for visible field lines
+	m.registerCopyTargets(copyLineMap, offset, endIdx)
+
 	// Pad fields region to exact height
 	for len(visibleFields) < fieldsHeight {
 		visibleFields = append(visibleFields, "")
@@ -895,11 +964,11 @@ func (m Model) viewDetailWithTail(maxHeight int, title, sep string, fieldLines [
 // viewDetailWithD1 renders the D1 detail layout:
 // - Top: title + separator + compact metadata (2 rows)
 // - Bottom: left (SQL console) | right (schema pane)
-func (m Model) viewDetailWithD1(maxHeight int, title, sep string, fieldLines []string) string {
+func (m Model) viewDetailWithD1(maxHeight int, title, sep string, fieldLines []string, copyLineMap map[int]string) string {
 	// -- Top region: title + sep + compact metadata --
 	// Render metadata as 2 compact rows instead of 7 individual lines
 	topLines := []string{title, sep}
-	topLines = append(topLines, m.renderD1CompactFields()...)
+	topLines = append(topLines, m.renderD1CompactFields(copyLineMap)...)
 
 	metaHeight := len(topLines)
 
@@ -934,11 +1003,16 @@ func (m Model) viewDetailWithD1(maxHeight int, title, sep string, fieldLines []s
 	divider := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render("│")
 	splitPane := joinSideBySide(leftPane, rightPane, divider, leftWidth, paneHeight)
 
+	// Register copy targets for the top metadata lines (always visible, no scroll)
+	m.registerCopyTargets(copyLineMap, 0, len(topLines))
+
 	return strings.Join(topLines, "\n") + "\n" + splitPane
 }
 
 // renderD1CompactFields renders metadata as 2 compact rows.
-func (m Model) renderD1CompactFields() []string {
+// copyLineMap is populated with the topLines index → text for copyable values.
+// The compact rows start at topLines index 2 (after title=0, sep=1).
+func (m Model) renderD1CompactFields(copyLineMap map[int]string) []string {
 	if m.detail == nil {
 		return nil
 	}
@@ -952,8 +1026,8 @@ func (m Model) renderD1CompactFields() []string {
 	// Row 1: Database ID, Name, Version
 	row1Parts := []string{}
 	if v, ok := fieldMap["Database ID"]; ok {
-		row1Parts = append(row1Parts, fmt.Sprintf("%s %s",
-			theme.LabelStyle.Render("ID"), theme.ValueStyle.Render(truncateRunes(v, 16))))
+		row1Parts = append(row1Parts, fmt.Sprintf("%s %s%s",
+			theme.LabelStyle.Render("ID"), theme.ValueStyle.Render(v), copyIcon()))
 	}
 	if v, ok := fieldMap["Name"]; ok {
 		row1Parts = append(row1Parts, fmt.Sprintf("%s %s",
@@ -990,6 +1064,10 @@ func (m Model) renderD1CompactFields() []string {
 	var rows []string
 	if len(row1Parts) > 0 {
 		rows = append(rows, "  "+strings.Join(row1Parts, "   "))
+		// Row 1 is at topLines index 2 (title=0, sep=1) — copy the Database ID
+		if v, ok := fieldMap["Database ID"]; ok {
+			copyLineMap[2] = v
+		}
 	}
 	if len(row2Parts) > 0 {
 		rows = append(rows, "  "+strings.Join(row2Parts, "   "))
@@ -1173,6 +1251,19 @@ func (m Model) renderSchemaStyled(tables []service.SchemaTable) []string {
 	}
 
 	return lines
+}
+
+// registerCopyTargets maps allLines indices (within the visible range) to
+// absolute Y screen coordinates in the copyTargets map.
+// copyLineMap: allLines index → raw text to copy.
+// visStart/visEnd: the range of allLines indices currently visible on screen.
+func (m Model) registerCopyTargets(copyLineMap map[int]string, visStart, visEnd int) {
+	for idx, text := range copyLineMap {
+		if idx >= visStart && idx < visEnd {
+			screenY := idx - visStart // relative to content area top
+			m.copyTargets[screenY] = text
+		}
+	}
 }
 
 // joinSideBySide joins two panes (as line arrays) side by side with a divider.

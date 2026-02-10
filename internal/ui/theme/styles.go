@@ -154,4 +154,8 @@ var (
 
 	D1SchemaRelationStyle = lipgloss.NewStyle().
 				Foreground(ColorGray)
+
+	// Copy icon style (for clickable ID/Name fields)
+	CopyIconStyle = lipgloss.NewStyle().
+			Foreground(ColorGray)
 )

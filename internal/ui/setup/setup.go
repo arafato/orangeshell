@@ -182,6 +182,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 func (m Model) handleAuthMethodKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
+	case "q":
+		return m, tea.Quit
 	case "up", "k":
 		if m.authChoice > 0 {
 			m.authChoice--
@@ -432,7 +434,7 @@ func (m Model) viewAuthMethod() string {
 		s += cursor + style.Render(label) + "\n"
 	}
 
-	s += "\n" + theme.DimStyle.Render("up/down to select, enter to confirm")
+	s += "\n" + theme.DimStyle.Render("up/down select  |  enter confirm  |  q quit")
 
 	if m.err != nil {
 		s += "\n\n" + theme.ErrorStyle.Render(m.err.Error())

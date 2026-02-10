@@ -3,6 +3,7 @@ package detail
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -53,6 +54,28 @@ type (
 		Resources   []service.Resource
 		Err         error
 	}
+
+	// Tail-related messages
+
+	// TailStartMsg requests the app to start tailing a Worker's logs.
+	TailStartMsg struct {
+		ScriptName string
+		AccountID  string
+	}
+	// TailStartedMsg indicates a tail session was created successfully.
+	TailStartedMsg struct {
+		Session *service.TailSession
+	}
+	// TailLogMsg carries new log lines from the websocket.
+	TailLogMsg struct {
+		Lines []service.TailLine
+	}
+	// TailErrorMsg indicates tail creation/connection failed.
+	TailErrorMsg struct {
+		Err error
+	}
+	// TailStoppedMsg indicates the tail was stopped (cleanup complete).
+	TailStoppedMsg struct{}
 )
 
 // Model represents the right-side detail panel.
@@ -81,6 +104,13 @@ type Model struct {
 
 	// Scroll offset for detail view
 	scrollOffset int
+
+	// Tail state (Workers live logs)
+	tailLines    []service.TailLine
+	tailActive   bool
+	tailStarting bool // true while waiting for TailStartedMsg
+	tailScroll   int  // scroll offset within log console (0 = pinned to bottom)
+	tailError    string
 
 	// Loading spinner
 	spinner spinner.Model
@@ -248,6 +278,73 @@ func (m *Model) SetDetail(detail *service.ResourceDetail, err error) {
 	m.scrollOffset = 0
 }
 
+// TailActive returns whether a tail session is active.
+func (m Model) TailActive() bool {
+	return m.tailActive
+}
+
+// SetTailStarting marks the tail as starting (waiting for session creation).
+func (m *Model) SetTailStarting() {
+	m.tailStarting = true
+	m.tailError = ""
+}
+
+// SetTailStarted marks the tail session as active.
+func (m *Model) SetTailStarted() {
+	m.tailActive = true
+	m.tailStarting = false
+	m.tailLines = nil
+	m.tailScroll = 0
+	m.tailError = ""
+}
+
+// AppendTailLines adds new lines to the tail buffer.
+func (m *Model) AppendTailLines(lines []service.TailLine) {
+	m.tailLines = append(m.tailLines, lines...)
+	if len(m.tailLines) > 200 {
+		m.tailLines = m.tailLines[len(m.tailLines)-200:]
+	}
+	// Auto-scroll to bottom if the user hasn't scrolled up
+	if m.tailScroll == 0 {
+		// tailScroll == 0 means "pinned to bottom" (no manual scroll offset)
+	}
+}
+
+// SetTailError records a tail error message.
+func (m *Model) SetTailError(err error) {
+	m.tailStarting = false
+	m.tailError = err.Error()
+}
+
+// SetTailStopped clears tail state.
+func (m *Model) SetTailStopped() {
+	m.tailActive = false
+	m.tailStarting = false
+	m.tailScroll = 0
+}
+
+// ClearTail resets all tail state (used on navigation away).
+func (m *Model) ClearTail() {
+	m.tailActive = false
+	m.tailStarting = false
+	m.tailLines = nil
+	m.tailScroll = 0
+	m.tailError = ""
+}
+
+// IsWorkersDetail returns true if we're viewing a Workers resource detail.
+func (m Model) IsWorkersDetail() bool {
+	return m.mode == viewDetail && m.service == "Workers"
+}
+
+// CurrentDetailName returns the name of the currently displayed detail resource.
+func (m Model) CurrentDetailName() string {
+	if m.detail != nil {
+		return m.detail.Name
+	}
+	return ""
+}
+
 // NavigateToDetail switches directly to the detail view for a resource (used by search).
 func (m *Model) NavigateToDetail(resourceID string) {
 	m.mode = viewDetail
@@ -265,7 +362,7 @@ func (m Model) SpinnerInit() tea.Cmd {
 
 // IsLoading returns whether the detail panel is in a loading state (spinner should run).
 func (m Model) IsLoading() bool {
-	return m.loading || m.detailLoading
+	return m.loading || m.detailLoading || m.tailStarting
 }
 
 // UpdateSpinner forwards a message to the embedded spinner and returns the updated model + cmd.
@@ -332,12 +429,34 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "backspace":
+		// If tail is active, signal the app to stop it
+		needStopTail := m.tailActive || m.tailStarting
 		m.mode = viewList
 		m.detail = nil
 		m.detailErr = nil
 		m.detailID = ""
 		m.scrollOffset = 0
+		m.ClearTail()
+		if needStopTail {
+			return m, func() tea.Msg { return TailStoppedMsg{} }
+		}
 		return m, nil
+	case "t":
+		// Only available in Workers detail view
+		if m.service != "Workers" || m.detail == nil {
+			return m, nil
+		}
+		if m.tailActive || m.tailStarting {
+			// Stop tailing
+			m.ClearTail()
+			return m, func() tea.Msg { return TailStoppedMsg{} }
+		}
+		// Start tailing
+		m.SetTailStarting()
+		scriptName := m.detail.Name
+		return m, func() tea.Msg {
+			return TailStartMsg{ScriptName: scriptName}
+		}
 	case "up", "k":
 		if m.scrollOffset > 0 {
 			m.scrollOffset--
@@ -515,14 +634,18 @@ func (m Model) viewDetail(maxHeight int) string {
 		fieldLines = append(fieldLines, fmt.Sprintf("%s %s", label, value))
 	}
 
+	// For Workers, split layout: fields on top, log console on bottom
+	if m.service == "Workers" {
+		return m.viewDetailWithTail(maxHeight, title, sep, fieldLines)
+	}
+
+	// Non-Workers: original layout
 	help := "\n" + theme.DimStyle.Render("  esc/backspace back  |  j/k scroll")
 
-	// Combine all lines
 	allLines := []string{title, sep}
 	allLines = append(allLines, fieldLines...)
 	allLines = append(allLines, help)
 
-	// Apply scroll offset (clamped)
 	visibleHeight := maxHeight
 	if visibleHeight < 1 {
 		visibleHeight = 1
@@ -542,6 +665,165 @@ func (m Model) viewDetail(maxHeight int) string {
 	visible := allLines[offset:endIdx]
 
 	return strings.Join(visible, "\n")
+}
+
+// viewDetailWithTail renders a split layout: detail fields on top, log console on bottom.
+func (m Model) viewDetailWithTail(maxHeight int, title, sep string, fieldLines []string) string {
+	// Calculate layout split: fields get ~60%, log console gets ~40%
+	logConsoleHeight := maxHeight * 40 / 100
+	if logConsoleHeight < 5 {
+		logConsoleHeight = 5
+	}
+	fieldsHeight := maxHeight - logConsoleHeight
+	if fieldsHeight < 3 {
+		fieldsHeight = 3
+	}
+
+	// -- Upper region: detail fields --
+	fieldContent := []string{title, sep}
+	fieldContent = append(fieldContent, fieldLines...)
+
+	// Apply scroll to fields
+	visibleFieldsH := fieldsHeight
+	if visibleFieldsH > len(fieldContent) {
+		visibleFieldsH = len(fieldContent)
+	}
+	maxFieldScroll := len(fieldContent) - fieldsHeight
+	if maxFieldScroll < 0 {
+		maxFieldScroll = 0
+	}
+	offset := m.scrollOffset
+	if offset > maxFieldScroll {
+		offset = maxFieldScroll
+	}
+	endIdx := offset + fieldsHeight
+	if endIdx > len(fieldContent) {
+		endIdx = len(fieldContent)
+	}
+	visibleFields := fieldContent[offset:endIdx]
+
+	// Pad fields region to exact height
+	for len(visibleFields) < fieldsHeight {
+		visibleFields = append(visibleFields, "")
+	}
+
+	// -- Lower region: log console --
+	logLines := m.renderLogConsole(logConsoleHeight)
+
+	return strings.Join(visibleFields, "\n") + "\n" + strings.Join(logLines, "\n")
+}
+
+// renderLogConsole renders the tail log console region.
+func (m Model) renderLogConsole(height int) []string {
+	sepWidth := m.width - 6
+	if sepWidth < 0 {
+		sepWidth = 0
+	}
+	consoleSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
+		fmt.Sprintf(" %s", strings.Repeat("─", sepWidth)))
+
+	// Header line
+	var headerText string
+	if m.tailActive {
+		headerText = theme.LogConsoleHeaderStyle.Render("  ▸ Live Logs (tailing)")
+	} else if m.tailStarting {
+		headerText = fmt.Sprintf("  %s %s", m.spinner.View(), theme.DimStyle.Render("Connecting to tail..."))
+	} else {
+		headerText = theme.DimStyle.Render("  ▹ Live Logs")
+	}
+
+	// Help line at the bottom
+	var helpText string
+	if m.tailActive {
+		helpText = theme.DimStyle.Render("  esc back  |  t stop tail  |  j/k scroll")
+	} else {
+		helpText = theme.DimStyle.Render("  esc back  |  t start tail  |  j/k scroll")
+	}
+
+	lines := []string{consoleSep, headerText}
+
+	// Available lines for log content (minus sep, header, help)
+	contentHeight := height - 3
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+
+	if m.tailError != "" {
+		errLine := theme.ErrorStyle.Render(fmt.Sprintf("  Error: %s", m.tailError))
+		lines = append(lines, errLine)
+		for len(lines) < height-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, helpText)
+		return lines
+	}
+
+	if !m.tailActive && !m.tailStarting {
+		hint := theme.DimStyle.Render("  Press t to start tailing logs")
+		lines = append(lines, hint)
+		for len(lines) < height-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, helpText)
+		return lines
+	}
+
+	if len(m.tailLines) == 0 {
+		waiting := theme.DimStyle.Render("  Waiting for log events...")
+		lines = append(lines, waiting)
+		for len(lines) < height-1 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, helpText)
+		return lines
+	}
+
+	// Render log lines with level-based coloring
+	var logRendered []string
+	for _, tl := range m.tailLines {
+		ts := theme.LogTimestampStyle.Render(tl.Timestamp.Format(time.TimeOnly))
+		text := m.styleTailLine(tl)
+		logRendered = append(logRendered, fmt.Sprintf("  %s %s", ts, text))
+	}
+
+	// Show the most recent lines that fit, respecting tailScroll
+	totalLogLines := len(logRendered)
+	// tailScroll == 0 means pinned to bottom (show most recent)
+	startLine := totalLogLines - contentHeight - m.tailScroll
+	if startLine < 0 {
+		startLine = 0
+	}
+	endLine := startLine + contentHeight
+	if endLine > totalLogLines {
+		endLine = totalLogLines
+	}
+
+	visible := logRendered[startLine:endLine]
+	lines = append(lines, visible...)
+
+	// Pad to fill remaining space
+	for len(lines) < height-1 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, helpText)
+
+	return lines
+}
+
+// styleTailLine applies level-based coloring to a tail line's text.
+func (m Model) styleTailLine(tl service.TailLine) string {
+	switch tl.Level {
+	case "warn":
+		return theme.LogLevelWarn.Render(tl.Text)
+	case "error", "exception":
+		return theme.LogLevelError.Render(tl.Text)
+	case "request":
+		return theme.LogLevelRequest.Render(tl.Text)
+	case "system":
+		return theme.LogLevelSystem.Render(tl.Text)
+	default: // "log", "info"
+		return theme.LogLevelLog.Render(tl.Text)
+	}
 }
 
 // truncateRunes truncates a string to maxLen runes, appending "..." if needed.

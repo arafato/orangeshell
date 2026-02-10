@@ -12,6 +12,7 @@ type KeyMap struct {
 	Search      key.Binding
 	PrevAccount key.Binding
 	NextAccount key.Binding
+	Tail        key.Binding
 	Quit        key.Binding
 	Help        key.Binding
 	Escape      key.Binding
@@ -52,6 +53,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("]"),
 			key.WithHelp("[/]", "account"),
 		),
+		Tail: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("t", "tail"),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -69,13 +74,13 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns key bindings shown in the mini help bar.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Enter, k.Tab, k.Search, k.PrevAccount, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Enter, k.Tab, k.Search, k.Tail, k.PrevAccount, k.Quit}
 }
 
 // FullHelp returns all key bindings for the expanded help view.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Enter, k.Back},
-		{k.Tab, k.Search, k.PrevAccount, k.Help, k.Quit},
+		{k.Tab, k.Search, k.Tail, k.PrevAccount, k.Help, k.Quit},
 	}
 }

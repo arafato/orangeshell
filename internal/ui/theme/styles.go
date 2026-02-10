@@ -78,4 +78,33 @@ var (
 
 	NormalItemStyle = lipgloss.NewStyle().
 			Foreground(ColorWhite)
+
+	// Log console styles (Workers tail)
+	LogConsoleBg = lipgloss.Color("#111111")
+
+	LogConsoleStyle = lipgloss.NewStyle().
+			Background(LogConsoleBg)
+
+	LogConsoleHeaderStyle = lipgloss.NewStyle().
+				Foreground(ColorOrange).
+				Bold(true)
+
+	LogTimestampStyle = lipgloss.NewStyle().
+				Foreground(ColorGray)
+
+	LogLevelLog = lipgloss.NewStyle().
+			Foreground(ColorWhite)
+
+	LogLevelWarn = lipgloss.NewStyle().
+			Foreground(ColorOrange)
+
+	LogLevelError = lipgloss.NewStyle().
+			Foreground(ColorRed)
+
+	LogLevelRequest = lipgloss.NewStyle().
+			Foreground(ColorBlue)
+
+	LogLevelSystem = lipgloss.NewStyle().
+			Foreground(ColorGray).
+			Italic(true)
 )

@@ -75,6 +75,9 @@ type Model struct {
 
 	// Error display
 	err error
+
+	// Active tail session (nil when no tail is running)
+	tailSession *svc.TailSession
 }
 
 // NewModel creates the root model. If config is already set up, skips to dashboard.
@@ -267,6 +270,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Tail lifecycle messages
+	case detail.TailStartMsg:
+		if m.client == nil {
+			return m, nil
+		}
+		m.detail.SetTailStarting()
+		accountID := m.registry.ActiveAccountID()
+		return m, m.startTailCmd(accountID, msg.ScriptName)
+
+	case detail.TailStartedMsg:
+		m.tailSession = msg.Session
+		m.detail.SetTailStarted()
+		return m, m.waitForTailLines()
+
+	case detail.TailLogMsg:
+		if m.tailSession == nil {
+			return m, nil
+		}
+		m.detail.AppendTailLines(msg.Lines)
+		// Continue polling for more lines
+		return m, m.waitForTailLines()
+
+	case detail.TailErrorMsg:
+		m.detail.SetTailError(msg.Err)
+		m.tailSession = nil
+		return m, nil
+
+	case detail.TailStoppedMsg:
+		m.stopTail()
+		return m, nil
+
 	case tickRefreshMsg:
 		if m.phase != PhaseDashboard || m.client == nil {
 			return m, nil
@@ -445,6 +479,10 @@ func (m *Model) fetchUncachedForSearch() []tea.Cmd {
 
 // switchToService handles switching to a service, using cached data if available.
 func (m *Model) switchToService(name string) tea.Cmd {
+	// Stop any active tail session when switching services
+	m.stopTail()
+	m.detail.ClearTail()
+
 	entry := m.registry.GetCache(name)
 	if entry != nil {
 		cmd := m.detail.SetServiceWithCache(name, entry.Resources)
@@ -562,6 +600,10 @@ func (m *Model) registerServices(accountID string) {
 // new accountID, loads the currently selected sidebar service, and shows cached data
 // instantly if we've visited this account before.
 func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
+	// Stop any active tail session
+	m.stopTail()
+	m.detail.ClearTail()
+
 	m.cfg.AccountID = accountID
 	m.registerServices(accountID)
 
@@ -617,6 +659,55 @@ func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
 	m.detail.SetFocused(true)
 
 	return tea.Batch(loadCmd, detailCmd)
+}
+
+// --- Tail lifecycle helpers ---
+
+// startTailCmd returns a command that creates a tail session via the API.
+func (m Model) startTailCmd(accountID, scriptName string) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		ctx := context.Background()
+		session, err := svc.StartTail(ctx, client.CF, accountID, scriptName)
+		if err != nil {
+			return detail.TailErrorMsg{Err: err}
+		}
+		return detail.TailStartedMsg{Session: session}
+	}
+}
+
+// waitForTailLines returns a command that blocks on the tail session's channel
+// and returns a TailLogMsg when new lines arrive.
+func (m Model) waitForTailLines() tea.Cmd {
+	session := m.tailSession
+	if session == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		lines, ok := <-session.LinesChan()
+		if !ok {
+			// Channel closed — tail ended
+			return detail.TailStoppedMsg{}
+		}
+		return detail.TailLogMsg{Lines: lines}
+	}
+}
+
+// stopTail closes the active tail session and cleans up.
+func (m *Model) stopTail() {
+	if m.tailSession == nil {
+		return
+	}
+	// Stop in a background goroutine to avoid blocking the UI
+	session := m.tailSession
+	client := m.client
+	m.tailSession = nil
+	m.detail.SetTailStopped()
+
+	go func() {
+		ctx := context.Background()
+		svc.StopTail(ctx, client.CF, session)
+	}()
 }
 
 // View renders the full application.

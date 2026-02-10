@@ -58,6 +58,12 @@ type tickRefreshMsg struct{}
 // toastExpireMsg fires after the toast display duration to clear the toast.
 type toastExpireMsg struct{}
 
+// bindingIndexBuiltMsg carries a newly built binding index from the background.
+type bindingIndexBuiltMsg struct {
+	index     *svc.BindingIndex
+	accountID string
+}
+
 // Model is the root Bubble Tea model that composes all UI components.
 type Model struct {
 	// Submodels
@@ -228,11 +234,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil && msg.Resources != nil {
 			m.registry.SetCache(msg.ServiceName, msg.Resources)
 		}
+		// When Workers list loads, build the binding index in the background
+		var indexCmd tea.Cmd
+		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
+			indexCmd = m.buildBindingIndexCmd()
+		}
 		// Staleness check: ignore if the user has already switched services
 		if msg.ServiceName != m.detail.Service() {
 			// Still update search items even if not the active service
 			if msg.Err == nil {
 				m.search.SetItems(m.registry.AllSearchItems())
+			}
+			if indexCmd != nil {
+				return m, indexCmd
 			}
 			return m, nil
 		}
@@ -240,6 +254,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update search items after loading
 		if msg.Err == nil {
 			m.search.SetItems(m.registry.AllSearchItems())
+		}
+		if indexCmd != nil {
+			return m, indexCmd
 		}
 		return m, nil
 
@@ -259,6 +276,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Staleness check: ignore if the user has switched services or resources
 		if msg.ServiceName != m.detail.Service() {
 			return m, nil
+		}
+		// Enrich non-Workers detail with bound worker references
+		if msg.Err == nil && msg.Detail != nil && msg.ServiceName != "Workers" {
+			m.enrichDetailWithBoundWorkers(msg.Detail, msg.ServiceName, msg.ResourceID)
 		}
 		m.detail.SetDetail(msg.Detail, msg.Err)
 		// If this is a D1 detail, initialize the SQL console and load schema async
@@ -286,6 +307,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.search.SetItems(m.registry.AllSearchItems())
 		if m.showSearch {
 			m.search.DecrementFetching()
+		}
+		// Rebuild binding index when Workers list is refreshed
+		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
+			return m, m.buildBindingIndexCmd()
 		}
 		return m, nil
 
@@ -372,6 +397,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.backgroundRefresh(name))
 		}
 		return m, tea.Batch(cmds...)
+
+	case bindingIndexBuiltMsg:
+		// Staleness check: discard if account changed
+		if msg.accountID != m.registry.ActiveAccountID() {
+			return m, nil
+		}
+		m.registry.SetBindingIndex(msg.index)
+		return m, nil
 
 	// Search messages
 	case search.NavigateMsg:
@@ -594,6 +627,35 @@ func (m Model) scheduleRefreshTick() tea.Cmd {
 	})
 }
 
+// buildBindingIndexCmd returns a command that fetches settings for all Workers and builds
+// a reverse binding index. This runs in the background after Workers are listed.
+func (m Model) buildBindingIndexCmd() tea.Cmd {
+	accountID := m.registry.ActiveAccountID()
+	workersSvc := m.getWorkersService()
+	if workersSvc == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		idx := workersSvc.BuildBindingIndex()
+		return bindingIndexBuiltMsg{
+			index:     idx,
+			accountID: accountID,
+		}
+	}
+}
+
+// getWorkersService retrieves the WorkersService from the registry (type-asserted).
+func (m Model) getWorkersService() *svc.WorkersService {
+	s := m.registry.Get("Workers")
+	if s == nil {
+		return nil
+	}
+	if ws, ok := s.(*svc.WorkersService); ok {
+		return ws
+	}
+	return nil
+}
+
 // backgroundRefresh creates a command that fetches resources for a service in the background.
 // Returns a BackgroundRefreshMsg instead of ResourcesLoadedMsg to avoid interfering with
 // the normal load flow. Captures the current accountID so stale responses can be discarded.
@@ -796,6 +858,41 @@ func (m Model) getD1Service() *svc.D1Service {
 	return nil
 }
 
+// enrichDetailWithBoundWorkers appends a "Worker(s)" field to a resource detail
+// if any Workers reference this resource via bindings. Also populates the detail's
+// Bindings field with reverse references so the action popup can navigate to them.
+func (m Model) enrichDetailWithBoundWorkers(detail *svc.ResourceDetail, serviceName, resourceID string) {
+	idx := m.registry.GetBindingIndex()
+	if idx == nil {
+		return
+	}
+	bound := idx.Lookup(serviceName, resourceID)
+	if len(bound) == 0 {
+		return
+	}
+
+	// Build display value: comma-separated worker names
+	var names []string
+	for _, bw := range bound {
+		names = append(names, fmt.Sprintf("%s (as %s)", bw.ScriptName, bw.BindingName))
+	}
+	detail.Fields = append(detail.Fields, svc.DetailField{
+		Label: "Worker(s)",
+		Value: strings.Join(names, ", "),
+	})
+
+	// Store as reverse bindings so the action popup can navigate to them
+	for _, bw := range bound {
+		detail.Bindings = append(detail.Bindings, svc.BindingInfo{
+			Name:        bw.ScriptName,
+			Type:        "worker_ref",
+			TypeDisplay: fmt.Sprintf("bound as %s", bw.BindingName),
+			NavService:  "Workers",
+			NavResource: bw.ScriptName,
+		})
+	}
+}
+
 // --- Tail lifecycle helpers ---
 
 // startTailCmd returns a command that creates a tail session via the API.
@@ -865,8 +962,8 @@ func (m Model) buildActionsPopup() actions.Model {
 	switch serviceName {
 	case "Workers":
 		items = m.buildWorkerActions()
-	default:
-		// Other services: no actions yet, but the framework is ready
+	case "KV", "R2", "D1":
+		items = m.buildBoundWorkersActions()
 	}
 
 	return actions.New(title, items)
@@ -898,6 +995,33 @@ func (m Model) buildWorkerActions() []actions.Item {
 				NavService:  b.NavService,
 				NavResource: b.NavResource,
 				Disabled:    b.NavService == "",
+			})
+		}
+	}
+
+	return items
+}
+
+// buildBoundWorkersActions builds the action items for KV/R2/D1 detail views,
+// showing a "Workers" section with navigable links to Workers that bind to this resource.
+func (m Model) buildBoundWorkersActions() []actions.Item {
+	var items []actions.Item
+
+	rd := m.detail.ResourceDetail()
+	if rd == nil {
+		return items
+	}
+
+	// The Bindings field was populated by enrichDetailWithBoundWorkers
+	// with reverse references of type "worker_ref"
+	for _, b := range rd.Bindings {
+		if b.NavService == "Workers" {
+			items = append(items, actions.Item{
+				Label:       b.Name,
+				Description: b.TypeDisplay,
+				Section:     "Workers",
+				NavService:  b.NavService,
+				NavResource: b.NavResource,
 			})
 		}
 	}

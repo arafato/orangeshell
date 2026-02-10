@@ -252,6 +252,62 @@ func (s *WorkersService) SearchItems() []Resource {
 	return s.cached
 }
 
+// BuildBindingIndex fetches settings for all cached workers and builds a
+// reverse binding index. Calls getSettings concurrently for speed.
+func (s *WorkersService) BuildBindingIndex() *BindingIndex {
+	s.mu.Lock()
+	workerIDs := make([]string, len(s.cached))
+	for i, r := range s.cached {
+		workerIDs[i] = r.ID
+	}
+	s.mu.Unlock()
+
+	if len(workerIDs) == 0 {
+		return NewBindingIndex()
+	}
+
+	type result struct {
+		scriptName string
+		bindings   []BindingInfo
+	}
+
+	ch := make(chan result, len(workerIDs))
+	var wg sync.WaitGroup
+
+	for _, id := range workerIDs {
+		wg.Add(1)
+		go func(scriptName string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			settings, err := s.getSettings(ctx, scriptName)
+			if err != nil || settings == nil || len(settings.Bindings) == 0 {
+				return
+			}
+			ch <- result{
+				scriptName: scriptName,
+				bindings:   parseBindings(settings.Bindings),
+			}
+		}(id)
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	idx := NewBindingIndex()
+	for r := range ch {
+		for _, b := range r.bindings {
+			if b.NavService != "" && b.NavResource != "" {
+				idx.Add(b.NavService, b.NavResource, r.scriptName, b.Name)
+			}
+		}
+	}
+
+	return idx
+}
+
 func formatWorkerSummary(w workers.ScriptListResponse) string {
 	parts := []string{}
 

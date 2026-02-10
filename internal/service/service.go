@@ -36,6 +36,40 @@ type BindingInfo struct {
 	NavResource string // Target resource ID for navigation
 }
 
+// BoundWorker represents a Worker that references a resource via a binding.
+type BoundWorker struct {
+	ScriptName  string // Worker script name (= its Resource.ID)
+	BindingName string // JS variable name used in the worker code (e.g. "MY_KV")
+}
+
+// BindingIndex is a reverse lookup from resources to the Workers that bind to them.
+// Key format: "ServiceName:ResourceID" (e.g. "KV:abc-123-uuid").
+type BindingIndex struct {
+	index map[string][]BoundWorker
+}
+
+// NewBindingIndex creates an empty binding index.
+func NewBindingIndex() *BindingIndex {
+	return &BindingIndex{index: make(map[string][]BoundWorker)}
+}
+
+// Add records that a Worker binds to a resource.
+func (bi *BindingIndex) Add(serviceName, resourceID, scriptName, bindingName string) {
+	key := serviceName + ":" + resourceID
+	bi.index[key] = append(bi.index[key], BoundWorker{
+		ScriptName:  scriptName,
+		BindingName: bindingName,
+	})
+}
+
+// Lookup returns all Workers that bind to the given resource, or nil.
+func (bi *BindingIndex) Lookup(serviceName, resourceID string) []BoundWorker {
+	if bi == nil {
+		return nil
+	}
+	return bi.index[serviceName+":"+resourceID]
+}
+
 // Service defines the interface that every Cloudflare service integration must implement.
 type Service interface {
 	// Name returns the display name of the service (e.g. "Workers").
@@ -69,13 +103,17 @@ type Registry struct {
 
 	// Per-account caches: accountID → serviceName → CacheEntry
 	accountCaches map[string]map[string]*CacheEntry
+
+	// Per-account binding indexes: accountID → BindingIndex
+	bindingIndexes map[string]*BindingIndex
 }
 
 // NewRegistry creates an empty service registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		services:      make(map[string]Service),
-		accountCaches: make(map[string]map[string]*CacheEntry),
+		services:       make(map[string]Service),
+		accountCaches:  make(map[string]map[string]*CacheEntry),
+		bindingIndexes: make(map[string]*BindingIndex),
 	}
 }
 
@@ -166,6 +204,16 @@ func (r *Registry) AllSearchItems() []Resource {
 		}
 	}
 	return all
+}
+
+// GetBindingIndex returns the binding index for the active account, or nil.
+func (r *Registry) GetBindingIndex() *BindingIndex {
+	return r.bindingIndexes[r.accountID]
+}
+
+// SetBindingIndex stores a binding index for the active account.
+func (r *Registry) SetBindingIndex(idx *BindingIndex) {
+	r.bindingIndexes[r.accountID] = idx
 }
 
 // HasCacheForAccount returns whether any cached data exists for the given account.

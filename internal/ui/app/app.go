@@ -27,6 +27,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
+	"github.com/oarafat/orangeshell/version"
 )
 
 const refreshInterval = 30 * time.Second
@@ -2383,6 +2384,16 @@ func (m Model) renderHelp() string {
 		}
 		help += p
 	}
+
+	// Right-align the version string
+	ver := theme.DimStyle.Render(version.GetVersion())
+	helpWidth := ansi.StringWidth(help)
+	verWidth := ansi.StringWidth(ver)
+	gap := m.width - helpWidth - verWidth - 4 // 4 for HelpBarStyle padding
+	if gap < 2 {
+		gap = 2
+	}
+	help += strings.Repeat(" ", gap) + ver
 
 	return theme.HelpBarStyle.Render(help)
 }

@@ -411,6 +411,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, name := range m.registry.RegisteredNames() {
 			cmds = append(cmds, m.backgroundRefresh(name))
 		}
+		// Also refresh wrangler deployment data in background
+		if m.wrangler.IsMonorepo() {
+			if cmd := m.fetchAllProjectDeployments(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		} else if cfg := m.wrangler.Config(); cfg != nil {
+			if cmd := m.fetchSingleProjectDeployments(cfg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 		return m, tea.Batch(cmds...)
 
 	case bindingIndexBuiltMsg:
@@ -438,6 +448,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Always update (even on error) so DeploymentFetched gets set and
 		// the UI can show "Currently not deployed" instead of nothing.
 		m.wrangler.SetEnvDeployment(msg.EnvName, msg.Deployment, msg.Subdomain)
+		// Cache the deployment data in the registry for instant restore on account switch-back.
+		// Cache both successful responses and errors (worker not found = "not deployed").
+		if msg.ScriptName != "" {
+			m.registry.SetDeploymentCache(msg.ScriptName, displayToDeploymentInfo(msg.Deployment), msg.Subdomain)
+		}
 		return m, nil
 
 	case uiwrangler.ProjectsDiscoveredMsg:
@@ -452,6 +467,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Always update so DeploymentFetched gets set
 		m.wrangler.SetProjectDeployment(msg.ProjectIndex, msg.EnvName, msg.Deployment, msg.Subdomain)
+		// Cache the deployment data in the registry.
+		// Cache both successful responses and errors (worker not found = "not deployed").
+		if msg.ScriptName != "" {
+			m.registry.SetDeploymentCache(msg.ScriptName, displayToDeploymentInfo(msg.Deployment), msg.Subdomain)
+		}
 		return m, nil
 
 	case uiwrangler.TailStartMsg:
@@ -966,8 +986,9 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	// Update search items with whatever is cached for this account
 	m.search.SetItems(m.registry.AllSearchItems())
 
-	// Clear stale deployment data and re-fetch for the new account
+	// Clear stale deployment data, restore from cache if available, then refresh in background
 	m.wrangler.ClearDeployments()
+	m.restoreDeploymentsFromCache()
 	var deployCmd tea.Cmd
 	if m.wrangler.IsMonorepo() {
 		deployCmd = m.fetchAllProjectDeployments()
@@ -1268,9 +1289,11 @@ func (m Model) fetchEnvDeployment(workersSvc *svc.WorkersService, accountID, env
 		dep, err := workersSvc.GetActiveDeployment(scriptName)
 		if err != nil {
 			return uiwrangler.EnvDeploymentLoadedMsg{
-				AccountID: accountID,
-				EnvName:   envName,
-				Err:       err,
+				AccountID:  accountID,
+				EnvName:    envName,
+				ScriptName: scriptName,
+				Subdomain:  subdomain,
+				Err:        err,
 			}
 		}
 
@@ -1295,8 +1318,89 @@ func (m Model) fetchEnvDeployment(workersSvc *svc.WorkersService, accountID, env
 		return uiwrangler.EnvDeploymentLoadedMsg{
 			AccountID:  accountID,
 			EnvName:    envName,
+			ScriptName: scriptName,
 			Deployment: display,
 			Subdomain:  subdomain,
+		}
+	}
+}
+
+// displayToDeploymentInfo converts a UI DeploymentDisplay back to a service DeploymentInfo for caching.
+// Returns nil if the display is nil or has no versions.
+func displayToDeploymentInfo(d *uiwrangler.DeploymentDisplay) *svc.DeploymentInfo {
+	if d == nil || len(d.Versions) == 0 {
+		return nil
+	}
+	info := &svc.DeploymentInfo{}
+	for _, v := range d.Versions {
+		info.Versions = append(info.Versions, svc.DeploymentVersionInfo{
+			VersionID:  v.ShortID,
+			Percentage: v.Percentage,
+		})
+	}
+	return info
+}
+
+// deploymentInfoToDisplay converts a cached DeploymentInfo to a UI DeploymentDisplay.
+// Returns nil if the info is nil or has no versions.
+func deploymentInfoToDisplay(info *svc.DeploymentInfo, scriptName, subdomain string) *uiwrangler.DeploymentDisplay {
+	if info == nil || len(info.Versions) == 0 {
+		return nil
+	}
+	display := &uiwrangler.DeploymentDisplay{}
+	for _, v := range info.Versions {
+		shortID := v.VersionID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		display.Versions = append(display.Versions, uiwrangler.VersionSplit{
+			ShortID:    shortID,
+			Percentage: v.Percentage,
+		})
+	}
+	if subdomain != "" {
+		display.URL = fmt.Sprintf("https://%s.%s.workers.dev", scriptName, subdomain)
+	}
+	return display
+}
+
+// restoreDeploymentsFromCache populates the wrangler UI with cached deployment data
+// for the active account. Called on account switch for instant display while background
+// refresh fetches fresh data.
+func (m *Model) restoreDeploymentsFromCache() {
+	caches := m.registry.GetAllDeploymentCaches()
+	if len(caches) == 0 {
+		return
+	}
+
+	if m.wrangler.IsMonorepo() {
+		// Restore into ProjectBoxes
+		for i, pc := range m.wrangler.ProjectConfigs() {
+			if pc.Config == nil {
+				continue
+			}
+			for _, envName := range pc.Config.EnvNames() {
+				scriptName := pc.Config.ResolvedEnvName(envName)
+				if scriptName == "" {
+					continue
+				}
+				if entry, ok := caches[scriptName]; ok {
+					display := deploymentInfoToDisplay(entry.Deployment, scriptName, entry.Subdomain)
+					m.wrangler.SetProjectDeployment(i, envName, display, entry.Subdomain)
+				}
+			}
+		}
+	} else if cfg := m.wrangler.Config(); cfg != nil {
+		// Restore into EnvBoxes
+		for _, envName := range cfg.EnvNames() {
+			scriptName := cfg.ResolvedEnvName(envName)
+			if scriptName == "" {
+				continue
+			}
+			if entry, ok := caches[scriptName]; ok {
+				display := deploymentInfoToDisplay(entry.Deployment, scriptName, entry.Subdomain)
+				m.wrangler.SetEnvDeployment(envName, display, entry.Subdomain)
+			}
 		}
 	}
 }
@@ -1315,6 +1419,8 @@ func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, accountID 
 				AccountID:    accountID,
 				ProjectIndex: projectIdx,
 				EnvName:      envName,
+				ScriptName:   scriptName,
+				Subdomain:    subdomain,
 				Err:          err,
 			}
 		}
@@ -1341,6 +1447,7 @@ func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, accountID 
 			AccountID:    accountID,
 			ProjectIndex: projectIdx,
 			EnvName:      envName,
+			ScriptName:   scriptName,
 			Deployment:   display,
 			Subdomain:    subdomain,
 		}

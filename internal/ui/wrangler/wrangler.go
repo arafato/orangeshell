@@ -73,6 +73,7 @@ type ProjectDeploymentLoadedMsg struct {
 	AccountID    string // for staleness check on account switch
 	ProjectIndex int
 	EnvName      string
+	ScriptName   string // worker script name (cache key)
 	Deployment   *DeploymentDisplay
 	Subdomain    string
 	Err          error
@@ -82,6 +83,7 @@ type ProjectDeploymentLoadedMsg struct {
 type EnvDeploymentLoadedMsg struct {
 	AccountID  string // for staleness check on account switch
 	EnvName    string
+	ScriptName string // worker script name (cache key)
 	Deployment *DeploymentDisplay
 	Subdomain  string
 	Err        error

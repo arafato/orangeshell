@@ -93,6 +93,14 @@ type CacheEntry struct {
 	FetchedAt time.Time
 }
 
+// DeploymentCacheEntry holds cached deployment info for a single worker script.
+// DeploymentInfo and DeploymentVersionInfo types are defined in workers.go.
+type DeploymentCacheEntry struct {
+	Deployment *DeploymentInfo // nil means "not deployed" on this account
+	Subdomain  string          // account's workers.dev subdomain
+	FetchedAt  time.Time
+}
+
 // Registry holds all registered service implementations, keyed by sidebar name,
 // and an in-memory session cache of resource lists per service per account.
 // Caches are retained across account switches so switching back is instant.
@@ -104,6 +112,9 @@ type Registry struct {
 	// Per-account caches: accountID → serviceName → CacheEntry
 	accountCaches map[string]map[string]*CacheEntry
 
+	// Per-account deployment caches: accountID → scriptName → DeploymentCacheEntry
+	deploymentCaches map[string]map[string]*DeploymentCacheEntry
+
 	// Per-account binding indexes: accountID → BindingIndex
 	bindingIndexes map[string]*BindingIndex
 }
@@ -111,9 +122,10 @@ type Registry struct {
 // NewRegistry creates an empty service registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		services:       make(map[string]Service),
-		accountCaches:  make(map[string]map[string]*CacheEntry),
-		bindingIndexes: make(map[string]*BindingIndex),
+		services:         make(map[string]Service),
+		accountCaches:    make(map[string]map[string]*CacheEntry),
+		deploymentCaches: make(map[string]map[string]*DeploymentCacheEntry),
+		bindingIndexes:   make(map[string]*BindingIndex),
 	}
 }
 
@@ -220,4 +232,33 @@ func (r *Registry) SetBindingIndex(idx *BindingIndex) {
 func (r *Registry) HasCacheForAccount(accountID string) bool {
 	c, ok := r.accountCaches[accountID]
 	return ok && len(c) > 0
+}
+
+// deploymentCache returns the deployment cache map for the active account.
+func (r *Registry) deploymentCache() map[string]*DeploymentCacheEntry {
+	c, ok := r.deploymentCaches[r.accountID]
+	if !ok {
+		c = make(map[string]*DeploymentCacheEntry)
+		r.deploymentCaches[r.accountID] = c
+	}
+	return c
+}
+
+// GetDeploymentCache returns the cached deployment for a script in the active account, or nil.
+func (r *Registry) GetDeploymentCache(scriptName string) *DeploymentCacheEntry {
+	return r.deploymentCache()[scriptName]
+}
+
+// SetDeploymentCache stores deployment data in the cache for a script in the active account.
+func (r *Registry) SetDeploymentCache(scriptName string, dep *DeploymentInfo, subdomain string) {
+	r.deploymentCache()[scriptName] = &DeploymentCacheEntry{
+		Deployment: dep,
+		Subdomain:  subdomain,
+		FetchedAt:  time.Now(),
+	}
+}
+
+// GetAllDeploymentCaches returns all cached deployments for the active account.
+func (r *Registry) GetAllDeploymentCaches() map[string]*DeploymentCacheEntry {
+	return r.deploymentCache()
 }

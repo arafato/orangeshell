@@ -15,6 +15,7 @@ import (
 type CmdPane struct {
 	lines        []cmdLine // output lines
 	running      bool      // command is in flight
+	action       string    // raw action string (e.g. "deploy", "dev", "dev --remote")
 	label        string    // "Deploy (staging)" etc.
 	exitMsg      string    // "Exited with code 0" etc.
 	exitFailed   bool      // true if the command failed (for styling)
@@ -41,8 +42,10 @@ func (p *CmdPane) StartCommand(action, envName string) {
 	}
 	p.lines = nil
 	p.running = true
+	p.action = action
 	p.label = label
 	p.exitMsg = ""
+	p.exitFailed = false
 	p.scrollOffset = 0
 	p.userScrolled = false
 }
@@ -61,8 +64,14 @@ func (p *CmdPane) AppendLine(text string, isStderr bool, ts time.Time) {
 }
 
 // Finish marks the command as completed.
+// If the command is not running (e.g. already finished by a user-initiated stop),
+// this is a no-op to prevent overwriting a clean exit message.
 func (p *CmdPane) Finish(exitCode int, err error) {
+	if !p.running {
+		return
+	}
 	p.running = false
+	p.action = ""
 	if err != nil && exitCode == 0 {
 		p.exitMsg = fmt.Sprintf("Error: %s", err)
 		p.exitFailed = true
@@ -75,9 +84,27 @@ func (p *CmdPane) Finish(exitCode int, err error) {
 	}
 }
 
+// FinishWithMessage marks the command as completed with a custom message.
+// Used for user-initiated stops (e.g. "Stopped" instead of "Exited with code -1").
+func (p *CmdPane) FinishWithMessage(msg string, failed bool) {
+	p.running = false
+	p.action = ""
+	p.exitMsg = msg
+	p.exitFailed = failed
+}
+
 // IsRunning returns whether a command is in flight.
 func (p CmdPane) IsRunning() bool {
 	return p.running
+}
+
+// Action returns the raw action string of the currently running command.
+// Returns "" if no command is running.
+func (p CmdPane) Action() string {
+	if p.running {
+		return p.action
+	}
+	return ""
 }
 
 // IsActive returns whether the pane has content to show.
@@ -89,6 +116,7 @@ func (p CmdPane) IsActive() bool {
 func (p *CmdPane) Clear() {
 	p.lines = nil
 	p.running = false
+	p.action = ""
 	p.label = ""
 	p.exitMsg = ""
 	p.exitFailed = false

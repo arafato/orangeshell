@@ -196,6 +196,18 @@ func (m Model) CmdRunning() bool {
 	return m.cmdPane.IsRunning()
 }
 
+// RunningAction returns the action string of the currently running command.
+// Returns "" if no command is running.
+func (m Model) RunningAction() string {
+	return m.cmdPane.Action()
+}
+
+// StopDevServer marks the dev server as stopped with a clean message.
+// The caller (app.go) should also call stopWranglerRunner() to kill the process.
+func (m *Model) StopDevServer() {
+	m.cmdPane.FinishWithMessage("Stopped", false)
+}
+
 // StartCommand prepares the cmd pane for a new command execution.
 func (m *Model) StartCommand(action, envName string) {
 	m.cmdPane.StartCommand(action, envName)

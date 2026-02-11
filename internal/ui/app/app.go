@@ -1129,6 +1129,7 @@ func (m *Model) startWranglerCmd(action, envName string) tea.Cmd {
 		Action:     action,
 		ConfigPath: m.wrangler.ConfigPath(),
 		EnvName:    envName,
+		AccountID:  m.registry.ActiveAccountID(),
 	}
 
 	runner := wcfg.NewRunner()
@@ -1186,6 +1187,7 @@ func (m *Model) startWranglerCmdWithArgs(action, envName string, extraArgs []str
 		ConfigPath: m.wrangler.ConfigPath(),
 		EnvName:    envName,
 		ExtraArgs:  extraArgs,
+		AccountID:  m.registry.ActiveAccountID(),
 	}
 
 	runner := wcfg.NewRunner()
@@ -1217,6 +1219,7 @@ func (m *Model) fetchWranglerVersions(envName string) tea.Cmd {
 		ConfigPath: m.wrangler.ConfigPath(),
 		EnvName:    envName,
 		ExtraArgs:  []string{"--json"},
+		AccountID:  m.registry.ActiveAccountID(),
 	}
 
 	runner := wcfg.NewRunner()
@@ -1295,20 +1298,41 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 			})
 		}
 
+		cmdRunning := m.wrangler.CmdRunning()
 		wranglerActions := []string{"deploy", "versions list", "deployments status"}
 		for _, action := range wranglerActions {
-			disabled := m.wrangler.CmdRunning()
 			items = append(items, actions.Item{
 				Label:       wcfg.CommandLabel(action),
 				Description: wcfg.CommandDescription(action),
 				Section:     "Commands",
 				Action:      "wrangler_" + action,
-				Disabled:    disabled,
+				Disabled:    cmdRunning,
 			})
 		}
 
+		// Dev server: show "Stop Dev Server" when running, otherwise show the two dev modes
+		runningAction := m.wrangler.RunningAction()
+		if wcfg.IsDevAction(runningAction) {
+			items = append(items, actions.Item{
+				Label:       "Stop Dev Server",
+				Description: "Stop the running dev server",
+				Section:     "Commands",
+				Action:      "wrangler_stop_dev",
+			})
+		} else {
+			devActions := []string{"dev", "dev --remote"}
+			for _, action := range devActions {
+				items = append(items, actions.Item{
+					Label:       wcfg.CommandLabel(action),
+					Description: wcfg.CommandDescription(action),
+					Section:     "Commands",
+					Action:      "wrangler_" + action,
+					Disabled:    cmdRunning,
+				})
+			}
+		}
+
 		// Version deployment actions
-		cmdRunning := m.wrangler.CmdRunning()
 		items = append(items, actions.Item{
 			Label:       "Deploy Version...",
 			Description: "Select a version to deploy at 100%",
@@ -1467,6 +1491,18 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	if item.Action == "wrangler_gradual_deploy" {
 		envName := m.wrangler.FocusedEnvName()
 		return m.openVersionPicker(uiwrangler.PickerModeGradual, envName)
+	}
+
+	// Wrangler dev server actions
+	if item.Action == "wrangler_dev" || item.Action == "wrangler_dev --remote" {
+		action := strings.TrimPrefix(item.Action, "wrangler_")
+		envName := m.wrangler.FocusedEnvName()
+		return m.startWranglerCmdWithArgs(action, envName, []string{"--show-interactive-dev-session=false"})
+	}
+	if item.Action == "wrangler_stop_dev" {
+		m.wrangler.StopDevServer()
+		m.stopWranglerRunner()
+		return nil
 	}
 
 	// Wrangler command actions

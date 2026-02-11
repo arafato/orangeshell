@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ type Command struct {
 	ConfigPath string   // --config <path>
 	EnvName    string   // --env <name> (empty for default)
 	ExtraArgs  []string // additional positional/flag args appended after --env (e.g. version specs, "-y")
+	AccountID  string   // if set, passed as CLOUDFLARE_ACCOUNT_ID env var to the process
 }
 
 // OutputLine is a single line of output from a wrangler command.
@@ -99,6 +101,12 @@ func (r *Runner) Start(ctx context.Context, wcmd Command) error {
 
 	args := buildArgs(wcmd)
 	r.cmd = exec.CommandContext(runCtx, "npx", args...)
+
+	// Pass account ID via environment variable so wrangler doesn't prompt
+	// for account selection in non-interactive mode.
+	if wcmd.AccountID != "" {
+		r.cmd.Env = append(os.Environ(), "CLOUDFLARE_ACCOUNT_ID="+wcmd.AccountID)
+	}
 
 	stdout, err := r.cmd.StdoutPipe()
 	if err != nil {
@@ -246,6 +254,10 @@ func CommandLabel(action string) string {
 		return "Deploy Version"
 	case "deployments status":
 		return "Deployment Status"
+	case "dev":
+		return "Dev (Local)"
+	case "dev --remote":
+		return "Dev (Remote)"
 	default:
 		return action
 	}
@@ -262,7 +274,16 @@ func CommandDescription(action string) string {
 		return "Deploy a specific version"
 	case "deployments status":
 		return "Show current deployment status"
+	case "dev":
+		return "Start local dev server (Miniflare)"
+	case "dev --remote":
+		return "Start remote dev server on Cloudflare"
 	default:
 		return ""
 	}
+}
+
+// IsDevAction returns true if the action string is a dev server command.
+func IsDevAction(action string) bool {
+	return action == "dev" || action == "dev --remote"
 }

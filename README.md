@@ -37,9 +37,13 @@ Each environment shows its active deployment: version IDs, traffic split percent
 
 Deploy a specific version at 100% or set up gradual deployments with custom traffic splits — all from the version picker overlay.
 
+### Binding management
+
+Create new Cloudflare resources (D1 Databases, KV Namespaces, R2 Buckets, Queues) and wire them as bindings to any Worker — all without leaving the terminal. Press `Ctrl+N` to open the binding wizard, pick a resource type, create or select an existing resource, and the binding is written directly into your wrangler config.
+
 ### Service dashboard
 
-Browse Workers, KV Namespaces, R2 Buckets, and D1 Databases from a unified dashboard. Drill into any resource to inspect its configuration, and cross-navigate between Workers and their bindings.
+Browse Workers, KV Namespaces, R2 Buckets, D1 Databases, and Queues from a unified dashboard. Drill into any resource to inspect its configuration, and cross-navigate between Workers and their bindings.
 
 ### Multi-account
 

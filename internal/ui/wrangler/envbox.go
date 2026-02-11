@@ -31,8 +31,9 @@ type EnvBox struct {
 	cursor     int                // inner cursor position (0=worker, 1..N=bindings)
 
 	// Deployment info (fetched async from API)
-	Deployment *DeploymentDisplay // active deployment for this env
-	Subdomain  string             // account's workers.dev subdomain
+	Deployment        *DeploymentDisplay // active deployment for this env
+	Subdomain         string             // account's workers.dev subdomain
+	DeploymentFetched bool               // true once API response received (distinguishes "not fetched" from "not deployed")
 }
 
 // NewEnvBox creates an EnvBox from a wrangler config and environment name.
@@ -172,6 +173,11 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 		deployLine = fmt.Sprintf("  %s %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Deploy")),
 			strings.Join(versionParts, theme.DimStyle.Render(" / ")))
+	} else if b.DeploymentFetched {
+		// API responded but no deployment found for this account
+		deployLine = fmt.Sprintf("  %s %s",
+			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Deploy")),
+			theme.DimStyle.Render("Currently not deployed"))
 	}
 
 	// Compat date

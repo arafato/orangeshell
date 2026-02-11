@@ -24,12 +24,13 @@ type VersionSplit struct {
 
 // ProjectBox renders a single project in the monorepo list view.
 type ProjectBox struct {
-	Name        string                        // directory basename
-	RelPath     string                        // relative path from CWD
-	Config      *wcfg.WranglerConfig          // parsed config (nil on error)
-	Err         error                         // parse error
-	Deployments map[string]*DeploymentDisplay // envName -> deployment info
-	Subdomain   string                        // account's workers.dev subdomain
+	Name              string                        // directory basename
+	RelPath           string                        // relative path from CWD
+	Config            *wcfg.WranglerConfig          // parsed config (nil on error)
+	Err               error                         // parse error
+	Deployments       map[string]*DeploymentDisplay // envName -> deployment info
+	DeploymentFetched map[string]bool               // envName -> true once API responded
+	Subdomain         string                        // account's workers.dev subdomain
 }
 
 // View renders the project box.
@@ -117,6 +118,11 @@ func (b ProjectBox) renderEnvSection(envName string) string {
 		deployLine = fmt.Sprintf("  %s  %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-9s", "Deploy")),
 			strings.Join(versionParts, theme.DimStyle.Render(" / ")))
+	} else if b.DeploymentFetched[envName] {
+		// API responded but no deployment found for this account
+		deployLine = fmt.Sprintf("  %s  %s",
+			theme.DimStyle.Render(fmt.Sprintf("%-9s", "Deploy")),
+			theme.DimStyle.Render("Currently not deployed"))
 	}
 
 	// Bindings summary (compact: "KV MY_CACHE · D1 MY_DB · R2 ASSETS")

@@ -431,9 +431,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.EnvDeploymentLoadedMsg:
-		if msg.Err == nil {
-			m.wrangler.SetEnvDeployment(msg.EnvName, msg.Deployment, msg.Subdomain)
+		// Discard stale responses from a previous account
+		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+			return m, nil
 		}
+		// Always update (even on error) so DeploymentFetched gets set and
+		// the UI can show "Currently not deployed" instead of nothing.
+		m.wrangler.SetEnvDeployment(msg.EnvName, msg.Deployment, msg.Subdomain)
 		return m, nil
 
 	case uiwrangler.ProjectsDiscoveredMsg:
@@ -442,9 +446,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.fetchAllProjectDeployments()
 
 	case uiwrangler.ProjectDeploymentLoadedMsg:
-		if msg.Err == nil {
-			m.wrangler.SetProjectDeployment(msg.ProjectIndex, msg.EnvName, msg.Deployment, msg.Subdomain)
+		// Discard stale responses from a previous account
+		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+			return m, nil
 		}
+		// Always update so DeploymentFetched gets set
+		m.wrangler.SetProjectDeployment(msg.ProjectIndex, msg.EnvName, msg.Deployment, msg.Subdomain)
 		return m, nil
 
 	case uiwrangler.TailStartMsg:
@@ -959,6 +966,15 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	// Update search items with whatever is cached for this account
 	m.search.SetItems(m.registry.AllSearchItems())
 
+	// Clear stale deployment data and re-fetch for the new account
+	m.wrangler.ClearDeployments()
+	var deployCmd tea.Cmd
+	if m.wrangler.IsMonorepo() {
+		deployCmd = m.fetchAllProjectDeployments()
+	} else if cfg := m.wrangler.Config(); cfg != nil {
+		deployCmd = m.fetchSingleProjectDeployments(cfg)
+	}
+
 	// If we're viewing a service, reload it with the new account
 	if m.viewState == ViewServiceList || m.viewState == ViewServiceDetail {
 		serviceName := m.detail.Service()
@@ -975,10 +991,10 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 		loadCmd := tea.Cmd(func() tea.Msg {
 			return detail.LoadResourcesMsg{ServiceName: serviceName}
 		})
-		return tea.Batch(loadCmd, m.detail.SpinnerInit())
+		return tea.Batch(loadCmd, m.detail.SpinnerInit(), deployCmd)
 	}
 
-	return nil
+	return deployCmd
 }
 
 // navigateTo navigates directly to a specific resource's detail view.
@@ -1195,6 +1211,7 @@ func (m Model) fetchAllProjectDeployments() tea.Cmd {
 		return nil
 	}
 
+	accountID := m.registry.ActiveAccountID()
 	projectConfigs := m.wrangler.ProjectConfigs()
 	var cmds []tea.Cmd
 
@@ -1207,7 +1224,7 @@ func (m Model) fetchAllProjectDeployments() tea.Cmd {
 			if scriptName == "" {
 				continue
 			}
-			cmds = append(cmds, m.fetchProjectDeployment(workersSvc, i, envName, scriptName))
+			cmds = append(cmds, m.fetchProjectDeployment(workersSvc, accountID, i, envName, scriptName))
 		}
 	}
 
@@ -1226,13 +1243,14 @@ func (m Model) fetchSingleProjectDeployments(cfg *wcfg.WranglerConfig) tea.Cmd {
 		return nil
 	}
 
+	accountID := m.registry.ActiveAccountID()
 	var cmds []tea.Cmd
 	for _, envName := range cfg.EnvNames() {
 		scriptName := cfg.ResolvedEnvName(envName)
 		if scriptName == "" {
 			continue
 		}
-		cmds = append(cmds, m.fetchEnvDeployment(workersSvc, envName, scriptName))
+		cmds = append(cmds, m.fetchEnvDeployment(workersSvc, accountID, envName, scriptName))
 	}
 
 	if len(cmds) == 0 {
@@ -1243,15 +1261,16 @@ func (m Model) fetchSingleProjectDeployments(cfg *wcfg.WranglerConfig) tea.Cmd {
 
 // fetchEnvDeployment returns a command that fetches the active deployment for
 // a single env in a single-project config.
-func (m Model) fetchEnvDeployment(workersSvc *svc.WorkersService, envName, scriptName string) tea.Cmd {
+func (m Model) fetchEnvDeployment(workersSvc *svc.WorkersService, accountID, envName, scriptName string) tea.Cmd {
 	return func() tea.Msg {
 		subdomain, _ := workersSvc.GetSubdomain()
 
 		dep, err := workersSvc.GetActiveDeployment(scriptName)
 		if err != nil {
 			return uiwrangler.EnvDeploymentLoadedMsg{
-				EnvName: envName,
-				Err:     err,
+				AccountID: accountID,
+				EnvName:   envName,
+				Err:       err,
 			}
 		}
 
@@ -1274,6 +1293,7 @@ func (m Model) fetchEnvDeployment(workersSvc *svc.WorkersService, envName, scrip
 		}
 
 		return uiwrangler.EnvDeploymentLoadedMsg{
+			AccountID:  accountID,
 			EnvName:    envName,
 			Deployment: display,
 			Subdomain:  subdomain,
@@ -1283,7 +1303,7 @@ func (m Model) fetchEnvDeployment(workersSvc *svc.WorkersService, envName, scrip
 
 // fetchProjectDeployment returns a command that fetches the active deployment for
 // a single worker script and constructs its workers.dev URL using the cached subdomain.
-func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, projectIdx int, envName, scriptName string) tea.Cmd {
+func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, accountID string, projectIdx int, envName, scriptName string) tea.Cmd {
 	return func() tea.Msg {
 		// Fetch subdomain (cached after first call)
 		subdomain, _ := workersSvc.GetSubdomain()
@@ -1292,6 +1312,7 @@ func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, projectIdx
 		dep, err := workersSvc.GetActiveDeployment(scriptName)
 		if err != nil {
 			return uiwrangler.ProjectDeploymentLoadedMsg{
+				AccountID:    accountID,
 				ProjectIndex: projectIdx,
 				EnvName:      envName,
 				Err:          err,
@@ -1317,6 +1338,7 @@ func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, projectIdx
 		}
 
 		return uiwrangler.ProjectDeploymentLoadedMsg{
+			AccountID:    accountID,
 			ProjectIndex: projectIdx,
 			EnvName:      envName,
 			Deployment:   display,

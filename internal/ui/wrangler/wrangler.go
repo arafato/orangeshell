@@ -70,6 +70,7 @@ type ProjectsDiscoveredMsg struct {
 
 // ProjectDeploymentLoadedMsg delivers deployment data for a single project+env.
 type ProjectDeploymentLoadedMsg struct {
+	AccountID    string // for staleness check on account switch
 	ProjectIndex int
 	EnvName      string
 	Deployment   *DeploymentDisplay
@@ -79,6 +80,7 @@ type ProjectDeploymentLoadedMsg struct {
 
 // EnvDeploymentLoadedMsg delivers deployment data for a single-project env.
 type EnvDeploymentLoadedMsg struct {
+	AccountID  string // for staleness check on account switch
 	EnvName    string
 	Deployment *DeploymentDisplay
 	Subdomain  string
@@ -239,11 +241,12 @@ func (m *Model) SetProjects(projects []wcfg.ProjectInfo, rootName string) {
 		name := filepath.Base(p.Dir)
 
 		box := ProjectBox{
-			Name:        name,
-			RelPath:     relPath,
-			Config:      cfg,
-			Err:         err,
-			Deployments: make(map[string]*DeploymentDisplay),
+			Name:              name,
+			RelPath:           relPath,
+			Config:            cfg,
+			Err:               err,
+			Deployments:       make(map[string]*DeploymentDisplay),
+			DeploymentFetched: make(map[string]bool),
 		}
 
 		m.projects[i] = projectEntry{
@@ -263,9 +266,11 @@ func (m *Model) SetProjectDeployment(projectIndex int, envName string, dep *Depl
 	if projectIndex < 0 || projectIndex >= len(m.projects) {
 		return
 	}
-	if dep != nil {
-		m.projects[projectIndex].box.Deployments[envName] = dep
+	m.projects[projectIndex].box.Deployments[envName] = dep
+	if m.projects[projectIndex].box.DeploymentFetched == nil {
+		m.projects[projectIndex].box.DeploymentFetched = make(map[string]bool)
 	}
+	m.projects[projectIndex].box.DeploymentFetched[envName] = true
 	if subdomain != "" {
 		m.projects[projectIndex].box.Subdomain = subdomain
 	}
@@ -411,14 +416,28 @@ func (m *Model) TailConnected() {
 func (m *Model) SetEnvDeployment(envName string, dep *DeploymentDisplay, subdomain string) {
 	for i := range m.envBoxes {
 		if m.envBoxes[i].EnvName == envName {
-			if dep != nil {
-				m.envBoxes[i].Deployment = dep
-			}
+			m.envBoxes[i].Deployment = dep
+			m.envBoxes[i].DeploymentFetched = true
 			if subdomain != "" {
 				m.envBoxes[i].Subdomain = subdomain
 			}
 			return
 		}
+	}
+}
+
+// ClearDeployments wipes all deployment/subdomain data from EnvBoxes and ProjectBoxes.
+// Called on account switch so stale data from the previous account is not displayed.
+func (m *Model) ClearDeployments() {
+	for i := range m.envBoxes {
+		m.envBoxes[i].Deployment = nil
+		m.envBoxes[i].Subdomain = ""
+		m.envBoxes[i].DeploymentFetched = false
+	}
+	for i := range m.projects {
+		m.projects[i].box.Deployments = make(map[string]*DeploymentDisplay)
+		m.projects[i].box.DeploymentFetched = make(map[string]bool)
+		m.projects[i].box.Subdomain = ""
 	}
 }
 
@@ -634,8 +653,11 @@ func (m Model) drillIntoProject(idx int) (Model, tea.Cmd) {
 		for i, name := range m.envNames {
 			m.envBoxes[i] = NewEnvBox(entry.config, name)
 			// Copy deployment data from the project box into the env box
-			if dep, ok := entry.box.Deployments[name]; ok && dep != nil {
+			if dep, ok := entry.box.Deployments[name]; ok {
 				m.envBoxes[i].Deployment = dep
+			}
+			if entry.box.DeploymentFetched[name] {
+				m.envBoxes[i].DeploymentFetched = true
 			}
 			if entry.box.Subdomain != "" {
 				m.envBoxes[i].Subdomain = entry.box.Subdomain

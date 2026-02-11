@@ -69,6 +69,29 @@ type bindingIndexBuiltMsg struct {
 	accountID string
 }
 
+// parallelTailStartedMsg signals that a single parallel tail session has connected.
+type parallelTailStartedMsg struct {
+	ScriptName string
+	Session    *svc.TailSession
+}
+
+// parallelTailLogMsg carries log lines from a single parallel tail session.
+type parallelTailLogMsg struct {
+	ScriptName string
+	Lines      []svc.TailLine
+}
+
+// parallelTailErrorMsg signals that a parallel tail session encountered an error.
+type parallelTailErrorMsg struct {
+	ScriptName string
+	Err        error
+}
+
+// parallelTailSessionDoneMsg signals that a parallel tail session's channel closed.
+type parallelTailSessionDoneMsg struct {
+	ScriptName string
+}
+
 // Model is the root Bubble Tea model that composes all UI components.
 type Model struct {
 	// Submodels
@@ -106,6 +129,10 @@ type Model struct {
 	// Active tail session (nil when no tail is running)
 	tailSession *svc.TailSession
 	tailSource  string // "wrangler" or "detail" — which view owns the current tail
+
+	// Parallel tail sessions (monorepo multi-worker tailing)
+	parallelTailSessions []*svc.TailSession
+	parallelTailActive   bool
 
 	// Toast notification
 	toastMsg    string
@@ -492,6 +519,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// "t" key pressed while tail is active — stop it
 		m.stopTail()
 		m.detail.ClearTail()
+		return m, nil
+
+	// Parallel tail lifecycle messages
+	case uiwrangler.ParallelTailStartMsg:
+		if m.client == nil {
+			return m, nil
+		}
+		// Stop any existing single tail and parallel tails
+		m.stopTail()
+		m.detail.ClearTail()
+		m.stopAllParallelTails()
+		// Start parallel tailing
+		m.wrangler.StartParallelTail(msg.EnvName, msg.Scripts)
+		m.parallelTailActive = true
+		accountID := m.registry.ActiveAccountID()
+		var cmds []tea.Cmd
+		for _, target := range msg.Scripts {
+			cmds = append(cmds, m.startParallelTailSessionCmd(accountID, target.ScriptName))
+		}
+		return m, tea.Batch(cmds...)
+
+	case uiwrangler.ParallelTailExitMsg:
+		m.stopAllParallelTails()
+		return m, nil
+
+	case parallelTailStartedMsg:
+		if !m.parallelTailActive {
+			// Stale — parallel tail was stopped while session was connecting
+			if msg.Session != nil {
+				session := msg.Session
+				client := m.client
+				go func() {
+					ctx := context.Background()
+					svc.StopTail(ctx, client.CF, session)
+				}()
+			}
+			return m, nil
+		}
+		m.parallelTailSessions = append(m.parallelTailSessions, msg.Session)
+		m.wrangler.ParallelTailSetConnected(msg.ScriptName)
+		m.wrangler.ParallelTailSetSessionID(msg.ScriptName, msg.Session.ID)
+		return m, m.waitForParallelTailLines(msg.ScriptName, msg.Session)
+
+	case parallelTailLogMsg:
+		if !m.parallelTailActive {
+			return m, nil
+		}
+		m.wrangler.ParallelTailAppendLines(msg.ScriptName, msg.Lines)
+		// Find the session to continue polling
+		for _, s := range m.parallelTailSessions {
+			if s.ScriptName == msg.ScriptName {
+				return m, m.waitForParallelTailLines(msg.ScriptName, s)
+			}
+		}
+		return m, nil
+
+	case parallelTailErrorMsg:
+		if !m.parallelTailActive {
+			return m, nil
+		}
+		m.wrangler.ParallelTailSetError(msg.ScriptName, msg.Err)
+		return m, nil
+
+	case parallelTailSessionDoneMsg:
+		// Channel closed for one session — nothing to do, pane stays with last lines
 		return m, nil
 
 	case uiwrangler.LoadConfigPathMsg:
@@ -974,6 +1066,7 @@ func (m *Model) registerServices(accountID string) {
 func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	// Stop any active tail session and wrangler command
 	m.stopTail()
+	m.stopAllParallelTails()
 	m.detail.ClearTail()
 	m.detail.ClearD1()
 	m.stopWranglerRunner()
@@ -1170,6 +1263,59 @@ func (m *Model) stopTail() {
 		ctx := context.Background()
 		svc.StopTail(ctx, client.CF, session)
 	}()
+}
+
+// --- Parallel tail lifecycle helpers ---
+
+// startParallelTailSessionCmd returns a command that creates a single parallel tail session.
+func (m Model) startParallelTailSessionCmd(accountID, scriptName string) tea.Cmd {
+	client := m.client
+	return func() tea.Msg {
+		ctx := context.Background()
+		session, err := svc.StartTail(ctx, client.CF, accountID, scriptName)
+		if err != nil {
+			return parallelTailErrorMsg{ScriptName: scriptName, Err: err}
+		}
+		return parallelTailStartedMsg{ScriptName: scriptName, Session: session}
+	}
+}
+
+// waitForParallelTailLines returns a command that blocks on a single parallel tail
+// session's channel and returns a parallelTailLogMsg when new lines arrive.
+func (m Model) waitForParallelTailLines(scriptName string, session *svc.TailSession) tea.Cmd {
+	if session == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		lines, ok := <-session.LinesChan()
+		if !ok {
+			// Channel closed — session ended
+			return parallelTailSessionDoneMsg{ScriptName: scriptName}
+		}
+		return parallelTailLogMsg{ScriptName: scriptName, Lines: lines}
+	}
+}
+
+// stopAllParallelTails closes all parallel tail sessions and cleans up state.
+func (m *Model) stopAllParallelTails() {
+	if !m.parallelTailActive {
+		return
+	}
+	sessions := m.parallelTailSessions
+	client := m.client
+	m.parallelTailSessions = nil
+	m.parallelTailActive = false
+	m.wrangler.StopParallelTail()
+
+	// Stop all sessions in the background to avoid blocking the UI
+	if len(sessions) > 0 {
+		go func() {
+			ctx := context.Background()
+			for _, s := range sessions {
+				svc.StopTail(ctx, client.CF, s)
+			}
+		}()
+	}
 }
 
 // --- Wrangler config helpers ---
@@ -1623,14 +1769,34 @@ func (m *Model) openVersionPicker(mode uiwrangler.PickerMode, envName string) te
 // require drilling into a specific project first.
 func (m Model) buildMonorepoActionsPopup() actions.Model {
 	title := fmt.Sprintf("Monorepo — %s", m.wrangler.RootName())
-	items := []actions.Item{
-		{
-			Label:       "Load Wrangler Configuration...",
-			Description: "Browse for a wrangler project directory",
-			Section:     "Configuration",
-			Action:      "wrangler_load_config",
-		},
+	var items []actions.Item
+
+	// Monitoring section: "Tail <envName>" for each env across all projects
+	envNames := m.wrangler.AllEnvNames()
+	if len(envNames) > 0 && m.client != nil {
+		for _, envName := range envNames {
+			label := fmt.Sprintf("Tail %s", envName)
+			desc := fmt.Sprintf("Stream live logs from all %s workers", envName)
+			if m.parallelTailActive && m.wrangler.IsParallelTailActive() {
+				// Already tailing — show stop option instead
+				label = fmt.Sprintf("Stop Tail %s", envName)
+				desc = "Stop all live log streams"
+			}
+			items = append(items, actions.Item{
+				Label:       label,
+				Description: desc,
+				Section:     "Monitoring",
+				Action:      "parallel_tail_" + envName,
+			})
+		}
 	}
+
+	items = append(items, actions.Item{
+		Label:       "Load Wrangler Configuration...",
+		Description: "Browse for a wrangler project directory",
+		Section:     "Configuration",
+		Action:      "wrangler_load_config",
+	})
 	return actions.New(title, items)
 }
 
@@ -1857,6 +2023,42 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		return nil
 	}
 
+	// Parallel tail actions (monorepo: "parallel_tail_<envName>")
+	if strings.HasPrefix(item.Action, "parallel_tail_") {
+		envName := strings.TrimPrefix(item.Action, "parallel_tail_")
+		// If already parallel tailing, stop
+		if m.parallelTailActive {
+			m.stopAllParallelTails()
+			return nil
+		}
+		// Gather all scripts for this env across all projects
+		var targets []uiwrangler.ParallelTailTarget
+		caches := m.registry.GetAllDeploymentCaches()
+		for _, pc := range m.wrangler.ProjectConfigs() {
+			if pc.Config == nil {
+				continue
+			}
+			scriptName := pc.Config.ResolvedEnvName(envName)
+			if scriptName == "" {
+				continue
+			}
+			url := ""
+			if entry, ok := caches[scriptName]; ok && entry.Subdomain != "" {
+				url = fmt.Sprintf("https://%s.%s.workers.dev", scriptName, entry.Subdomain)
+			}
+			targets = append(targets, uiwrangler.ParallelTailTarget{
+				ScriptName: scriptName,
+				URL:        url,
+			})
+		}
+		if len(targets) == 0 {
+			return nil
+		}
+		return func() tea.Msg {
+			return uiwrangler.ParallelTailStartMsg{EnvName: envName, Scripts: targets}
+		}
+	}
+
 	// Wrangler version picker actions (must be checked before generic wrangler_ prefix)
 	if item.Action == "wrangler_deploy_version" {
 		envName := m.wrangler.FocusedEnvName()
@@ -2076,16 +2278,23 @@ func (m Model) renderHelp() string {
 
 	switch m.viewState {
 	case ViewWrangler:
-		entries = []helpEntry{
-			{"ctrl+l", "services"},
-			{"ctrl+k", "search"},
-			{"ctrl+p", "actions"},
-			{"[/]", "accounts"},
+		if m.wrangler.IsParallelTailActive() {
+			entries = []helpEntry{
+				{"esc", "back"},
+				{"j/k", "scroll"},
+			}
+		} else {
+			entries = []helpEntry{
+				{"ctrl+l", "services"},
+				{"ctrl+k", "search"},
+				{"ctrl+p", "actions"},
+				{"[/]", "accounts"},
+			}
+			if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
+				entries = append(entries, helpEntry{"t", "tail"})
+			}
+			entries = append(entries, helpEntry{"q", "quit"})
 		}
-		if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
-			entries = append(entries, helpEntry{"t", "tail"})
-		}
-		entries = append(entries, helpEntry{"q", "quit"})
 	case ViewServiceList:
 		entries = []helpEntry{
 			{"esc", "back"},

@@ -141,6 +141,9 @@ type Model struct {
 	cachedVersions    []wcfg.Version
 	versionsFetchedAt time.Time
 
+	// Parallel tail grid (monorepo only)
+	parallelTail ParallelTailModel
+
 	width   int
 	height  int
 	scrollY int // vertical scroll offset for the env box list
@@ -348,6 +351,7 @@ func (m *Model) SetConfigLoading() {
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	m.parallelTail.SetSize(w, h)
 }
 
 // FocusedEnvName returns the name of the currently focused environment.
@@ -412,6 +416,66 @@ func (m Model) TailActive() bool {
 // TailConnected marks the tail as connected (first data may arrive).
 func (m *Model) TailConnected() {
 	m.cmdPane.TailConnected()
+}
+
+// --- Parallel tail delegation methods ---
+
+// AllEnvNames returns the union of env names across all monorepo projects.
+// Returns nil in single-project mode.
+func (m Model) AllEnvNames() []string {
+	if !m.IsMonorepo() {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var names []string
+	for _, p := range m.projects {
+		if p.config == nil {
+			continue
+		}
+		for _, name := range p.config.EnvNames() {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+// StartParallelTail initializes the parallel tail grid for the given env and targets.
+func (m *Model) StartParallelTail(envName string, targets []ParallelTailTarget) {
+	m.parallelTail.SetSize(m.width, m.height)
+	m.parallelTail.Start(envName, targets)
+}
+
+// StopParallelTail stops the parallel tail grid display.
+func (m *Model) StopParallelTail() {
+	m.parallelTail.Stop()
+}
+
+// IsParallelTailActive returns whether the parallel tail grid is active.
+func (m Model) IsParallelTailActive() bool {
+	return m.parallelTail.IsActive()
+}
+
+// ParallelTailAppendLines routes lines to the correct parallel tail pane.
+func (m *Model) ParallelTailAppendLines(scriptName string, lines []svc.TailLine) {
+	m.parallelTail.AppendLines(scriptName, lines)
+}
+
+// ParallelTailSetConnected marks a parallel tail pane as connected.
+func (m *Model) ParallelTailSetConnected(scriptName string) {
+	m.parallelTail.SetConnected(scriptName)
+}
+
+// ParallelTailSetError marks a parallel tail pane as errored.
+func (m *Model) ParallelTailSetError(scriptName string, err error) {
+	m.parallelTail.SetError(scriptName, err.Error())
+}
+
+// ParallelTailSetSessionID records the session ID for a parallel tail pane.
+func (m *Model) ParallelTailSetSessionID(scriptName, sessionID string) {
+	m.parallelTail.SetSessionID(scriptName, sessionID)
 }
 
 // SetEnvDeployment updates deployment/subdomain data on the matching EnvBox.
@@ -555,6 +619,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if m.showVersionPicker {
 			var cmd tea.Cmd
 			m.versionPicker, cmd = m.versionPicker.Update(msg)
+			return m, cmd
+		}
+		// Handle parallel tail mode — exclusive key focus (only esc, j/k)
+		if m.parallelTail.IsActive() {
+			var cmd tea.Cmd
+			m.parallelTail, cmd = m.parallelTail.Update(msg)
 			return m, cmd
 		}
 		// Handle directory browser mode
@@ -805,6 +875,12 @@ func (m Model) View() string {
 		contentHeight = 1
 	}
 	boxWidth := m.width - 4 // padding within the detail panel
+
+	// Parallel tail grid takes over the entire view
+	if m.parallelTail.IsActive() {
+		content := m.parallelTail.View()
+		return m.renderBorder(content, contentHeight)
+	}
 
 	// Title bar
 	titleText := "  Wrangler"

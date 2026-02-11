@@ -110,12 +110,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 // View renders the action popup as a centered overlay.
 func (m Model) View(termWidth, termHeight int) string {
-	popupWidth := termWidth / 2
-	if popupWidth < 40 {
-		popupWidth = 40
+	popupWidth := termWidth * 2 / 3
+	if popupWidth < 50 {
+		popupWidth = 50
 	}
-	if popupWidth > 70 {
-		popupWidth = 70
+	if popupWidth > 90 {
+		popupWidth = 90
 	}
 
 	// Build content
@@ -132,8 +132,8 @@ func (m Model) View(termWidth, termHeight int) string {
 			maxLabelWidth = len(it.Label)
 		}
 	}
-	if maxLabelWidth > 24 {
-		maxLabelWidth = 24
+	if maxLabelWidth > 32 {
+		maxLabelWidth = 32
 	}
 
 	// Render items grouped by section

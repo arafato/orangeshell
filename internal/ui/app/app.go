@@ -1797,7 +1797,7 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		} else {
 			items = append(items, actions.Item{
 				Label:       "Parallel Tail...",
-				Description: "Stream live logs from all workers in an environment",
+				Description: "Stream all live logs from an environment",
 				Section:     "Monitoring",
 				Action:      "parallel_tail",
 			})

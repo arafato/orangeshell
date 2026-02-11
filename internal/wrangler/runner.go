@@ -12,9 +12,10 @@ import (
 
 // Command represents a wrangler CLI command to execute.
 type Command struct {
-	Action     string // "deploy", "rollback", "versions list", "deployments status"
-	ConfigPath string // --config <path>
-	EnvName    string // --env <name> (empty for default)
+	Action     string   // "deploy", "versions list", "versions deploy", "deployments status"
+	ConfigPath string   // --config <path>
+	EnvName    string   // --env <name> (empty for default)
+	ExtraArgs  []string // additional positional/flag args appended after --env (e.g. version specs, "-y")
 }
 
 // OutputLine is a single line of output from a wrangler command.
@@ -71,6 +72,9 @@ func buildArgs(wcmd Command) []string {
 	} else {
 		args = append(args, "--env", wcmd.EnvName)
 	}
+
+	// Append any extra args (e.g. version specs like "<id>@100", "-y", "--json")
+	args = append(args, wcmd.ExtraArgs...)
 
 	return args
 }
@@ -236,10 +240,10 @@ func CommandLabel(action string) string {
 	switch action {
 	case "deploy":
 		return "Deploy"
-	case "rollback":
-		return "Rollback"
 	case "versions list":
 		return "List Versions"
+	case "versions deploy":
+		return "Deploy Version"
 	case "deployments status":
 		return "Deployment Status"
 	default:
@@ -252,10 +256,10 @@ func CommandDescription(action string) string {
 	switch action {
 	case "deploy":
 		return "Deploy worker to Cloudflare"
-	case "rollback":
-		return "Rollback to previous version"
 	case "versions list":
 		return "Show recent versions"
+	case "versions deploy":
+		return "Deploy a specific version"
 	case "deployments status":
 		return "Show current deployment status"
 	default:

@@ -94,9 +94,10 @@ type Model struct {
 	err error
 
 	// Wrangler project view
-	wrangler       uiwrangler.Model
-	wranglerShown  bool // true when sidebar has "Wrangler" selected
-	wranglerRunner *wcfg.Runner
+	wrangler              uiwrangler.Model
+	wranglerShown         bool // true when sidebar has "Wrangler" selected
+	wranglerRunner        *wcfg.Runner
+	wranglerVersionRunner *wcfg.Runner // separate runner for background version fetches
 
 	// Active tail session (nil when no tail is running)
 	tailSession *svc.TailSession
@@ -454,6 +455,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case uiwrangler.ActionMsg:
 		return m, m.startWranglerCmd(msg.Action, msg.EnvName)
 
+	case uiwrangler.VersionsFetchedMsg:
+		if msg.Err != nil {
+			// Show error and close picker
+			m.wrangler.CloseVersionPicker()
+			m.err = fmt.Errorf("failed to fetch versions: %w", msg.Err)
+			return m, nil
+		}
+		m.wrangler.SetVersions(msg.Versions)
+		return m, m.wrangler.SpinnerInit()
+
+	case uiwrangler.DeployVersionMsg:
+		m.wrangler.CloseVersionPicker()
+		return m, m.startWranglerCmdWithArgs("versions deploy", msg.EnvName, []string{
+			fmt.Sprintf("%s@100", msg.VersionID),
+			"-y",
+		})
+
+	case uiwrangler.GradualDeployMsg:
+		m.wrangler.CloseVersionPicker()
+		pctB := 100 - msg.PercentageA
+		return m, m.startWranglerCmdWithArgs("versions deploy", msg.EnvName, []string{
+			fmt.Sprintf("%s@%d", msg.VersionA, msg.PercentageA),
+			fmt.Sprintf("%s@%d", msg.VersionB, pctB),
+			"-y",
+		})
+
+	case uiwrangler.VersionPickerCloseMsg:
+		m.wrangler.CloseVersionPicker()
+		return m, nil
+
 	case uiwrangler.CmdOutputMsg:
 		m.wrangler.AppendCmdOutput(msg.Line)
 		return m, waitForWranglerOutput(m.wranglerRunner)
@@ -528,6 +559,17 @@ func (m Model) updateSetup(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// If version picker overlay is active, route key events there
+	if m.wrangler.IsVersionPickerActive() {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			var cmd tea.Cmd
+			m.wrangler, cmd = m.wrangler.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+	}
+
 	// If search overlay is active, route everything there
 	if m.showSearch {
 		return m.updateSearch(msg)
@@ -856,6 +898,8 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.detail.ClearTail()
 	m.detail.ClearD1()
 	m.stopWranglerRunner()
+	m.wrangler.ClearVersionCache()
+	m.wrangler.CloseVersionPicker()
 
 	m.cfg.AccountID = accountID
 	m.registerServices(accountID)
@@ -1130,6 +1174,101 @@ func waitForWranglerOutput(runner *wcfg.Runner) tea.Cmd {
 	}
 }
 
+// startWranglerCmdWithArgs creates a Runner and starts a wrangler command with extra arguments.
+// Used for version deploy commands that need version specs and -y flag.
+func (m *Model) startWranglerCmdWithArgs(action, envName string, extraArgs []string) tea.Cmd {
+	if m.wranglerRunner != nil && m.wranglerRunner.IsRunning() {
+		return nil
+	}
+
+	cmd := wcfg.Command{
+		Action:     action,
+		ConfigPath: m.wrangler.ConfigPath(),
+		EnvName:    envName,
+		ExtraArgs:  extraArgs,
+	}
+
+	runner := wcfg.NewRunner()
+	m.wranglerRunner = runner
+	m.wrangler.StartCommand(action, envName)
+
+	return tea.Batch(
+		func() tea.Msg {
+			ctx := context.Background()
+			if err := runner.Start(ctx, cmd); err != nil {
+				return uiwrangler.CmdDoneMsg{Result: wcfg.RunResult{ExitCode: 1, Err: err}}
+			}
+			return readWranglerOutputMsg(runner)
+		},
+		m.wrangler.SpinnerInit(),
+	)
+}
+
+// fetchWranglerVersions runs `wrangler versions list --json` in the background
+// and delivers the parsed results via VersionsFetchedMsg.
+func (m *Model) fetchWranglerVersions(envName string) tea.Cmd {
+	// Cancel any in-flight version fetch
+	if m.wranglerVersionRunner != nil {
+		m.wranglerVersionRunner.Stop()
+	}
+
+	cmd := wcfg.Command{
+		Action:     "versions list",
+		ConfigPath: m.wrangler.ConfigPath(),
+		EnvName:    envName,
+		ExtraArgs:  []string{"--json"},
+	}
+
+	runner := wcfg.NewRunner()
+	m.wranglerVersionRunner = runner
+
+	return tea.Batch(
+		func() tea.Msg {
+			ctx := context.Background()
+			if err := runner.Start(ctx, cmd); err != nil {
+				return uiwrangler.VersionsFetchedMsg{Err: err}
+			}
+
+			// Collect all stdout lines (the JSON output)
+			var jsonBuf strings.Builder
+			for line := range runner.LinesCh() {
+				if !line.IsStderr {
+					jsonBuf.WriteString(line.Text)
+					jsonBuf.WriteByte('\n')
+				}
+			}
+
+			// Wait for the command to finish
+			result := <-runner.DoneCh()
+			if result.Err != nil && result.ExitCode != 0 {
+				return uiwrangler.VersionsFetchedMsg{
+					Err: fmt.Errorf("wrangler versions list failed (exit %d)", result.ExitCode),
+				}
+			}
+
+			versions, err := wcfg.ParseVersionsJSON([]byte(jsonBuf.String()))
+			if err != nil {
+				return uiwrangler.VersionsFetchedMsg{Err: err}
+			}
+
+			return uiwrangler.VersionsFetchedMsg{Versions: versions}
+		},
+		m.wrangler.SpinnerInit(),
+	)
+}
+
+// openVersionPicker opens the version picker overlay, using cached versions if available
+// or triggering a background fetch.
+func (m *Model) openVersionPicker(mode uiwrangler.PickerMode, envName string) tea.Cmd {
+	haveCached := m.wrangler.ShowVersionPicker(mode, envName)
+	if haveCached {
+		// Versions were served from cache — no fetch needed
+		return nil
+	}
+	// Need to fetch versions in the background
+	return m.fetchWranglerVersions(envName)
+}
+
 // buildWranglerActionsPopup creates the action popup for the wrangler view.
 // Always includes "Load Wrangler Configuration..." and conditionally includes
 // command/binding items when a config is loaded.
@@ -1156,7 +1295,7 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 			})
 		}
 
-		wranglerActions := []string{"deploy", "rollback", "versions list", "deployments status"}
+		wranglerActions := []string{"deploy", "versions list", "deployments status"}
 		for _, action := range wranglerActions {
 			disabled := m.wrangler.CmdRunning()
 			items = append(items, actions.Item{
@@ -1167,6 +1306,23 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 				Disabled:    disabled,
 			})
 		}
+
+		// Version deployment actions
+		cmdRunning := m.wrangler.CmdRunning()
+		items = append(items, actions.Item{
+			Label:       "Deploy Version...",
+			Description: "Select a version to deploy at 100%",
+			Section:     "Versions",
+			Action:      "wrangler_deploy_version",
+			Disabled:    cmdRunning,
+		})
+		items = append(items, actions.Item{
+			Label:       "Gradual Deployment...",
+			Description: "Split traffic between two versions",
+			Section:     "Versions",
+			Action:      "wrangler_gradual_deploy",
+			Disabled:    cmdRunning,
+		})
 
 		// Bindings section (from the focused env box, if inside)
 		if m.wrangler.InsideBox() {
@@ -1303,6 +1459,16 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		return nil
 	}
 
+	// Wrangler version picker actions (must be checked before generic wrangler_ prefix)
+	if item.Action == "wrangler_deploy_version" {
+		envName := m.wrangler.FocusedEnvName()
+		return m.openVersionPicker(uiwrangler.PickerModeDeploy, envName)
+	}
+	if item.Action == "wrangler_gradual_deploy" {
+		envName := m.wrangler.FocusedEnvName()
+		return m.openVersionPicker(uiwrangler.PickerModeGradual, envName)
+	}
+
 	// Wrangler command actions
 	if strings.HasPrefix(item.Action, "wrangler_") {
 		action := strings.TrimPrefix(item.Action, "wrangler_")
@@ -1346,6 +1512,11 @@ func (m Model) View() string {
 
 func (m Model) viewDashboard() string {
 	// If an overlay is active, render the dashboard dimmed with the popup centered on top
+	if m.wrangler.IsVersionPickerActive() {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.wrangler.VersionPickerView(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
 	if m.showSearch {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.search.View(m.width, m.height)

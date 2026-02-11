@@ -3,6 +3,7 @@ package wrangler
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
+
+// versionCacheTTL is how long fetched versions remain valid before re-fetching.
+const versionCacheTTL = 30 * time.Second
 
 // NavigateMsg is sent when the user selects a navigable binding in the wrangler view.
 // The parent (app.go) handles this to cross-link to the dashboard detail view.
@@ -49,6 +53,13 @@ type LoadConfigPathMsg struct {
 	Path string
 }
 
+// VersionsFetchedMsg delivers parsed version data from `wrangler versions list --json`.
+// The parent (app.go) sends this after a background fetch completes.
+type VersionsFetchedMsg struct {
+	Versions []wcfg.Version
+	Err      error
+}
+
 // Model is the Bubble Tea model for the Wrangler project view.
 type Model struct {
 	config        *wcfg.WranglerConfig
@@ -70,6 +81,14 @@ type Model struct {
 	// Command output pane (bottom split)
 	cmdPane CmdPane
 	spinner spinner.Model
+
+	// Version picker overlay
+	showVersionPicker bool
+	versionPicker     VersionPicker
+
+	// Version cache (shared between Deploy Version and Gradual Deployment)
+	cachedVersions    []wcfg.Version
+	versionsFetchedAt time.Time
 
 	width   int
 	height  int
@@ -199,7 +218,56 @@ func (m Model) SpinnerInit() tea.Cmd {
 
 // IsLoading returns whether the spinner should be running.
 func (m Model) IsLoading() bool {
-	return m.configLoading || m.cmdPane.IsRunning()
+	return m.configLoading || m.cmdPane.IsRunning() || (m.showVersionPicker && m.versionPicker.IsLoading())
+}
+
+// ShowVersionPicker opens the version picker overlay in the given mode.
+// If cached versions are fresh, they are used immediately. Otherwise the picker
+// starts in loading state and the parent (app.go) is responsible for fetching.
+func (m *Model) ShowVersionPicker(mode PickerMode, envName string) bool {
+	m.versionPicker = NewVersionPicker(mode, envName)
+	m.showVersionPicker = true
+
+	if m.hasValidVersionCache() {
+		m.versionPicker.SetVersions(m.cachedVersions)
+		return true // versions available immediately
+	}
+	return false // caller must fetch versions
+}
+
+// SetVersions delivers fetched versions to the picker and caches them.
+func (m *Model) SetVersions(versions []wcfg.Version) {
+	m.cachedVersions = versions
+	m.versionsFetchedAt = time.Now()
+	if m.showVersionPicker {
+		m.versionPicker.SetVersions(versions)
+	}
+}
+
+// CloseVersionPicker hides the version picker overlay.
+func (m *Model) CloseVersionPicker() {
+	m.showVersionPicker = false
+}
+
+// IsVersionPickerActive returns whether the version picker overlay is shown.
+func (m Model) IsVersionPickerActive() bool {
+	return m.showVersionPicker
+}
+
+// VersionPickerView renders the version picker overlay for the app to composite.
+func (m Model) VersionPickerView(termWidth, termHeight int) string {
+	return m.versionPicker.View(termWidth, termHeight, m.spinner.View())
+}
+
+// ClearVersionCache invalidates the cached versions.
+func (m *Model) ClearVersionCache() {
+	m.cachedVersions = nil
+	m.versionsFetchedAt = time.Time{}
+}
+
+// hasValidVersionCache returns true if the version cache is non-empty and within TTL.
+func (m Model) hasValidVersionCache() bool {
+	return len(m.cachedVersions) > 0 && time.Since(m.versionsFetchedAt) < versionCacheTTL
 }
 
 // UpdateSpinner forwards a spinner tick and returns the updated cmd.
@@ -216,10 +284,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case dirBrowserCloseMsg:
 		m.showDirBrowser = false
 		return m, nil
+	case VersionPickerCloseMsg:
+		m.showVersionPicker = false
+		return m, nil
 	}
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle version picker mode — it takes exclusive key focus
+		if m.showVersionPicker {
+			var cmd tea.Cmd
+			m.versionPicker, cmd = m.versionPicker.Update(msg)
+			return m, cmd
+		}
 		// Handle directory browser mode
 		if m.showDirBrowser {
 			return m.updateDirBrowser(msg)

@@ -15,7 +15,7 @@ import (
 // making the text clickable — clicking opens the URL in the default browser.
 func renderHyperlink(url, text string) string {
 	styled := lipgloss.NewStyle().Foreground(theme.ColorBlue).Underline(true).Render(text)
-	return fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", url, styled)
+	return fmt.Sprintf("\x1b]8;;%s\x07%s\x1b]8;;\x07", url, styled)
 }
 
 // EnvBox renders a single environment box in the Wrangler view.

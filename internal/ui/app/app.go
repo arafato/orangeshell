@@ -19,9 +19,9 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/header"
+	"github.com/oarafat/orangeshell/internal/ui/launcher"
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/setup"
-	"github.com/oarafat/orangeshell/internal/ui/sidebar"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
@@ -29,12 +29,13 @@ import (
 
 const refreshInterval = 30 * time.Second
 
-// Focus tracks which pane is active.
-type Focus int
+// ViewState tracks the current content view.
+type ViewState int
 
 const (
-	FocusSidebar Focus = iota
-	FocusDetail
+	ViewWrangler      ViewState = iota // Wrangler home screen (default)
+	ViewServiceList                    // Service resource list (Workers, KV, etc.)
+	ViewServiceDetail                  // Resource detail (Worker detail, D1 console)
 )
 
 // Phase tracks the top-level application state.
@@ -69,16 +70,18 @@ type bindingIndexBuiltMsg struct {
 // Model is the root Bubble Tea model that composes all UI components.
 type Model struct {
 	// Submodels
-	setup   setup.Model
-	header  header.Model
-	sidebar sidebar.Model
-	detail  detail.Model
-	search  search.Model
-	keys    theme.KeyMap
+	setup  setup.Model
+	header header.Model
+	detail detail.Model
+	search search.Model
+
+	// Launcher overlay (replaces sidebar)
+	showLauncher bool
+	launcher     launcher.Model
 
 	// State
 	phase        Phase
-	focus        Focus
+	viewState    ViewState
 	showSearch   bool
 	showActions  bool
 	actionsPopup actions.Model
@@ -95,7 +98,6 @@ type Model struct {
 
 	// Wrangler project view
 	wrangler              uiwrangler.Model
-	wranglerShown         bool // true when sidebar has "Wrangler" selected
 	wranglerRunner        *wcfg.Runner
 	wranglerVersionRunner *wcfg.Runner // separate runner for background version fetches
 
@@ -114,37 +116,16 @@ func NewModel(cfg *config.Config) Model {
 		phase = PhaseDashboard
 	}
 
-	sb := sidebar.New()
-
-	// If going straight to dashboard, pre-set detail to "Loading..." for the
-	// initially selected service so the user doesn't see "Select a service"
-	// while authentication is in flight.
-	var det detail.Model
-	wranglerShown := false
-	if phase == PhaseDashboard {
-		if sb.SelectedService() == "Wrangler" {
-			// Wrangler is selected by default — don't load any API service
-			det = detail.New()
-			wranglerShown = true
-		} else {
-			det = detail.NewLoading(sb.SelectedService())
-		}
-	} else {
-		det = detail.New()
-	}
-
 	m := Model{
-		setup:         setup.New(cfg),
-		header:        header.New(cfg.AuthMethod),
-		sidebar:       sb,
-		detail:        det,
-		search:        search.New(),
-		wrangler:      uiwrangler.New(),
-		wranglerShown: wranglerShown,
-		keys:          theme.DefaultKeyMap(),
-		phase:         phase,
-		cfg:           cfg,
-		registry:      svc.NewRegistry(),
+		setup:     setup.New(cfg),
+		header:    header.New(cfg.AuthMethod),
+		detail:    detail.New(),
+		search:    search.New(),
+		wrangler:  uiwrangler.New(),
+		phase:     phase,
+		viewState: ViewWrangler, // wrangler is the home screen
+		cfg:       cfg,
+		registry:  svc.NewRegistry(),
 	}
 
 	return m
@@ -153,10 +134,7 @@ func NewModel(cfg *config.Config) Model {
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
 	if m.phase == PhaseDashboard {
-		cmds := []tea.Cmd{m.initDashboardCmd(), m.detail.SpinnerInit()}
-		if m.wranglerShown {
-			cmds = append(cmds, m.wrangler.SpinnerInit())
-		}
+		cmds := []tea.Cmd{m.initDashboardCmd(), m.wrangler.SpinnerInit()}
 		return tea.Batch(cmds...)
 	}
 	return nil
@@ -223,28 +201,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Register services for the active account
 		m.registerServices(m.cfg.AccountID)
 
-		// Load resources for the initially selected service (skip if Wrangler is selected)
-		serviceName := m.sidebar.SelectedService()
-		var loadCmd tea.Cmd
-		if serviceName == "Wrangler" {
-			m.wranglerShown = true
-		} else {
-			m.detail.SetService(serviceName)
-			loadCmd = tea.Cmd(func() tea.Msg {
-				return detail.LoadResourcesMsg{ServiceName: serviceName}
-			})
-		}
+		// Start on wrangler home — no service to load initially
+		m.viewState = ViewWrangler
 
-		// Start the periodic background refresh ticker and the spinner
+		// Start the periodic background refresh ticker
 		tickCmd := m.scheduleRefreshTick()
 
 		// Scan CWD for wrangler config in the background
 		wranglerCmd := m.scanWranglerConfigCmd()
 
-		cmds := []tea.Cmd{tickCmd, m.detail.SpinnerInit(), wranglerCmd}
-		if loadCmd != nil {
-			cmds = append(cmds, loadCmd)
-		}
+		cmds := []tea.Cmd{tickCmd, wranglerCmd, m.wrangler.SpinnerInit()}
 		return m, tea.Batch(cmds...)
 
 	case errMsg:
@@ -302,6 +268,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadServiceResources(msg.ServiceName)
 
 	case detail.LoadDetailMsg:
+		m.viewState = ViewServiceDetail
 		return m, tea.Batch(m.loadResourceDetail(msg.ServiceName, msg.ResourceID), m.detail.SpinnerInit())
 
 	case detail.DetailLoadedMsg:
@@ -449,7 +416,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.scanWranglerConfigFromDir(msg.Path), m.wrangler.SpinnerInit())
 
 	case uiwrangler.NavigateMsg:
-		m.wranglerShown = false
 		return m, m.navigateTo(msg.ServiceName, msg.ResourceID)
 
 	case uiwrangler.ActionMsg:
@@ -519,6 +485,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showActions = false
 		return m, nil
 
+	// Launcher messages
+	case launcher.LaunchServiceMsg:
+		m.showLauncher = false
+		if msg.ServiceName == "" {
+			// Go home
+			m.viewState = ViewWrangler
+			return m, nil
+		}
+		return m, m.navigateToService(msg.ServiceName)
+
+	case launcher.CloseMsg:
+		m.showLauncher = false
+		return m, nil
+
 	case spinner.TickMsg:
 		var cmds []tea.Cmd
 		if m.detail.IsLoading() {
@@ -580,9 +560,14 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateActions(msg)
 	}
 
+	// If launcher overlay is active, route everything there
+	if m.showLauncher {
+		return m.updateLauncher(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
-		// Forward mouse events to the detail panel regardless of focus (for copy-on-click)
+		// Forward mouse events to the detail panel regardless of view (for copy-on-click)
 		var cmd tea.Cmd
 		m.detail, cmd = m.detail.Update(msg)
 		return m, cmd
@@ -591,9 +576,32 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "q":
-			return m, tea.Quit
-		case "tab":
-			m.toggleFocus()
+			// Only quit when not in a text-input context
+			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() && !m.wrangler.CmdRunning() {
+				return m, tea.Quit
+			}
+			if m.viewState == ViewServiceList {
+				return m, tea.Quit
+			}
+			// In detail view, only quit if D1 console is not focused
+			if m.viewState == ViewServiceDetail && !m.detail.D1Active() {
+				return m, tea.Quit
+			}
+		case "ctrl+h":
+			// Go to wrangler home screen from anywhere
+			m.stopTail()
+			m.detail.ClearTail()
+			m.detail.ClearD1()
+			m.viewState = ViewWrangler
+			return m, nil
+		case "ctrl+l":
+			// Open the service launcher overlay
+			projectName := ""
+			if m.wrangler.HasConfig() {
+				projectName = m.wrangler.Config().Name
+			}
+			m.launcher = launcher.New(projectName)
+			m.showLauncher = true
 			return m, nil
 		case "ctrl+k":
 			m.showSearch = true
@@ -605,12 +613,12 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "ctrl+p":
-			if m.wranglerShown && !m.wrangler.IsDirBrowserActive() {
+			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
 				m.showActions = true
 				m.actionsPopup = m.buildWranglerActionsPopup()
 				return m, nil
 			}
-			if m.detail.InDetailView() {
+			if m.viewState == ViewServiceDetail && m.detail.InDetailView() {
 				m.showActions = true
 				m.actionsPopup = m.buildActionsPopup()
 				return m, nil
@@ -625,27 +633,33 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
 			}
 			return m, nil
+		case "esc":
+			// Esc at the app level handles view-state navigation back
+			switch m.viewState {
+			case ViewServiceList:
+				// Service list → go home
+				m.viewState = ViewWrangler
+				return m, nil
+			case ViewServiceDetail:
+				// Let detail handle Esc internally (detail→list transition)
+				// We detect the transition after detail processes the message
+			case ViewWrangler:
+				// Wrangler handles its own Esc (dir browser, cmd pane, etc.)
+			}
 		}
 	}
 
+	// Route to the active view
 	var cmd tea.Cmd
-	prevService := m.sidebar.SelectedService()
-
-	switch m.focus {
-	case FocusSidebar:
-		m.sidebar, cmd = m.sidebar.Update(msg)
-		if m.sidebar.SelectedService() != prevService {
-			newService := m.sidebar.SelectedService()
-			loadCmd := m.switchToService(newService)
-			if loadCmd != nil {
-				return m, loadCmd
-			}
-		}
-	case FocusDetail:
-		if m.wranglerShown {
-			m.wrangler, cmd = m.wrangler.Update(msg)
-		} else {
-			m.detail, cmd = m.detail.Update(msg)
+	switch m.viewState {
+	case ViewWrangler:
+		m.wrangler, cmd = m.wrangler.Update(msg)
+	case ViewServiceList, ViewServiceDetail:
+		wasDetail := m.detail.InDetailView()
+		m.detail, cmd = m.detail.Update(msg)
+		// Detect detail→list transition (detail handled Esc internally)
+		if wasDetail && !m.detail.InDetailView() {
+			m.viewState = ViewServiceList
 		}
 	}
 
@@ -658,22 +672,15 @@ func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *Model) toggleFocus() {
-	switch m.focus {
-	case FocusSidebar:
-		m.focus = FocusDetail
-		m.sidebar.SetFocused(false)
-		m.detail.SetFocused(true)
-		m.wrangler.SetFocused(true)
-	case FocusDetail:
-		m.focus = FocusSidebar
-		m.sidebar.SetFocused(true)
-		m.detail.SetFocused(false)
-		m.wrangler.SetFocused(false)
-	}
+// updateLauncher forwards messages to the launcher overlay.
+func (m Model) updateLauncher(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.launcher, cmd = m.launcher.Update(msg)
+	return m, cmd
 }
 
 // layout recalculates component sizes based on terminal dimensions.
+// Full-width layout: header(1) + content + help(1).
 func (m *Model) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
@@ -686,23 +693,11 @@ func (m *Model) layout() {
 		contentHeight = 1
 	}
 
-	sidebarWidth := int(float64(m.width) * theme.SidebarRatio)
-	if sidebarWidth < theme.SidebarMinWidth {
-		sidebarWidth = theme.SidebarMinWidth
-	}
-	if sidebarWidth > theme.SidebarMaxWidth {
-		sidebarWidth = theme.SidebarMaxWidth
-	}
-
-	detailWidth := m.width - sidebarWidth
-	if detailWidth < 10 {
-		detailWidth = 10
-	}
+	contentWidth := m.width
 
 	m.header.SetWidth(m.width)
-	m.sidebar.SetSize(sidebarWidth, contentHeight)
-	m.detail.SetSize(detailWidth, contentHeight)
-	m.wrangler.SetSize(detailWidth, contentHeight)
+	m.detail.SetSize(contentWidth, contentHeight)
+	m.wrangler.SetSize(contentWidth, contentHeight)
 	// Detail content starts after: header(1) + top border(1) = 2 rows from top of terminal
 	m.detail.SetYOffset(headerHeight + 1)
 }
@@ -729,20 +724,15 @@ func (m *Model) stopWranglerRunner() {
 	}
 }
 
-// switchToService handles switching to a service, using cached data if available.
-func (m *Model) switchToService(name string) tea.Cmd {
+// navigateToService switches to a service list view, using cached data if available.
+func (m *Model) navigateToService(name string) tea.Cmd {
 	// Stop any active tail/D1 session when switching services
 	m.stopTail()
 	m.detail.ClearTail()
 	m.detail.ClearD1()
-	m.stopWranglerRunner()
 
-	// Handle Wrangler specially — it doesn't go through the service interface
-	if name == "Wrangler" {
-		m.wranglerShown = true
-		return nil
-	}
-	m.wranglerShown = false
+	m.viewState = ViewServiceList
+	m.detail.SetFocused(true)
 
 	entry := m.registry.GetCache(name)
 	if entry != nil {
@@ -752,11 +742,11 @@ func (m *Model) switchToService(name string) tea.Cmd {
 		}
 		return cmd
 	}
-	cmd := m.detail.SetService(name)
-	if cmd != nil {
-		return tea.Batch(cmd, m.detail.SpinnerInit())
-	}
-	return nil
+	m.detail.SetService(name)
+	return tea.Batch(
+		tea.Cmd(func() tea.Msg { return detail.LoadResourcesMsg{ServiceName: name} }),
+		m.detail.SpinnerInit(),
+	)
 }
 
 // scheduleRefreshTick returns a command that sends a tickRefreshMsg after the refresh interval.
@@ -890,8 +880,7 @@ func (m *Model) registerServices(accountID string) {
 }
 
 // switchAccount handles switching to a different account. Re-registers services with the
-// new accountID, loads the currently selected sidebar service, and shows cached data
-// instantly if we've visited this account before.
+// new accountID. If currently viewing a service, reloads it with the new account's data.
 func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	// Stop any active tail session and wrangler command
 	m.stopTail()
@@ -904,40 +893,35 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.cfg.AccountID = accountID
 	m.registerServices(accountID)
 
-	// Force detail panel to accept new data even though the service name may be the same
-	serviceName := m.sidebar.SelectedService()
-	m.detail.ResetService()
-
-	// If we have cached data for this account+service, show it instantly
-	entry := m.registry.GetCache(serviceName)
-	if entry != nil {
-		m.detail.SetServiceWithCache(serviceName, entry.Resources)
-	} else {
-		m.detail.SetService(serviceName)
-	}
-
 	// Update search items with whatever is cached for this account
 	m.search.SetItems(m.registry.AllSearchItems())
 
-	// Load fresh data from the API
-	loadCmd := tea.Cmd(func() tea.Msg {
-		return detail.LoadResourcesMsg{ServiceName: serviceName}
-	})
+	// If we're viewing a service, reload it with the new account
+	if m.viewState == ViewServiceList || m.viewState == ViewServiceDetail {
+		serviceName := m.detail.Service()
+		m.detail.ResetService()
+		m.viewState = ViewServiceList // drop back to list on account switch
 
-	return tea.Batch(loadCmd, m.detail.SpinnerInit())
+		entry := m.registry.GetCache(serviceName)
+		if entry != nil {
+			m.detail.SetServiceWithCache(serviceName, entry.Resources)
+		} else {
+			m.detail.SetService(serviceName)
+		}
+
+		loadCmd := tea.Cmd(func() tea.Msg {
+			return detail.LoadResourcesMsg{ServiceName: serviceName}
+		})
+		return tea.Batch(loadCmd, m.detail.SpinnerInit())
+	}
+
+	return nil
 }
 
-// navigateTo switches the sidebar to a service and loads the detail for a specific resource.
+// navigateTo navigates directly to a specific resource's detail view.
 func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
-	m.wranglerShown = false
-
-	// Find and select the service in the sidebar
-	for i, s := range m.sidebar.Services() {
-		if s.Name == serviceName {
-			m.sidebar.SetCursor(i)
-			break
-		}
-	}
+	m.viewState = ViewServiceDetail
+	m.detail.SetFocused(true)
 
 	// Set the service on the detail panel (loads the list in background), using cache if available
 	var loadCmd tea.Cmd
@@ -951,12 +935,6 @@ func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
 	// Switch detail panel directly to detail view and load the specific resource
 	m.detail.NavigateToDetail(resourceID)
 	detailCmd := m.loadResourceDetail(serviceName, resourceID)
-
-	// Focus on the detail pane
-	m.focus = FocusDetail
-	m.sidebar.SetFocused(false)
-	m.detail.SetFocused(true)
-	m.wrangler.SetFocused(true)
 
 	return tea.Batch(loadCmd, detailCmd)
 }
@@ -1475,11 +1453,6 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	// Wrangler load config action
 	if item.Action == "wrangler_load_config" {
 		m.wrangler.ActivateDirBrowser()
-		// Ensure focus is on the detail pane so the browser receives key events
-		m.focus = FocusDetail
-		m.sidebar.SetFocused(false)
-		m.detail.SetFocused(true)
-		m.wrangler.SetFocused(true)
 		return nil
 	}
 
@@ -1553,6 +1526,11 @@ func (m Model) viewDashboard() string {
 		fg := m.wrangler.VersionPickerView(m.width, m.height)
 		return overlayCenter(bg, fg, m.width, m.height)
 	}
+	if m.showLauncher {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.launcher.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
 	if m.showSearch {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.search.View(m.width, m.height)
@@ -1567,19 +1545,18 @@ func (m Model) viewDashboard() string {
 	return m.renderDashboardContent()
 }
 
-// renderDashboardContent renders the normal dashboard (header, sidebar, detail, help, status).
+// renderDashboardContent renders the normal dashboard (header, content, help, status).
 func (m Model) renderDashboardContent() string {
 	headerView := m.header.View()
-	sidebarView := m.sidebar.View()
 
-	var rightPane string
-	if m.wranglerShown {
-		rightPane = m.wrangler.View()
-	} else {
-		rightPane = m.detail.View()
+	var content string
+	switch m.viewState {
+	case ViewWrangler:
+		content = m.wrangler.View()
+	case ViewServiceList, ViewServiceDetail:
+		content = m.detail.View()
 	}
 
-	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, rightPane)
 	helpText := m.renderHelp()
 
 	parts := []string{headerView, content, helpText}
@@ -1657,13 +1634,46 @@ func overlayCenter(bg, fg string, termWidth, termHeight int) string {
 }
 
 func (m Model) renderHelp() string {
-	bindings := m.keys.ShortHelp()
+	type helpEntry struct {
+		key  string
+		desc string
+	}
+
+	var entries []helpEntry
+
+	switch m.viewState {
+	case ViewWrangler:
+		entries = []helpEntry{
+			{"ctrl+l", "services"},
+			{"ctrl+k", "search"},
+			{"ctrl+p", "actions"},
+			{"[/]", "accounts"},
+			{"q", "quit"},
+		}
+	case ViewServiceList:
+		entries = []helpEntry{
+			{"esc", "back"},
+			{"ctrl+h", "home"},
+			{"ctrl+l", "services"},
+			{"ctrl+k", "search"},
+			{"enter", "detail"},
+			{"[/]", "accounts"},
+		}
+	case ViewServiceDetail:
+		entries = []helpEntry{
+			{"esc", "back"},
+			{"ctrl+h", "home"},
+			{"ctrl+p", "actions"},
+			{"ctrl+k", "search"},
+			{"[/]", "accounts"},
+		}
+	}
+
 	var parts []string
-	for _, b := range bindings {
-		parts = append(parts,
-			fmt.Sprintf("%s %s",
-				lipgloss.NewStyle().Foreground(theme.ColorOrange).Bold(true).Render(b.Help().Key),
-				theme.DimStyle.Render(b.Help().Desc)))
+	for _, e := range entries {
+		parts = append(parts, fmt.Sprintf("%s %s",
+			lipgloss.NewStyle().Foreground(theme.ColorOrange).Bold(true).Render(e.key),
+			theme.DimStyle.Render(e.desc)))
 	}
 
 	help := ""

@@ -551,10 +551,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if !m.focused {
-		return m, nil
-	}
-
 	// When D1 console is active, forward all messages to the textinput for cursor blink
 	if m.d1Active && m.mode == viewDetail {
 		switch msg := msg.(type) {

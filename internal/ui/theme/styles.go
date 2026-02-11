@@ -18,9 +18,9 @@ var (
 
 // Layout constants
 const (
-	SidebarMinWidth = 22
-	SidebarMaxWidth = 30
-	SidebarRatio    = 0.20 // 20% of terminal width
+	// ContentMaxWidth can be used to cap content width on very wide terminals.
+	// Currently unused — full width is used everywhere.
+	ContentMaxWidth = 0
 )
 
 // Shared styles

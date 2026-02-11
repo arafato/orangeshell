@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"path/filepath"
+
 	"github.com/oarafat/orangeshell/internal/api"
 	"github.com/oarafat/orangeshell/internal/auth"
 	"github.com/oarafat/orangeshell/internal/config"
@@ -207,8 +209,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Start the periodic background refresh ticker
 		tickCmd := m.scheduleRefreshTick()
 
-		// Scan CWD for wrangler config in the background
-		wranglerCmd := m.scanWranglerConfigCmd()
+		// Discover wrangler projects in the background (supports monorepo)
+		wranglerCmd := m.discoverProjectsCmd()
 
 		cmds := []tea.Cmd{tickCmd, wranglerCmd, m.wrangler.SpinnerInit()}
 		return m, tea.Batch(cmds...)
@@ -410,10 +412,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wrangler.SetConfig(msg.Config, msg.Path, msg.Err)
 		return m, nil
 
+	case uiwrangler.ProjectsDiscoveredMsg:
+		m.wrangler.SetProjects(msg.Projects, msg.RootName)
+		// Trigger deployment fetching for all projects
+		return m, m.fetchAllProjectDeployments()
+
+	case uiwrangler.ProjectDeploymentLoadedMsg:
+		if msg.Err == nil {
+			m.wrangler.SetProjectDeployment(msg.ProjectIndex, msg.EnvName, msg.Deployment, msg.Subdomain)
+		}
+		return m, nil
+
 	case uiwrangler.LoadConfigPathMsg:
 		// User entered a custom path — scan it for wrangler config
 		m.wrangler.SetConfigLoading()
-		return m, tea.Batch(m.scanWranglerConfigFromDir(msg.Path), m.wrangler.SpinnerInit())
+		return m, tea.Batch(m.discoverProjectsFromDir(msg.Path), m.wrangler.SpinnerInit())
 
 	case uiwrangler.NavigateMsg:
 		return m, m.navigateTo(msg.ServiceName, msg.ResourceID)
@@ -597,7 +610,9 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+l":
 			// Open the service launcher overlay
 			projectName := ""
-			if m.wrangler.HasConfig() {
+			if m.wrangler.IsMonorepo() {
+				projectName = m.wrangler.RootName()
+			} else if m.wrangler.HasConfig() {
 				projectName = m.wrangler.Config().Name
 			}
 			m.launcher = launcher.New(projectName)
@@ -615,7 +630,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+p":
 			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
 				m.showActions = true
-				m.actionsPopup = m.buildWranglerActionsPopup()
+				if m.wrangler.IsOnProjectList() {
+					m.actionsPopup = m.buildMonorepoActionsPopup()
+				} else {
+					m.actionsPopup = m.buildWranglerActionsPopup()
+				}
 				return m, nil
 			}
 			if m.viewState == ViewServiceDetail && m.detail.InDetailView() {
@@ -1067,32 +1086,127 @@ func (m *Model) stopTail() {
 
 // --- Wrangler config helpers ---
 
-// scanWranglerConfigCmd returns a command that scans CWD for a wrangler config file.
-func (m Model) scanWranglerConfigCmd() tea.Cmd {
+// discoverProjectsCmd returns a command that discovers wrangler projects in the CWD tree.
+// If 0 found: sends ConfigLoadedMsg{nil, "", nil} (no config)
+// If 1 found: sends ConfigLoadedMsg with parsed config (backward compatible)
+// If 2+ found: sends ProjectsDiscoveredMsg for monorepo mode
+func (m Model) discoverProjectsCmd() tea.Cmd {
 	return func() tea.Msg {
-		dir := "."
-		path := wcfg.FindConfigUp(dir)
-		if path == "" {
+		projects := wcfg.DiscoverProjects(".")
+		cwd, _ := filepath.Abs(".")
+		rootName := filepath.Base(cwd)
+
+		switch len(projects) {
+		case 0:
 			return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
+		case 1:
+			// Single project — backward compatible: parse and return ConfigLoadedMsg
+			cfg, err := wcfg.Parse(projects[0].ConfigPath)
+			return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: projects[0].ConfigPath, Err: err}
+		default:
+			// Monorepo — return all projects for the project list view
+			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName}
 		}
-		cfg, err := wcfg.Parse(path)
-		return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: path, Err: err}
 	}
 }
 
-// scanWranglerConfigFromDir returns a command that scans a specific directory for a wrangler config file.
-func (m Model) scanWranglerConfigFromDir(dir string) tea.Cmd {
+// discoverProjectsFromDir returns a command that discovers wrangler projects starting
+// from a user-specified directory (via the directory browser). Uses the same 0/1/2+
+// branching as discoverProjectsCmd so monorepo directories are handled correctly.
+func (m Model) discoverProjectsFromDir(dir string) tea.Cmd {
 	return func() tea.Msg {
-		path := wcfg.FindConfigUp(dir)
-		if path == "" {
-			// Also try FindConfig directly in case it's a file path
-			path = wcfg.FindConfig(dir)
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			absDir = dir
 		}
-		if path == "" {
+		rootName := filepath.Base(absDir)
+
+		projects := wcfg.DiscoverProjects(absDir)
+
+		switch len(projects) {
+		case 0:
 			return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
+		case 1:
+			cfg, err := wcfg.Parse(projects[0].ConfigPath)
+			return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: projects[0].ConfigPath, Err: err}
+		default:
+			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName}
 		}
-		cfg, err := wcfg.Parse(path)
-		return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: path, Err: err}
+	}
+}
+
+// fetchAllProjectDeployments returns a batch command that fetches deployment data
+// for every project+environment combination in the monorepo. Also fetches the
+// account's workers.dev subdomain once. Results arrive as ProjectDeploymentLoadedMsg.
+func (m Model) fetchAllProjectDeployments() tea.Cmd {
+	workersSvc := m.getWorkersService()
+	if workersSvc == nil {
+		return nil
+	}
+
+	projectConfigs := m.wrangler.ProjectConfigs()
+	var cmds []tea.Cmd
+
+	for i, pc := range projectConfigs {
+		if pc.Config == nil {
+			continue
+		}
+		for _, envName := range pc.Config.EnvNames() {
+			scriptName := pc.Config.ResolvedEnvName(envName)
+			if scriptName == "" {
+				continue
+			}
+			cmds = append(cmds, m.fetchProjectDeployment(workersSvc, i, envName, scriptName))
+		}
+	}
+
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// fetchProjectDeployment returns a command that fetches the active deployment for
+// a single worker script and constructs its workers.dev URL using the cached subdomain.
+func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, projectIdx int, envName, scriptName string) tea.Cmd {
+	return func() tea.Msg {
+		// Fetch subdomain (cached after first call)
+		subdomain, _ := workersSvc.GetSubdomain()
+
+		// Fetch active deployment
+		dep, err := workersSvc.GetActiveDeployment(scriptName)
+		if err != nil {
+			return uiwrangler.ProjectDeploymentLoadedMsg{
+				ProjectIndex: projectIdx,
+				EnvName:      envName,
+				Err:          err,
+			}
+		}
+
+		var display *uiwrangler.DeploymentDisplay
+		if dep != nil {
+			display = &uiwrangler.DeploymentDisplay{}
+			for _, v := range dep.Versions {
+				shortID := v.VersionID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				display.Versions = append(display.Versions, uiwrangler.VersionSplit{
+					ShortID:    shortID,
+					Percentage: v.Percentage,
+				})
+			}
+			if subdomain != "" {
+				display.URL = fmt.Sprintf("https://%s.%s.workers.dev", scriptName, subdomain)
+			}
+		}
+
+		return uiwrangler.ProjectDeploymentLoadedMsg{
+			ProjectIndex: projectIdx,
+			EnvName:      envName,
+			Deployment:   display,
+			Subdomain:    subdomain,
+		}
 	}
 }
 
@@ -1248,6 +1362,22 @@ func (m *Model) openVersionPicker(mode uiwrangler.PickerMode, envName string) te
 	}
 	// Need to fetch versions in the background
 	return m.fetchWranglerVersions(envName)
+}
+
+// buildMonorepoActionsPopup creates a minimal action popup for the monorepo project list.
+// Only shows the "Load Wrangler Configuration..." action since per-project actions
+// require drilling into a specific project first.
+func (m Model) buildMonorepoActionsPopup() actions.Model {
+	title := fmt.Sprintf("Monorepo — %s", m.wrangler.RootName())
+	items := []actions.Item{
+		{
+			Label:       "Load Wrangler Configuration...",
+			Description: "Browse for a wrangler project directory",
+			Section:     "Configuration",
+			Action:      "wrangler_load_config",
+		},
+	}
+	return actions.New(title, items)
 }
 
 // buildWranglerActionsPopup creates the action popup for the wrangler view.

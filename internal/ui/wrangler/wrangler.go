@@ -2,6 +2,7 @@ package wrangler
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,6 +61,28 @@ type VersionsFetchedMsg struct {
 	Err      error
 }
 
+// ProjectsDiscoveredMsg is sent when monorepo discovery finds multiple projects.
+type ProjectsDiscoveredMsg struct {
+	Projects []wcfg.ProjectInfo
+	RootName string // CWD basename (monorepo name)
+}
+
+// ProjectDeploymentLoadedMsg delivers deployment data for a single project+env.
+type ProjectDeploymentLoadedMsg struct {
+	ProjectIndex int
+	EnvName      string
+	Deployment   *DeploymentDisplay
+	Subdomain    string
+	Err          error
+}
+
+// projectEntry holds data for a single project in the monorepo list.
+type projectEntry struct {
+	box        ProjectBox
+	config     *wcfg.WranglerConfig
+	configPath string
+}
+
 // Model is the Bubble Tea model for the Wrangler project view.
 type Model struct {
 	config        *wcfg.WranglerConfig
@@ -73,6 +96,13 @@ type Model struct {
 	insideBox  bool     // true when navigating inside an env box
 
 	focused bool // true when the right pane (wrangler view) is focused
+
+	// Monorepo support
+	projects       []projectEntry // nil = single project mode
+	projectCursor  int            // which project is focused in the list
+	projectScrollY int            // vertical scroll offset for project list
+	activeProject  int            // index of drilled-in project, -1 = on project list
+	rootName       string         // CWD basename (monorepo name)
 
 	// Directory browser for loading config from a custom directory
 	dirBrowser     DirBrowser
@@ -104,6 +134,7 @@ func New() Model {
 		configLoading: true, // loading until SetConfig is called
 		cmdPane:       NewCmdPane(),
 		spinner:       s,
+		activeProject: -1,
 	}
 }
 
@@ -130,14 +161,128 @@ func (m *Model) SetConfig(cfg *wcfg.WranglerConfig, path string, err error) {
 	}
 }
 
-// HasConfig returns whether a wrangler config is loaded.
+// HasConfig returns whether a wrangler config is loaded (or any project has one in monorepo mode).
 func (m Model) HasConfig() bool {
+	if m.IsMonorepo() {
+		if m.activeProject >= 0 && m.activeProject < len(m.projects) {
+			return m.projects[m.activeProject].config != nil
+		}
+		// On project list — return true if any project has a config
+		for _, p := range m.projects {
+			if p.config != nil {
+				return true
+			}
+		}
+		return false
+	}
 	return m.config != nil
 }
 
 // ConfigPath returns the path to the loaded config file.
+// In monorepo mode, returns the active project's config path.
 func (m Model) ConfigPath() string {
+	if m.IsMonorepo() && m.activeProject >= 0 && m.activeProject < len(m.projects) {
+		return m.projects[m.activeProject].configPath
+	}
 	return m.configPath
+}
+
+// IsMonorepo returns true if multiple projects were discovered.
+func (m Model) IsMonorepo() bool {
+	return m.projects != nil && len(m.projects) > 1
+}
+
+// IsOnProjectList returns true if we're in monorepo mode and showing the project list.
+func (m Model) IsOnProjectList() bool {
+	return m.IsMonorepo() && m.activeProject == -1
+}
+
+// RootName returns the monorepo root name (CWD basename).
+func (m Model) RootName() string {
+	return m.rootName
+}
+
+// SetProjects sets up the monorepo project list, parsing each config.
+func (m *Model) SetProjects(projects []wcfg.ProjectInfo, rootName string) {
+	m.configLoading = false
+	m.rootName = rootName
+
+	cwd, _ := filepath.Abs(".")
+
+	m.projects = make([]projectEntry, len(projects))
+	for i, p := range projects {
+		cfg, err := wcfg.Parse(p.ConfigPath)
+
+		// Compute relative path from CWD
+		relPath, _ := filepath.Rel(cwd, p.Dir)
+		if relPath == "" {
+			relPath = "."
+		}
+
+		name := filepath.Base(p.Dir)
+
+		box := ProjectBox{
+			Name:        name,
+			RelPath:     relPath,
+			Config:      cfg,
+			Err:         err,
+			Deployments: make(map[string]*DeploymentDisplay),
+		}
+
+		m.projects[i] = projectEntry{
+			box:        box,
+			config:     cfg,
+			configPath: p.ConfigPath,
+		}
+	}
+
+	m.projectCursor = 0
+	m.projectScrollY = 0
+	m.activeProject = -1
+}
+
+// SetProjectDeployment updates deployment data for a specific project and environment.
+func (m *Model) SetProjectDeployment(projectIndex int, envName string, dep *DeploymentDisplay, subdomain string) {
+	if projectIndex < 0 || projectIndex >= len(m.projects) {
+		return
+	}
+	if dep != nil {
+		m.projects[projectIndex].box.Deployments[envName] = dep
+	}
+	if subdomain != "" {
+		m.projects[projectIndex].box.Subdomain = subdomain
+	}
+}
+
+// ProjectCount returns the number of discovered projects (0 in single-project mode).
+func (m Model) ProjectCount() int {
+	return len(m.projects)
+}
+
+// ProjectConfigs returns (config, configPath) pairs for all projects.
+// Used by app.go to schedule deployment fetches.
+func (m Model) ProjectConfigs() [](struct {
+	Config     *wcfg.WranglerConfig
+	ConfigPath string
+}) {
+	result := make([](struct {
+		Config     *wcfg.WranglerConfig
+		ConfigPath string
+	}), len(m.projects))
+	for i, p := range m.projects {
+		result[i].Config = p.config
+		result[i].ConfigPath = p.configPath
+	}
+	return result
+}
+
+// Config returns the loaded wrangler config (may be nil).
+// In monorepo mode, returns the active project's config.
+func (m Model) Config() *wcfg.WranglerConfig {
+	if m.IsMonorepo() && m.activeProject >= 0 && m.activeProject < len(m.projects) {
+		return m.projects[m.activeProject].config
+	}
+	return m.config
 }
 
 // SetFocused sets whether this view is the focused pane.
@@ -157,6 +302,7 @@ func (m Model) IsDirBrowserActive() bool {
 }
 
 // SetConfigLoading resets the view to a loading state (e.g. when re-scanning a new path).
+// Clears both single-project and monorepo state so a fresh discovery can take over.
 func (m *Model) SetConfigLoading() {
 	m.config = nil
 	m.configPath = ""
@@ -165,17 +311,19 @@ func (m *Model) SetConfigLoading() {
 	m.envNames = nil
 	m.envBoxes = nil
 	m.showDirBrowser = false
+
+	// Clear monorepo state
+	m.projects = nil
+	m.projectCursor = 0
+	m.projectScrollY = 0
+	m.activeProject = -1
+	m.rootName = ""
 }
 
 // SetSize updates the view dimensions.
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-}
-
-// Config returns the loaded wrangler config (may be nil).
-func (m Model) Config() *wcfg.WranglerConfig {
-	return m.config
 }
 
 // FocusedEnvName returns the name of the currently focused environment.
@@ -319,6 +467,26 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+
+		// Monorepo project list mode
+		if m.IsOnProjectList() {
+			return m.updateProjectList(msg)
+		}
+
+		// If inside a monorepo project and pressing Esc at the outer env level,
+		// return to the project list instead of doing nothing.
+		if m.IsMonorepo() && m.activeProject >= 0 && !m.insideBox {
+			if msg.String() == "esc" || msg.String() == "backspace" {
+				m.activeProject = -1
+				// Restore monorepo project's config to nil so single-project view doesn't show
+				m.config = nil
+				m.configPath = ""
+				m.envNames = nil
+				m.envBoxes = nil
+				return m, nil
+			}
+		}
+
 		if m.config == nil {
 			return m, nil
 		}
@@ -328,6 +496,72 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.updateOuter(msg)
 	}
 	return m, nil
+}
+
+// updateProjectList handles navigation on the monorepo project list.
+func (m Model) updateProjectList(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.projectCursor > 0 {
+			m.projectCursor--
+			m.adjustProjectScroll()
+		}
+	case "down", "j":
+		if m.projectCursor < len(m.projects)-1 {
+			m.projectCursor++
+			m.adjustProjectScroll()
+		}
+	case "enter":
+		if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
+			return m.drillIntoProject(m.projectCursor)
+		}
+	}
+	return m, nil
+}
+
+// drillIntoProject sets the active project and switches to the single-project view.
+func (m Model) drillIntoProject(idx int) (Model, tea.Cmd) {
+	entry := m.projects[idx]
+	m.activeProject = idx
+
+	// Load this project's config into the single-project view fields
+	m.config = entry.config
+	m.configPath = entry.configPath
+	m.configErr = nil
+	m.focusedEnv = 0
+	m.insideBox = false
+	m.scrollY = 0
+
+	if entry.config != nil {
+		m.envNames = entry.config.EnvNames()
+		m.envBoxes = make([]EnvBox, len(m.envNames))
+		for i, name := range m.envNames {
+			m.envBoxes[i] = NewEnvBox(entry.config, name)
+		}
+	} else {
+		m.envNames = nil
+		m.envBoxes = nil
+	}
+
+	return m, nil
+}
+
+// adjustProjectScroll ensures the focused project is visible in the scroll window.
+func (m *Model) adjustProjectScroll() {
+	if m.projectCursor < m.projectScrollY {
+		m.projectScrollY = m.projectCursor
+	}
+	// Estimate ~10 lines per project box
+	visibleCount := m.height / 10
+	if visibleCount < 1 {
+		visibleCount = 1
+	}
+	if m.projectCursor >= m.projectScrollY+visibleCount {
+		m.projectScrollY = m.projectCursor - visibleCount + 1
+	}
+	if m.projectScrollY < 0 {
+		m.projectScrollY = 0
+	}
 }
 
 // updateCmdPaneScroll handles scroll keys for the command output pane.
@@ -446,7 +680,11 @@ func (m Model) View() string {
 	boxWidth := m.width - 4 // padding within the detail panel
 
 	// Title bar
-	title := theme.TitleStyle.Render("  Wrangler")
+	titleText := "  Wrangler"
+	if m.IsMonorepo() && m.activeProject >= 0 && m.activeProject < len(m.projects) {
+		titleText = fmt.Sprintf("  %s / %s", m.rootName, m.projects[m.activeProject].box.Name)
+	}
+	title := theme.TitleStyle.Render(titleText)
 	sepWidth := m.width - 6
 	if sepWidth < 0 {
 		sepWidth = 0
@@ -461,8 +699,8 @@ func (m Model) View() string {
 		return m.renderBorder(content, contentHeight)
 	}
 
-	// Config loading
-	if m.configLoading && m.config == nil && m.configErr == nil {
+	// Config loading (not shown in monorepo mode since projects handle their own state)
+	if m.configLoading && m.config == nil && m.configErr == nil && !m.IsMonorepo() {
 		body := fmt.Sprintf("\n  %s %s",
 			m.spinner.View(),
 			theme.DimStyle.Render("Loading wrangler configuration..."))
@@ -474,6 +712,11 @@ func (m Model) View() string {
 	if m.showDirBrowser {
 		content := m.dirBrowser.View(boxWidth, contentHeight)
 		return m.renderBorder(content, contentHeight)
+	}
+
+	// Monorepo project list view
+	if m.IsOnProjectList() {
+		return m.viewProjectList(contentHeight, boxWidth, title, sep)
 	}
 
 	// No config found
@@ -579,6 +822,57 @@ func (m Model) View() string {
 		content = strings.Join(visible, "\n")
 	}
 
+	return m.renderBorder(content, contentHeight)
+}
+
+// viewProjectList renders the monorepo project list view.
+func (m Model) viewProjectList(contentHeight, boxWidth int, title, sep string) string {
+	// Monorepo title uses the root name
+	monoTitle := theme.TitleStyle.Render(fmt.Sprintf("  %s", m.rootName))
+	subtitle := theme.DimStyle.Render(fmt.Sprintf("  %d projects", len(m.projects)))
+
+	helpText := theme.DimStyle.Render("  j/k navigate  |  enter drill into  |  ctrl+p actions  |  ctrl+l services")
+
+	// Build project box views
+	var allLines []string
+	allLines = append(allLines, monoTitle, sep, subtitle, "")
+
+	for i, p := range m.projects {
+		focused := i == m.projectCursor
+		boxView := p.box.View(boxWidth, focused)
+		boxLines := strings.Split(boxView, "\n")
+		allLines = append(allLines, boxLines...)
+		allLines = append(allLines, "") // spacer between boxes
+	}
+
+	allLines = append(allLines, helpText)
+
+	// Apply vertical scrolling
+	visibleHeight := contentHeight
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+	maxScroll := len(allLines) - visibleHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	offset := m.projectScrollY
+	if offset > maxScroll {
+		offset = maxScroll
+	}
+	endIdx := offset + visibleHeight
+	if endIdx > len(allLines) {
+		endIdx = len(allLines)
+	}
+
+	visible := allLines[offset:endIdx]
+
+	// Pad to exact height
+	for len(visible) < contentHeight {
+		visible = append(visible, "")
+	}
+
+	content := strings.Join(visible, "\n")
 	return m.renderBorder(content, contentHeight)
 }
 

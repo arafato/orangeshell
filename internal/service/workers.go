@@ -17,10 +17,11 @@ type WorkersService struct {
 	accountID string
 
 	// Cache for search and detail lookups
-	mu        sync.Mutex
-	cached    []Resource
-	cachedRaw map[string]workers.ScriptListResponse // keyed by script ID
-	cacheTime time.Time
+	mu              sync.Mutex
+	cached          []Resource
+	cachedRaw       map[string]workers.ScriptListResponse // keyed by script ID
+	cacheTime       time.Time
+	cachedSubdomain string // workers.dev subdomain, cached after first fetch
 }
 
 // NewWorkersService creates a Workers service.
@@ -402,6 +403,80 @@ func formatBindingsFromInfo(bindings []BindingInfo) string {
 		lines = append(lines, fmt.Sprintf("  %s [%s] %s", b.Name, b.Type, b.Detail))
 	}
 	return "\n" + strings.Join(lines, "\n")
+}
+
+// DeploymentInfo holds the active deployment data for a worker script.
+type DeploymentInfo struct {
+	ID        string
+	Versions  []DeploymentVersionInfo
+	CreatedOn time.Time
+	Author    string
+}
+
+// DeploymentVersionInfo holds a single version's deployment percentage.
+type DeploymentVersionInfo struct {
+	VersionID  string
+	Percentage float64
+}
+
+// GetActiveDeployment fetches the active deployment for a worker script.
+// Returns the first (active) deployment from the list, or nil if none found.
+func (s *WorkersService) GetActiveDeployment(scriptName string) (*DeploymentInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp, err := s.client.Workers.Scripts.Deployments.List(ctx, scriptName, workers.ScriptDeploymentListParams{
+		AccountID: cloudflare.F(s.accountID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deployments for %s: %w", scriptName, err)
+	}
+
+	if len(resp.Deployments) == 0 {
+		return nil, nil
+	}
+
+	// First deployment is the active one
+	d := resp.Deployments[0]
+	info := &DeploymentInfo{
+		ID:        d.ID,
+		CreatedOn: d.CreatedOn,
+		Author:    d.AuthorEmail,
+	}
+	for _, v := range d.Versions {
+		info.Versions = append(info.Versions, DeploymentVersionInfo{
+			VersionID:  v.VersionID,
+			Percentage: v.Percentage,
+		})
+	}
+	return info, nil
+}
+
+// GetSubdomain returns the account's workers.dev subdomain. Cached after first call.
+func (s *WorkersService) GetSubdomain() (string, error) {
+	s.mu.Lock()
+	if s.cachedSubdomain != "" {
+		sub := s.cachedSubdomain
+		s.mu.Unlock()
+		return sub, nil
+	}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := s.client.Workers.Subdomains.Get(ctx, workers.SubdomainGetParams{
+		AccountID: cloudflare.F(s.accountID),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get workers subdomain: %w", err)
+	}
+
+	s.mu.Lock()
+	s.cachedSubdomain = resp.Subdomain
+	s.mu.Unlock()
+
+	return resp.Subdomain, nil
 }
 
 func timeAgo(t time.Time) string {

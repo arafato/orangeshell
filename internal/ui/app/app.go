@@ -19,6 +19,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/config"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
+	"github.com/oarafat/orangeshell/internal/ui/bindings"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
@@ -134,6 +135,10 @@ type Model struct {
 	// Parallel tail sessions (monorepo multi-worker tailing)
 	parallelTailSessions []*svc.TailSession
 	parallelTailActive   bool
+
+	// Binding popup overlay
+	showBindings  bool
+	bindingsPopup bindings.Model
 
 	// Toast notification
 	toastMsg    string
@@ -675,6 +680,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showActions = false
 		return m, nil
 
+	// Binding popup messages
+	case bindings.CloseMsg:
+		m.showBindings = false
+		return m, nil
+
+	case bindings.ListResourcesMsg:
+		return m, m.listResourcesCmd(msg.ResourceType)
+
+	case bindings.ResourcesLoadedMsg:
+		m.bindingsPopup, _ = m.bindingsPopup.Update(msg)
+		return m, nil
+
+	case bindings.CreateResourceMsg:
+		return m, m.createResourceCmd(msg.ResourceType, msg.Name)
+
+	case bindings.CreateResourceDoneMsg:
+		m.bindingsPopup, _ = m.bindingsPopup.Update(msg)
+		return m, nil
+
+	case bindings.WriteBindingMsg:
+		return m, m.writeBindingCmd(msg.ConfigPath, msg.EnvName, msg.Binding)
+
+	case bindings.WriteBindingDoneMsg:
+		var cmd tea.Cmd
+		m.bindingsPopup, cmd = m.bindingsPopup.Update(msg)
+		return m, cmd
+
+	case bindings.DoneMsg:
+		m.showBindings = false
+		// Re-parse the config to refresh bindings display
+		if msg.ConfigPath != "" {
+			cfg, err := wcfg.Parse(msg.ConfigPath)
+			if err != nil {
+				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			} else {
+				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
+				m.toastMsg = "Binding added"
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			}
+		}
+		return m, nil
+
 	// Launcher messages
 	case launcher.LaunchServiceMsg:
 		m.showLauncher = false
@@ -745,6 +793,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSearch(msg)
 	}
 
+	// If bindings popup is active, route everything there
+	if m.showBindings {
+		return m.updateBindings(msg)
+	}
+
 	// If action popup is active, route everything there
 	if m.showActions {
 		return m.updateActions(msg)
@@ -804,6 +857,23 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmds...)
 			}
 			return m, nil
+		case "ctrl+n":
+			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
+				if m.wrangler.IsOnProjectList() {
+					// Monorepo view: create resources only
+					m.showBindings = true
+					m.bindingsPopup = bindings.NewMonorepo()
+					return m, nil
+				} else if m.wrangler.HasConfig() {
+					// Project view: create or assign existing resources
+					configPath := m.wrangler.ConfigPath()
+					envName := m.wrangler.FocusedEnvName()
+					workerName := m.wrangler.FocusedWorkerName()
+					m.showBindings = true
+					m.bindingsPopup = bindings.NewProject(configPath, envName, workerName)
+					return m, nil
+				}
+			}
 		case "ctrl+p":
 			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
 				m.showActions = true
@@ -1073,6 +1143,9 @@ func (m *Model) registerServices(accountID string) {
 
 	d1Svc := svc.NewD1Service(m.client.CF, accountID)
 	m.registry.Register(d1Svc)
+
+	queuesSvc := svc.NewQueueService(m.client.CF, accountID)
+	m.registry.Register(queuesSvc)
 }
 
 // switchAccount handles switching to a different account. Re-registers services with the
@@ -2196,6 +2269,96 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	return nil
 }
 
+// --- Binding popup helpers ---
+
+// updateBindings forwards messages to the bindings popup when it's active.
+func (m Model) updateBindings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.bindingsPopup, cmd = m.bindingsPopup.Update(msg)
+	return m, cmd
+}
+
+// listResourcesCmd fetches existing resources for the binding popup picker.
+func (m Model) listResourcesCmd(resourceType string) tea.Cmd {
+	return func() tea.Msg {
+		var items []bindings.ResourceItem
+
+		s := m.registry.Get(resourceTypeToServiceName(resourceType))
+		if s == nil {
+			return bindings.ResourcesLoadedMsg{
+				ResourceType: resourceType,
+				Err:          fmt.Errorf("service not available"),
+			}
+		}
+
+		resources, err := s.List()
+		if err != nil {
+			return bindings.ResourcesLoadedMsg{
+				ResourceType: resourceType,
+				Err:          err,
+			}
+		}
+
+		for _, r := range resources {
+			items = append(items, bindings.ResourceItem{
+				ID:   r.ID,
+				Name: r.Name,
+			})
+		}
+
+		return bindings.ResourcesLoadedMsg{
+			ResourceType: resourceType,
+			Items:        items,
+		}
+	}
+}
+
+// createResourceCmd runs a wrangler CLI command to create a new resource.
+func (m Model) createResourceCmd(resourceType, name string) tea.Cmd {
+	accountID := m.registry.ActiveAccountID()
+	return func() tea.Msg {
+		result := wcfg.CreateResource(context.Background(), wcfg.CreateResourceCmd{
+			ResourceType: resourceType,
+			Name:         name,
+			AccountID:    accountID,
+		})
+		return bindings.CreateResourceDoneMsg{
+			ResourceType: resourceType,
+			Name:         name,
+			Success:      result.Success,
+			Output:       result.Output,
+			ResourceID:   result.ResourceID,
+		}
+	}
+}
+
+// writeBindingCmd writes a binding definition into the wrangler config file.
+func (m Model) writeBindingCmd(configPath, envName string, binding wcfg.BindingDef) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.AddBinding(configPath, envName, binding)
+		if err != nil {
+			return bindings.WriteBindingDoneMsg{Success: false, Err: err}
+		}
+		return bindings.WriteBindingDoneMsg{Success: true}
+	}
+}
+
+// resourceTypeToServiceName maps a binding resource type to its service name in the registry.
+func resourceTypeToServiceName(resourceType string) string {
+	switch resourceType {
+	case "d1":
+		return "D1"
+	case "kv":
+		return "KV"
+	case "r2":
+		return "R2"
+	case "queue":
+		return "Queues"
+	default:
+		return resourceType
+	}
+}
+
 // View renders the full application.
 func (m Model) View() string {
 	switch m.phase {
@@ -2222,6 +2385,11 @@ func (m Model) viewDashboard() string {
 	if m.showSearch {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.search.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
+	if m.showBindings {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.bindingsPopup.View(m.width, m.height)
 		return overlayCenter(bg, fg, m.width, m.height)
 	}
 	if m.showActions {
@@ -2341,6 +2509,7 @@ func (m Model) renderHelp() string {
 				{"ctrl+l", "services"},
 				{"ctrl+k", "search"},
 				{"ctrl+p", "actions"},
+				{"ctrl+n", "bindings"},
 				{"[/]", "accounts"},
 			}
 			if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {

@@ -362,6 +362,56 @@ func (m Model) FocusedEnvName() string {
 	return ""
 }
 
+// ReloadConfig re-parses a config file and refreshes the UI state.
+// In monorepo mode, finds the matching project by config path and updates it.
+// In single-project mode, replaces the config and rebuilds env boxes.
+func (m *Model) ReloadConfig(configPath string, cfg *wcfg.WranglerConfig) {
+	if m.IsMonorepo() {
+		// Find the project with this config path and update its config
+		for i, p := range m.projects {
+			if p.configPath == configPath {
+				m.projects[i].config = cfg
+				m.projects[i].box.Config = cfg
+				break
+			}
+		}
+		// If we're drilled into this project, also update the env boxes
+		if m.activeProject >= 0 && m.activeProject < len(m.projects) {
+			entry := m.projects[m.activeProject]
+			if entry.configPath == configPath && cfg != nil {
+				m.config = cfg
+				m.envNames = cfg.EnvNames()
+				m.envBoxes = make([]EnvBox, len(m.envNames))
+				for i, name := range m.envNames {
+					m.envBoxes[i] = NewEnvBox(cfg, name)
+					// Copy deployment data from the project box
+					if dep, ok := entry.box.Deployments[name]; ok {
+						m.envBoxes[i].Deployment = dep
+					}
+					if entry.box.DeploymentFetched[name] {
+						m.envBoxes[i].DeploymentFetched = true
+					}
+					if entry.box.Subdomain != "" {
+						m.envBoxes[i].Subdomain = entry.box.Subdomain
+					}
+				}
+			}
+		}
+		return
+	}
+
+	// Single project mode
+	m.config = cfg
+	m.configPath = configPath
+	if cfg != nil {
+		m.envNames = cfg.EnvNames()
+		m.envBoxes = make([]EnvBox, len(m.envNames))
+		for i, name := range m.envNames {
+			m.envBoxes[i] = NewEnvBox(cfg, name)
+		}
+	}
+}
+
 // InsideBox returns whether the user is navigating inside an env box.
 func (m Model) InsideBox() bool {
 	return m.insideBox

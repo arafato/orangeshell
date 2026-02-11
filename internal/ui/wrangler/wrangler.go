@@ -281,7 +281,7 @@ func (m Model) updateOuter(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "enter":
 		if len(m.envBoxes) > 0 && m.focusedEnv < len(m.envBoxes) {
 			box := &m.envBoxes[m.focusedEnv]
-			if box.BindingCount() > 0 {
+			if box.ItemCount() > 0 {
 				m.insideBox = true
 				box.SetCursor(0)
 			}
@@ -290,7 +290,7 @@ func (m Model) updateOuter(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateInside handles navigation inside an env box (over bindings).
+// updateInside handles navigation inside an env box (over bindings and worker name).
 func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 	box := &m.envBoxes[m.focusedEnv]
 
@@ -302,6 +302,17 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "esc", "backspace":
 		m.insideBox = false
 	case "enter":
+		// Worker name selected — navigate to the Worker detail
+		if box.IsWorkerSelected() {
+			workerName := box.WorkerName
+			return m, func() tea.Msg {
+				return NavigateMsg{
+					ServiceName: "Workers",
+					ResourceID:  workerName,
+				}
+			}
+		}
+		// Binding selected — navigate to the binding target
 		bnd := box.SelectedBinding()
 		if bnd != nil && bnd.NavService() != "" {
 			return m, func() tea.Msg {

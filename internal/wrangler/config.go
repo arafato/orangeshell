@@ -388,15 +388,21 @@ func collectBindings(
 }
 
 // ResolvedEnvName returns the effective worker name for an environment.
-// Falls back to the top-level name if the environment doesn't override it.
+// For the default/top-level environment, returns the top-level name.
+// For named environments, returns the environment's explicit name override if set,
+// otherwise follows wrangler's convention: "<top-level-name>-<env-name>".
 func (c *WranglerConfig) ResolvedEnvName(envName string) string {
-	if envName == "" {
+	if envName == "" || envName == "default" {
 		return c.Name
 	}
 	if env, ok := c.Environments[envName]; ok && env.Name != "" {
 		return env.Name
 	}
-	return c.Name
+	// Wrangler convention: named envs without an explicit name get "<name>-<env>"
+	if c.Name != "" {
+		return c.Name + "-" + envName
+	}
+	return envName
 }
 
 // ResolvedCompatDate returns the effective compatibility date for an environment.

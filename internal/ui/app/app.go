@@ -1144,6 +1144,18 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 
 	// Wrangler commands section (only when config is loaded)
 	if m.wrangler.HasConfig() {
+		// Navigate to the worker in the dashboard
+		workerName := m.wrangler.Config().ResolvedEnvName(envName)
+		if workerName != "" {
+			items = append(items, actions.Item{
+				Label:       fmt.Sprintf("View Worker: %s", workerName),
+				Description: "Open worker in the dashboard",
+				Section:     "Navigation",
+				NavService:  "Workers",
+				NavResource: workerName,
+			})
+		}
+
 		wranglerActions := []string{"deploy", "rollback", "versions list", "deployments status"}
 		for _, action := range wranglerActions {
 			disabled := m.wrangler.CmdRunning()

@@ -11,6 +11,8 @@ import (
 )
 
 // EnvBox renders a single environment box in the Wrangler view.
+// The inner cursor covers all navigable items: the worker name at position 0,
+// followed by bindings at positions 1..N.
 type EnvBox struct {
 	EnvName    string             // "default" or named env
 	WorkerName string             // resolved worker name
@@ -18,7 +20,7 @@ type EnvBox struct {
 	Routes     []wcfg.RouteConfig // routes for this env
 	Bindings   []wcfg.Binding     // bindings for this env
 	Vars       map[string]string  // vars for this env (names only)
-	cursor     int                // inner cursor position (over bindings)
+	cursor     int                // inner cursor position (0=worker, 1..N=bindings)
 }
 
 // NewEnvBox creates an EnvBox from a wrangler config and environment name.
@@ -39,6 +41,29 @@ func (b EnvBox) BindingCount() int {
 	return len(b.Bindings)
 }
 
+// ItemCount returns the total number of navigable items (worker name + bindings).
+func (b EnvBox) ItemCount() int {
+	count := 0
+	if b.WorkerName != "" {
+		count++ // worker name at position 0
+	}
+	count += len(b.Bindings)
+	return count
+}
+
+// workerOffset returns 1 if the worker name is present (shifts binding indices), 0 otherwise.
+func (b EnvBox) workerOffset() int {
+	if b.WorkerName != "" {
+		return 1
+	}
+	return 0
+}
+
+// IsWorkerSelected returns true if the cursor is on the worker name item.
+func (b EnvBox) IsWorkerSelected() bool {
+	return b.WorkerName != "" && b.cursor == 0
+}
+
 // Cursor returns the current inner cursor position.
 func (b EnvBox) Cursor() int {
 	return b.cursor
@@ -46,11 +71,12 @@ func (b EnvBox) Cursor() int {
 
 // SetCursor sets the inner cursor position (clamped to valid range).
 func (b *EnvBox) SetCursor(idx int) {
+	max := b.ItemCount() - 1
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(b.Bindings) {
-		idx = len(b.Bindings) - 1
+	if idx > max {
+		idx = max
 	}
 	if idx < 0 {
 		idx = 0
@@ -67,20 +93,19 @@ func (b *EnvBox) CursorUp() {
 
 // CursorDown moves the inner cursor down.
 func (b *EnvBox) CursorDown() {
-	if b.cursor < len(b.Bindings)-1 {
+	if b.cursor < b.ItemCount()-1 {
 		b.cursor++
 	}
 }
 
-// SelectedBinding returns the binding at the current cursor, or nil if none.
+// SelectedBinding returns the binding at the current cursor, or nil if the cursor
+// is on the worker name or out of range.
 func (b EnvBox) SelectedBinding() *wcfg.Binding {
-	if len(b.Bindings) == 0 {
+	bindingIdx := b.cursor - b.workerOffset()
+	if bindingIdx < 0 || bindingIdx >= len(b.Bindings) {
 		return nil
 	}
-	if b.cursor >= 0 && b.cursor < len(b.Bindings) {
-		return &b.Bindings[b.cursor]
-	}
-	return nil
+	return &b.Bindings[bindingIdx]
 }
 
 // View renders the environment box.
@@ -88,18 +113,29 @@ func (b EnvBox) SelectedBinding() *wcfg.Binding {
 // focused: whether this box is the outer-focused box.
 // inside: whether the user is navigating inside this box (inner mode).
 func (b EnvBox) View(width int, focused, inside bool) string {
-	// Title line: env name + worker name
+	// Title line: env name
 	envLabel := b.EnvName
 	if envLabel == "default" {
 		envLabel = "default"
 	}
-	titleParts := []string{
-		theme.TitleStyle.Render(envLabel),
-	}
+	title := theme.TitleStyle.Render(envLabel)
+
+	// Worker name as a navigable item
+	var workerLine string
 	if b.WorkerName != "" {
-		titleParts = append(titleParts, theme.ValueStyle.Render(b.WorkerName))
+		workerCursor := "  "
+		workerStyle := theme.NormalItemStyle
+		if inside && b.cursor == 0 {
+			workerCursor = theme.SelectedItemStyle.Render("> ")
+			workerStyle = theme.SelectedItemStyle
+		}
+		navArrow := " " + theme.ActionNavArrowStyle.Render("\u2192") // →
+		workerLine = fmt.Sprintf("%s%s %s%s",
+			workerCursor,
+			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Worker")),
+			workerStyle.Render(b.WorkerName),
+			navArrow)
 	}
-	title := strings.Join(titleParts, "  ")
 
 	// Compat date
 	var metaLine string
@@ -124,10 +160,11 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 	var bindingLines []string
 	if len(b.Bindings) > 0 {
 		bindingLines = append(bindingLines, theme.LabelStyle.Render("Bindings"))
+		offset := b.workerOffset()
 		for i, bnd := range b.Bindings {
 			cursor := "  "
 			nameStyle := theme.NormalItemStyle
-			if inside && i == b.cursor {
+			if inside && (i+offset) == b.cursor {
 				cursor = theme.SelectedItemStyle.Render("> ")
 				nameStyle = theme.SelectedItemStyle
 			}
@@ -166,6 +203,9 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 	contentParts = append(contentParts, title)
 	if metaLine != "" {
 		contentParts = append(contentParts, metaLine)
+	}
+	if workerLine != "" {
+		contentParts = append(contentParts, workerLine)
 	}
 	if len(routeLines) > 0 {
 		contentParts = append(contentParts, strings.Join(routeLines, "\n"))

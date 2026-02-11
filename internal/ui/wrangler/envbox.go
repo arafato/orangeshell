@@ -10,6 +10,14 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
 
+// renderHyperlink wraps text in an OSC 8 terminal hyperlink with blue underline styling.
+// Most modern terminals (iTerm2, Ghostty, WezTerm, Windows Terminal, Kitty) support this,
+// making the text clickable — clicking opens the URL in the default browser.
+func renderHyperlink(url, text string) string {
+	styled := lipgloss.NewStyle().Foreground(theme.ColorBlue).Underline(true).Render(text)
+	return fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", url, styled)
+}
+
 // EnvBox renders a single environment box in the Wrangler view.
 // The inner cursor covers all navigable items: the worker name at position 0,
 // followed by bindings at positions 1..N.
@@ -21,6 +29,10 @@ type EnvBox struct {
 	Bindings   []wcfg.Binding     // bindings for this env
 	Vars       map[string]string  // vars for this env (names only)
 	cursor     int                // inner cursor position (0=worker, 1..N=bindings)
+
+	// Deployment info (fetched async from API)
+	Deployment *DeploymentDisplay // active deployment for this env
+	Subdomain  string             // account's workers.dev subdomain
 }
 
 // NewEnvBox creates an EnvBox from a wrangler config and environment name.
@@ -137,6 +149,31 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 			navArrow)
 	}
 
+	// URL line (clickable hyperlink)
+	var urlLine string
+	if b.WorkerName != "" && b.Subdomain != "" {
+		url := fmt.Sprintf("https://%s.%s.workers.dev", b.WorkerName, b.Subdomain)
+		urlLine = fmt.Sprintf("  %s %s",
+			theme.DimStyle.Render(fmt.Sprintf("%-10s", "URL")),
+			renderHyperlink(url, url))
+	}
+
+	// Deployment line
+	var deployLine string
+	if b.Deployment != nil && len(b.Deployment.Versions) > 0 {
+		var versionParts []string
+		for _, v := range b.Deployment.Versions {
+			if v.Percentage >= 100 {
+				versionParts = append(versionParts, theme.ValueStyle.Render(fmt.Sprintf("v%s (100%%)", v.ShortID)))
+			} else {
+				versionParts = append(versionParts, theme.ValueStyle.Render(fmt.Sprintf("v%s@%.0f%%", v.ShortID, v.Percentage)))
+			}
+		}
+		deployLine = fmt.Sprintf("  %s %s",
+			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Deploy")),
+			strings.Join(versionParts, theme.DimStyle.Render(" / ")))
+	}
+
 	// Compat date
 	var metaLine string
 	if b.CompatDate != "" {
@@ -206,6 +243,12 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 	}
 	if workerLine != "" {
 		contentParts = append(contentParts, workerLine)
+	}
+	if urlLine != "" {
+		contentParts = append(contentParts, urlLine)
+	}
+	if deployLine != "" {
+		contentParts = append(contentParts, deployLine)
 	}
 	if len(routeLines) > 0 {
 		contentParts = append(contentParts, strings.Join(routeLines, "\n"))

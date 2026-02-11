@@ -94,15 +94,13 @@ func (b ProjectBox) renderEnvSection(envName string) string {
 		theme.ValueStyle.Render(workerName),
 		theme.ActionNavArrowStyle.Render("\u2192"))
 
-	// URL line (if we have subdomain info)
+	// URL line (clickable hyperlink)
 	var urlLine string
 	if b.Subdomain != "" {
 		url := fmt.Sprintf("https://%s.%s.workers.dev", workerName, b.Subdomain)
-		// OSC 8 terminal hyperlink
-		hyperlink := fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", url, url)
 		urlLine = fmt.Sprintf("  %s  %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-9s", "URL")),
-			theme.DimStyle.Render(hyperlink))
+			renderHyperlink(url, url))
 	}
 
 	// Deployment line

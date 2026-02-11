@@ -77,6 +77,14 @@ type ProjectDeploymentLoadedMsg struct {
 	Err          error
 }
 
+// EnvDeploymentLoadedMsg delivers deployment data for a single-project env.
+type EnvDeploymentLoadedMsg struct {
+	EnvName    string
+	Deployment *DeploymentDisplay
+	Subdomain  string
+	Err        error
+}
+
 // TailStartMsg requests the app to start tailing a worker from the wrangler view.
 type TailStartMsg struct {
 	ScriptName string
@@ -394,6 +402,39 @@ func (m Model) TailActive() bool {
 	return m.cmdPane.IsTail() && m.cmdPane.IsRunning()
 }
 
+// TailConnected marks the tail as connected (first data may arrive).
+func (m *Model) TailConnected() {
+	m.cmdPane.TailConnected()
+}
+
+// SetEnvDeployment updates deployment/subdomain data on the matching EnvBox.
+func (m *Model) SetEnvDeployment(envName string, dep *DeploymentDisplay, subdomain string) {
+	for i := range m.envBoxes {
+		if m.envBoxes[i].EnvName == envName {
+			if dep != nil {
+				m.envBoxes[i].Deployment = dep
+			}
+			if subdomain != "" {
+				m.envBoxes[i].Subdomain = subdomain
+			}
+			return
+		}
+	}
+}
+
+// FocusedWorkerName returns the worker name for the currently focused environment.
+// Returns "" if no config or no worker name is resolved.
+func (m Model) FocusedWorkerName() string {
+	if m.config == nil {
+		return ""
+	}
+	envName := m.FocusedEnvName()
+	if envName == "" {
+		return ""
+	}
+	return m.config.ResolvedEnvName(envName)
+}
+
 // StartCommand prepares the cmd pane for a new command execution.
 func (m *Model) StartCommand(action, envName string) {
 	m.cmdPane.StartCommand(action, envName)
@@ -528,6 +569,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if m.config == nil {
 			return m, nil
 		}
+
+		// Handle "t" key for tail toggle (before routing to inner/outer nav).
+		// Block when a wrangler command (non-tail) is running.
+		if msg.String() == "t" {
+			if m.TailActive() {
+				// Tail is running — stop it
+				return m, func() tea.Msg { return TailStoppedMsg{} }
+			}
+			// Don't start tail if a non-tail command is running
+			if !m.cmdPane.IsRunning() {
+				workerName := m.FocusedWorkerName()
+				if workerName != "" {
+					return m, func() tea.Msg { return TailStartMsg{ScriptName: workerName} }
+				}
+			}
+		}
+
 		if m.insideBox {
 			return m.updateInside(msg)
 		}
@@ -575,6 +633,13 @@ func (m Model) drillIntoProject(idx int) (Model, tea.Cmd) {
 		m.envBoxes = make([]EnvBox, len(m.envNames))
 		for i, name := range m.envNames {
 			m.envBoxes[i] = NewEnvBox(entry.config, name)
+			// Copy deployment data from the project box into the env box
+			if dep, ok := entry.box.Deployments[name]; ok && dep != nil {
+				m.envBoxes[i].Deployment = dep
+			}
+			if entry.box.Subdomain != "" {
+				m.envBoxes[i].Subdomain = entry.box.Subdomain
+			}
 		}
 	} else {
 		m.envNames = nil
@@ -766,15 +831,31 @@ func (m Model) View() string {
 		return m.renderBorder(content, contentHeight)
 	}
 
-	// Calculate layout split: if cmd pane is active, give it ~35% of height
+	// Calculate layout split:
+	// - When a wrangler command is running: command output pane at ~35%
+	// - Otherwise: always show the Live Logs tail console at ~40%
 	cmdPaneHeight := 0
+	tailConsoleHeight := 0
 	envPaneHeight := contentHeight
-	if m.cmdPane.IsActive() {
+
+	cmdActive := m.cmdPane.IsActive() && !m.cmdPane.IsTail()
+	if cmdActive {
+		// Wrangler command output pane
 		cmdPaneHeight = contentHeight * 35 / 100
 		if cmdPaneHeight < 6 {
 			cmdPaneHeight = 6
 		}
 		envPaneHeight = contentHeight - cmdPaneHeight
+		if envPaneHeight < 5 {
+			envPaneHeight = 5
+		}
+	} else {
+		// Always-visible tail console
+		tailConsoleHeight = contentHeight * 40 / 100
+		if tailConsoleHeight < 6 {
+			tailConsoleHeight = 6
+		}
+		envPaneHeight = contentHeight - tailConsoleHeight
 		if envPaneHeight < 5 {
 			envPaneHeight = 5
 		}
@@ -852,10 +933,15 @@ func (m Model) View() string {
 
 	var content string
 	if cmdPaneHeight > 0 {
-		// Split view: env boxes on top, cmd pane on bottom
+		// Split view: env boxes on top, command output pane on bottom
 		envContent := strings.Join(visible, "\n")
 		cmdContent := m.cmdPane.View(cmdPaneHeight, m.width-4, m.spinner.View())
 		content = envContent + "\n" + cmdContent
+	} else if tailConsoleHeight > 0 {
+		// Split view: env boxes on top, tail console on bottom
+		envContent := strings.Join(visible, "\n")
+		tailContent := m.cmdPane.ViewTailConsole(tailConsoleHeight, m.width-4, m.spinner.View())
+		content = envContent + "\n" + tailContent
 	} else {
 		content = strings.Join(visible, "\n")
 	}

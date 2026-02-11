@@ -329,7 +329,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case detail.TailStartedMsg:
 		m.tailSession = msg.Session
 		if m.tailSource == "wrangler" {
-			// Wrangler-initiated tail: no detail state to update
+			m.wrangler.TailConnected()
 		} else {
 			m.detail.SetTailStarted()
 		}
@@ -424,6 +424,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Wrangler messages
 	case uiwrangler.ConfigLoadedMsg:
 		m.wrangler.SetConfig(msg.Config, msg.Path, msg.Err)
+		// Trigger deployment fetching for single-project environments
+		if msg.Err == nil && msg.Config != nil {
+			return m, m.fetchSingleProjectDeployments(msg.Config)
+		}
+		return m, nil
+
+	case uiwrangler.EnvDeploymentLoadedMsg:
+		if msg.Err == nil {
+			m.wrangler.SetEnvDeployment(msg.EnvName, msg.Deployment, msg.Subdomain)
+		}
 		return m, nil
 
 	case uiwrangler.ProjectsDiscoveredMsg:
@@ -435,6 +445,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil {
 			m.wrangler.SetProjectDeployment(msg.ProjectIndex, msg.EnvName, msg.Deployment, msg.Subdomain)
 		}
+		return m, nil
+
+	case uiwrangler.TailStartMsg:
+		// "t" key pressed in wrangler view — start tailing
+		if m.client == nil {
+			return m, nil
+		}
+		// Stop any existing tail
+		m.stopTail()
+		m.detail.ClearTail()
+		// Start tail in wrangler view
+		m.tailSource = "wrangler"
+		m.wrangler.StartTail(msg.ScriptName)
+		accountID := m.registry.ActiveAccountID()
+		return m, tea.Batch(m.startTailCmd(accountID, msg.ScriptName), m.wrangler.SpinnerInit())
+
+	case uiwrangler.TailStoppedMsg:
+		// "t" key pressed while tail is active — stop it
+		m.stopTail()
+		m.detail.ClearTail()
 		return m, nil
 
 	case uiwrangler.LoadConfigPathMsg:
@@ -1187,6 +1217,70 @@ func (m Model) fetchAllProjectDeployments() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// fetchSingleProjectDeployments returns a batch command that fetches deployment data
+// for every environment in a single-project wrangler config. Results arrive as
+// EnvDeploymentLoadedMsg and get applied to the EnvBox via SetEnvDeployment.
+func (m Model) fetchSingleProjectDeployments(cfg *wcfg.WranglerConfig) tea.Cmd {
+	workersSvc := m.getWorkersService()
+	if workersSvc == nil {
+		return nil
+	}
+
+	var cmds []tea.Cmd
+	for _, envName := range cfg.EnvNames() {
+		scriptName := cfg.ResolvedEnvName(envName)
+		if scriptName == "" {
+			continue
+		}
+		cmds = append(cmds, m.fetchEnvDeployment(workersSvc, envName, scriptName))
+	}
+
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// fetchEnvDeployment returns a command that fetches the active deployment for
+// a single env in a single-project config.
+func (m Model) fetchEnvDeployment(workersSvc *svc.WorkersService, envName, scriptName string) tea.Cmd {
+	return func() tea.Msg {
+		subdomain, _ := workersSvc.GetSubdomain()
+
+		dep, err := workersSvc.GetActiveDeployment(scriptName)
+		if err != nil {
+			return uiwrangler.EnvDeploymentLoadedMsg{
+				EnvName: envName,
+				Err:     err,
+			}
+		}
+
+		var display *uiwrangler.DeploymentDisplay
+		if dep != nil {
+			display = &uiwrangler.DeploymentDisplay{}
+			for _, v := range dep.Versions {
+				shortID := v.VersionID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				display.Versions = append(display.Versions, uiwrangler.VersionSplit{
+					ShortID:    shortID,
+					Percentage: v.Percentage,
+				})
+			}
+			if subdomain != "" {
+				display.URL = fmt.Sprintf("https://%s.%s.workers.dev", scriptName, subdomain)
+			}
+		}
+
+		return uiwrangler.EnvDeploymentLoadedMsg{
+			EnvName:    envName,
+			Deployment: display,
+			Subdomain:  subdomain,
+		}
+	}
+}
+
 // fetchProjectDeployment returns a command that fetches the active deployment for
 // a single worker script and constructs its workers.dev URL using the cached subdomain.
 func (m Model) fetchProjectDeployment(workersSvc *svc.WorkersService, projectIdx int, envName, scriptName string) tea.Cmd {
@@ -1858,8 +1952,11 @@ func (m Model) renderHelp() string {
 			{"ctrl+k", "search"},
 			{"ctrl+p", "actions"},
 			{"[/]", "accounts"},
-			{"q", "quit"},
 		}
+		if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
+			entries = append(entries, helpEntry{"t", "tail"})
+		}
+		entries = append(entries, helpEntry{"q", "quit"})
 	case ViewServiceList:
 		entries = []helpEntry{
 			{"esc", "back"},
@@ -1875,8 +1972,11 @@ func (m Model) renderHelp() string {
 			{"ctrl+h", "home"},
 			{"ctrl+p", "actions"},
 			{"ctrl+k", "search"},
-			{"[/]", "accounts"},
 		}
+		if m.detail.IsWorkersDetail() {
+			entries = append(entries, helpEntry{"t", "tail"})
+		}
+		entries = append(entries, helpEntry{"[/]", "accounts"})
 	}
 
 	var parts []string

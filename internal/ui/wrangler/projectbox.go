@@ -122,7 +122,7 @@ func (b ProjectBox) renderEnvSection(envName string) string {
 		// API responded but no deployment found for this account
 		deployLine = fmt.Sprintf("  %s  %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-9s", "Deploy")),
-			theme.DimStyle.Render("Currently not deployed"))
+			theme.ErrorStyle.Render("Currently not deployed"))
 	}
 
 	// Bindings summary (compact: "KV MY_CACHE · D1 MY_DB · R2 ASSETS")

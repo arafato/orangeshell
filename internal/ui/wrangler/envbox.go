@@ -177,7 +177,7 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 		// API responded but no deployment found for this account
 		deployLine = fmt.Sprintf("  %s %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Deploy")),
-			theme.DimStyle.Render("Currently not deployed"))
+			theme.ErrorStyle.Render("Currently not deployed"))
 	}
 
 	// Compat date

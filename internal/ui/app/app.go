@@ -23,6 +23,8 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/setup"
 	"github.com/oarafat/orangeshell/internal/ui/sidebar"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
+	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
+	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
 
 const refreshInterval = 30 * time.Second
@@ -91,6 +93,11 @@ type Model struct {
 	// Error display
 	err error
 
+	// Wrangler project view
+	wrangler       uiwrangler.Model
+	wranglerShown  bool // true when sidebar has "Wrangler" selected
+	wranglerRunner *wcfg.Runner
+
 	// Active tail session (nil when no tail is running)
 	tailSession *svc.TailSession
 
@@ -112,22 +119,31 @@ func NewModel(cfg *config.Config) Model {
 	// initially selected service so the user doesn't see "Select a service"
 	// while authentication is in flight.
 	var det detail.Model
+	wranglerShown := false
 	if phase == PhaseDashboard {
-		det = detail.NewLoading(sb.SelectedService())
+		if sb.SelectedService() == "Wrangler" {
+			// Wrangler is selected by default — don't load any API service
+			det = detail.New()
+			wranglerShown = true
+		} else {
+			det = detail.NewLoading(sb.SelectedService())
+		}
 	} else {
 		det = detail.New()
 	}
 
 	m := Model{
-		setup:    setup.New(cfg),
-		header:   header.New(cfg.AuthMethod),
-		sidebar:  sb,
-		detail:   det,
-		search:   search.New(),
-		keys:     theme.DefaultKeyMap(),
-		phase:    phase,
-		cfg:      cfg,
-		registry: svc.NewRegistry(),
+		setup:         setup.New(cfg),
+		header:        header.New(cfg.AuthMethod),
+		sidebar:       sb,
+		detail:        det,
+		search:        search.New(),
+		wrangler:      uiwrangler.New(),
+		wranglerShown: wranglerShown,
+		keys:          theme.DefaultKeyMap(),
+		phase:         phase,
+		cfg:           cfg,
+		registry:      svc.NewRegistry(),
 	}
 
 	return m
@@ -136,7 +152,11 @@ func NewModel(cfg *config.Config) Model {
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
 	if m.phase == PhaseDashboard {
-		return tea.Batch(m.initDashboardCmd(), m.detail.SpinnerInit())
+		cmds := []tea.Cmd{m.initDashboardCmd(), m.detail.SpinnerInit()}
+		if m.wranglerShown {
+			cmds = append(cmds, m.wrangler.SpinnerInit())
+		}
+		return tea.Batch(cmds...)
 	}
 	return nil
 }
@@ -202,17 +222,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Register services for the active account
 		m.registerServices(m.cfg.AccountID)
 
-		// Load resources for the initially selected service
+		// Load resources for the initially selected service (skip if Wrangler is selected)
 		serviceName := m.sidebar.SelectedService()
-		m.detail.SetService(serviceName)
-		loadCmd := tea.Cmd(func() tea.Msg {
-			return detail.LoadResourcesMsg{ServiceName: serviceName}
-		})
+		var loadCmd tea.Cmd
+		if serviceName == "Wrangler" {
+			m.wranglerShown = true
+		} else {
+			m.detail.SetService(serviceName)
+			loadCmd = tea.Cmd(func() tea.Msg {
+				return detail.LoadResourcesMsg{ServiceName: serviceName}
+			})
+		}
 
 		// Start the periodic background refresh ticker and the spinner
 		tickCmd := m.scheduleRefreshTick()
 
-		cmds := []tea.Cmd{loadCmd, tickCmd, m.detail.SpinnerInit()}
+		// Scan CWD for wrangler config in the background
+		wranglerCmd := m.scanWranglerConfigCmd()
+
+		cmds := []tea.Cmd{tickCmd, m.detail.SpinnerInit(), wranglerCmd}
+		if loadCmd != nil {
+			cmds = append(cmds, loadCmd)
+		}
 		return m, tea.Batch(cmds...)
 
 	case errMsg:
@@ -406,6 +437,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.registry.SetBindingIndex(msg.index)
 		return m, nil
 
+	// Wrangler messages
+	case uiwrangler.ConfigLoadedMsg:
+		m.wrangler.SetConfig(msg.Config, msg.Path, msg.Err)
+		return m, nil
+
+	case uiwrangler.LoadConfigPathMsg:
+		// User entered a custom path — scan it for wrangler config
+		m.wrangler.SetConfigLoading()
+		return m, tea.Batch(m.scanWranglerConfigFromDir(msg.Path), m.wrangler.SpinnerInit())
+
+	case uiwrangler.NavigateMsg:
+		m.wranglerShown = false
+		return m, m.navigateTo(msg.ServiceName, msg.ResourceID)
+
+	case uiwrangler.ActionMsg:
+		return m, m.startWranglerCmd(msg.Action, msg.EnvName)
+
+	case uiwrangler.CmdOutputMsg:
+		m.wrangler.AppendCmdOutput(msg.Line)
+		return m, waitForWranglerOutput(m.wranglerRunner)
+
+	case uiwrangler.CmdDoneMsg:
+		// Drain any remaining lines before finishing
+		if m.wranglerRunner != nil {
+			for line := range m.wranglerRunner.LinesCh() {
+				m.wrangler.AppendCmdOutput(line)
+			}
+		}
+		m.wrangler.FinishCommand(msg.Result)
+		m.wranglerRunner = nil
+		return m, nil
+
 	// Search messages
 	case search.NavigateMsg:
 		m.showSearch = false
@@ -426,9 +489,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
+		var cmds []tea.Cmd
 		if m.detail.IsLoading() {
-			cmd := m.detail.UpdateSpinner(msg)
-			return m, cmd
+			cmds = append(cmds, m.detail.UpdateSpinner(msg))
+		}
+		if m.wrangler.IsLoading() {
+			cmds = append(cmds, m.wrangler.UpdateSpinner(msg))
+		}
+		if len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 	}
@@ -484,7 +553,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.toggleFocus()
 			return m, nil
-		case "ctrl+k", "/":
+		case "ctrl+k":
 			m.showSearch = true
 			m.search.SetItems(m.registry.AllSearchItems())
 			m.search.Reset()
@@ -494,6 +563,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "ctrl+p":
+			if m.wranglerShown && !m.wrangler.IsDirBrowserActive() {
+				m.showActions = true
+				m.actionsPopup = m.buildWranglerActionsPopup()
+				return m, nil
+			}
 			if m.detail.InDetailView() {
 				m.showActions = true
 				m.actionsPopup = m.buildActionsPopup()
@@ -526,7 +600,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case FocusDetail:
-		m.detail, cmd = m.detail.Update(msg)
+		if m.wranglerShown {
+			m.wrangler, cmd = m.wrangler.Update(msg)
+		} else {
+			m.detail, cmd = m.detail.Update(msg)
+		}
 	}
 
 	return m, cmd
@@ -544,10 +622,12 @@ func (m *Model) toggleFocus() {
 		m.focus = FocusDetail
 		m.sidebar.SetFocused(false)
 		m.detail.SetFocused(true)
+		m.wrangler.SetFocused(true)
 	case FocusDetail:
 		m.focus = FocusSidebar
 		m.sidebar.SetFocused(true)
 		m.detail.SetFocused(false)
+		m.wrangler.SetFocused(false)
 	}
 }
 
@@ -580,6 +660,7 @@ func (m *Model) layout() {
 	m.header.SetWidth(m.width)
 	m.sidebar.SetSize(sidebarWidth, contentHeight)
 	m.detail.SetSize(detailWidth, contentHeight)
+	m.wrangler.SetSize(detailWidth, contentHeight)
 	// Detail content starts after: header(1) + top border(1) = 2 rows from top of terminal
 	m.detail.SetYOffset(headerHeight + 1)
 }
@@ -598,12 +679,28 @@ func (m *Model) fetchUncachedForSearch() []tea.Cmd {
 	return cmds
 }
 
+// stopWranglerRunner cancels any running wrangler command.
+func (m *Model) stopWranglerRunner() {
+	if m.wranglerRunner != nil {
+		m.wranglerRunner.Stop()
+		m.wranglerRunner = nil
+	}
+}
+
 // switchToService handles switching to a service, using cached data if available.
 func (m *Model) switchToService(name string) tea.Cmd {
 	// Stop any active tail/D1 session when switching services
 	m.stopTail()
 	m.detail.ClearTail()
 	m.detail.ClearD1()
+	m.stopWranglerRunner()
+
+	// Handle Wrangler specially — it doesn't go through the service interface
+	if name == "Wrangler" {
+		m.wranglerShown = true
+		return nil
+	}
+	m.wranglerShown = false
 
 	entry := m.registry.GetCache(name)
 	if entry != nil {
@@ -754,10 +851,11 @@ func (m *Model) registerServices(accountID string) {
 // new accountID, loads the currently selected sidebar service, and shows cached data
 // instantly if we've visited this account before.
 func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
-	// Stop any active tail session
+	// Stop any active tail session and wrangler command
 	m.stopTail()
 	m.detail.ClearTail()
 	m.detail.ClearD1()
+	m.stopWranglerRunner()
 
 	m.cfg.AccountID = accountID
 	m.registerServices(accountID)
@@ -787,6 +885,8 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 
 // navigateTo switches the sidebar to a service and loads the detail for a specific resource.
 func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
+	m.wranglerShown = false
+
 	// Find and select the service in the sidebar
 	for i, s := range m.sidebar.Services() {
 		if s.Name == serviceName {
@@ -812,6 +912,7 @@ func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
 	m.focus = FocusDetail
 	m.sidebar.SetFocused(false)
 	m.detail.SetFocused(true)
+	m.wrangler.SetFocused(true)
 
 	return tea.Batch(loadCmd, detailCmd)
 }
@@ -942,6 +1043,149 @@ func (m *Model) stopTail() {
 	}()
 }
 
+// --- Wrangler config helpers ---
+
+// scanWranglerConfigCmd returns a command that scans CWD for a wrangler config file.
+func (m Model) scanWranglerConfigCmd() tea.Cmd {
+	return func() tea.Msg {
+		dir := "."
+		path := wcfg.FindConfigUp(dir)
+		if path == "" {
+			return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
+		}
+		cfg, err := wcfg.Parse(path)
+		return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: path, Err: err}
+	}
+}
+
+// scanWranglerConfigFromDir returns a command that scans a specific directory for a wrangler config file.
+func (m Model) scanWranglerConfigFromDir(dir string) tea.Cmd {
+	return func() tea.Msg {
+		path := wcfg.FindConfigUp(dir)
+		if path == "" {
+			// Also try FindConfig directly in case it's a file path
+			path = wcfg.FindConfig(dir)
+		}
+		if path == "" {
+			return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
+		}
+		cfg, err := wcfg.Parse(path)
+		return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: path, Err: err}
+	}
+}
+
+// startWranglerCmd creates a Runner and starts the wrangler command.
+func (m *Model) startWranglerCmd(action, envName string) tea.Cmd {
+	if m.wranglerRunner != nil && m.wranglerRunner.IsRunning() {
+		// Don't start a new command while one is running
+		return nil
+	}
+
+	cmd := wcfg.Command{
+		Action:     action,
+		ConfigPath: m.wrangler.ConfigPath(),
+		EnvName:    envName,
+	}
+
+	runner := wcfg.NewRunner()
+	m.wranglerRunner = runner
+	m.wrangler.StartCommand(action, envName)
+
+	return tea.Batch(
+		func() tea.Msg {
+			ctx := context.Background()
+			if err := runner.Start(ctx, cmd); err != nil {
+				return uiwrangler.CmdDoneMsg{Result: wcfg.RunResult{ExitCode: 1, Err: err}}
+			}
+			// Read first output line (or done signal)
+			return readWranglerOutputMsg(runner)
+		},
+		m.wrangler.SpinnerInit(),
+	)
+}
+
+// readWranglerOutputMsg reads the next output line or done signal from the runner.
+// Since linesCh is closed before doneCh fires, we always drain lines first.
+func readWranglerOutputMsg(runner *wcfg.Runner) tea.Msg {
+	// Read lines until the channel is closed
+	line, ok := <-runner.LinesCh()
+	if ok {
+		return uiwrangler.CmdOutputMsg{Line: line}
+	}
+	// Lines channel closed — all output consumed. Now read the result.
+	result, ok := <-runner.DoneCh()
+	if !ok {
+		return uiwrangler.CmdDoneMsg{Result: wcfg.RunResult{}}
+	}
+	return uiwrangler.CmdDoneMsg{Result: result}
+}
+
+// waitForWranglerOutput returns a command that waits for the next output from the runner.
+func waitForWranglerOutput(runner *wcfg.Runner) tea.Cmd {
+	if runner == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		return readWranglerOutputMsg(runner)
+	}
+}
+
+// buildWranglerActionsPopup creates the action popup for the wrangler view.
+// Always includes "Load Wrangler Configuration..." and conditionally includes
+// command/binding items when a config is loaded.
+func (m Model) buildWranglerActionsPopup() actions.Model {
+	envName := m.wrangler.FocusedEnvName()
+	title := "Wrangler"
+	if m.wrangler.HasConfig() && envName != "" {
+		title = fmt.Sprintf("Wrangler — %s", envName)
+	}
+
+	var items []actions.Item
+
+	// Wrangler commands section (only when config is loaded)
+	if m.wrangler.HasConfig() {
+		wranglerActions := []string{"deploy", "rollback", "versions list", "deployments status"}
+		for _, action := range wranglerActions {
+			disabled := m.wrangler.CmdRunning()
+			items = append(items, actions.Item{
+				Label:       wcfg.CommandLabel(action),
+				Description: wcfg.CommandDescription(action),
+				Section:     "Commands",
+				Action:      "wrangler_" + action,
+				Disabled:    disabled,
+			})
+		}
+
+		// Bindings section (from the focused env box, if inside)
+		if m.wrangler.InsideBox() {
+			envName := m.wrangler.FocusedEnvName()
+			bindings := m.wrangler.Config().EnvBindings(envName)
+			if len(bindings) > 0 {
+				for _, b := range bindings {
+					items = append(items, actions.Item{
+						Label:       b.Name,
+						Description: b.TypeLabel(),
+						Section:     "Bindings",
+						NavService:  b.NavService(),
+						NavResource: b.ResourceID,
+						Disabled:    b.NavService() == "",
+					})
+				}
+			}
+		}
+	}
+
+	// Always include the load/switch configuration action
+	items = append(items, actions.Item{
+		Label:       "Load Wrangler Configuration...",
+		Description: "Browse for a wrangler project directory",
+		Section:     "Configuration",
+		Action:      "wrangler_load_config",
+	})
+
+	return actions.New(title, items)
+}
+
 // --- Action popup helpers ---
 
 // updateActions forwards messages to the action popup when it's active.
@@ -1036,6 +1280,26 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		return m.navigateTo(item.NavService, item.NavResource)
 	}
 
+	// Wrangler load config action
+	if item.Action == "wrangler_load_config" {
+		m.wrangler.ActivateDirBrowser()
+		// Ensure focus is on the detail pane so the browser receives key events
+		m.focus = FocusDetail
+		m.sidebar.SetFocused(false)
+		m.detail.SetFocused(true)
+		m.wrangler.SetFocused(true)
+		return nil
+	}
+
+	// Wrangler command actions
+	if strings.HasPrefix(item.Action, "wrangler_") {
+		action := strings.TrimPrefix(item.Action, "wrangler_")
+		envName := m.wrangler.FocusedEnvName()
+		return func() tea.Msg {
+			return uiwrangler.ActionMsg{Action: action, EnvName: envName}
+		}
+	}
+
 	// Named actions
 	switch item.Action {
 	case "tail_toggle":
@@ -1088,9 +1352,15 @@ func (m Model) viewDashboard() string {
 func (m Model) renderDashboardContent() string {
 	headerView := m.header.View()
 	sidebarView := m.sidebar.View()
-	detailView := m.detail.View()
 
-	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, detailView)
+	var rightPane string
+	if m.wranglerShown {
+		rightPane = m.wrangler.View()
+	} else {
+		rightPane = m.detail.View()
+	}
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, rightPane)
 	helpText := m.renderHelp()
 
 	parts := []string{headerView, content, helpText}

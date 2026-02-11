@@ -17,6 +17,7 @@ type Service struct {
 // DefaultServices returns the list of developer platform services.
 func DefaultServices() []Service {
 	return []Service{
+		{Name: "Wrangler", Icon: "⚙"},
 		{Name: "Workers", Icon: "W"},
 		{Name: "KV", Icon: "K"},
 		{Name: "R2", Icon: "R"},

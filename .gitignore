@@ -30,6 +30,8 @@ orangeshell
 # env file
 .env
 
+structure.txt
+
 # Editor/IDE
 # .idea/
 # .vscode/

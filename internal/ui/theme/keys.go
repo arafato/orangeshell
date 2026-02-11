@@ -43,7 +43,7 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("tab", "switch pane"),
 		),
 		Search: key.NewBinding(
-			key.WithKeys("ctrl+k", "/"),
+			key.WithKeys("ctrl+k"),
 			key.WithHelp("ctrl+k", "search"),
 		),
 		Actions: key.NewBinding(

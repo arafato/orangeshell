@@ -1051,15 +1051,15 @@ func (m Model) View() string {
 
 // viewProjectList renders the monorepo project list view.
 func (m Model) viewProjectList(contentHeight, boxWidth int, title, sep string) string {
-	// Monorepo title uses the root name
-	monoTitle := theme.TitleStyle.Render(fmt.Sprintf("  %s", m.rootName))
-	subtitle := theme.DimStyle.Render(fmt.Sprintf("  %d projects", len(m.projects)))
+	// Monorepo title uses the root name with project count inline
+	monoTitle := theme.TitleStyle.Render(fmt.Sprintf("  %s", m.rootName)) +
+		"  " + theme.DimStyle.Render(fmt.Sprintf("%d projects", len(m.projects)))
 
 	helpText := theme.DimStyle.Render("  j/k navigate  |  enter drill into  |  ctrl+p actions  |  ctrl+l services")
 
 	// Build project box views
 	var allLines []string
-	allLines = append(allLines, monoTitle, sep, subtitle, "")
+	allLines = append(allLines, monoTitle, sep, "")
 
 	for i, p := range m.projects {
 		focused := i == m.projectCursor

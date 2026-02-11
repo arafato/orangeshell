@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	svc "github.com/oarafat/orangeshell/internal/service"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 
 	"github.com/oarafat/orangeshell/internal/ui/theme"
@@ -75,6 +76,14 @@ type ProjectDeploymentLoadedMsg struct {
 	Subdomain    string
 	Err          error
 }
+
+// TailStartMsg requests the app to start tailing a worker from the wrangler view.
+type TailStartMsg struct {
+	ScriptName string
+}
+
+// TailStoppedMsg signals that the wrangler-initiated tail was stopped.
+type TailStoppedMsg struct{}
 
 // projectEntry holds data for a single project in the monorepo list.
 type projectEntry struct {
@@ -354,6 +363,35 @@ func (m Model) RunningAction() string {
 // The caller (app.go) should also call stopWranglerRunner() to kill the process.
 func (m *Model) StopDevServer() {
 	m.cmdPane.FinishWithMessage("Stopped", false)
+}
+
+// --- Tail delegation methods ---
+
+// StartTail prepares the cmd pane for tail log streaming.
+func (m *Model) StartTail(scriptName string) {
+	m.cmdPane.StartTail(scriptName)
+}
+
+// AppendTailLines adds tail log lines to the cmd pane.
+func (m *Model) AppendTailLines(lines []svc.TailLine) {
+	for _, line := range lines {
+		m.cmdPane.AppendTailLine(line)
+	}
+}
+
+// SetTailError records a tail error in the cmd pane.
+func (m *Model) SetTailError(err error) {
+	m.cmdPane.SetTailError(err.Error())
+}
+
+// StopTailPane marks the tail as stopped in the cmd pane.
+func (m *Model) StopTailPane() {
+	m.cmdPane.StopTail()
+}
+
+// TailActive returns whether the cmd pane is in tail mode and running.
+func (m Model) TailActive() bool {
+	return m.cmdPane.IsTail() && m.cmdPane.IsRunning()
 }
 
 // StartCommand prepares the cmd pane for a new command execution.

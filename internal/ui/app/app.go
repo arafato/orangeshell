@@ -105,6 +105,7 @@ type Model struct {
 
 	// Active tail session (nil when no tail is running)
 	tailSession *svc.TailSession
+	tailSource  string // "wrangler" or "detail" — which view owns the current tail
 
 	// Toast notification
 	toastMsg    string
@@ -320,25 +321,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.client == nil {
 			return m, nil
 		}
+		m.tailSource = "detail"
 		m.detail.SetTailStarting()
 		accountID := m.registry.ActiveAccountID()
 		return m, m.startTailCmd(accountID, msg.ScriptName)
 
 	case detail.TailStartedMsg:
 		m.tailSession = msg.Session
-		m.detail.SetTailStarted()
+		if m.tailSource == "wrangler" {
+			// Wrangler-initiated tail: no detail state to update
+		} else {
+			m.detail.SetTailStarted()
+		}
 		return m, m.waitForTailLines()
 
 	case detail.TailLogMsg:
 		if m.tailSession == nil {
 			return m, nil
 		}
-		m.detail.AppendTailLines(msg.Lines)
+		if m.tailSource == "wrangler" {
+			m.wrangler.AppendTailLines(msg.Lines)
+		} else {
+			m.detail.AppendTailLines(msg.Lines)
+		}
 		// Continue polling for more lines
 		return m, m.waitForTailLines()
 
 	case detail.TailErrorMsg:
-		m.detail.SetTailError(msg.Err)
+		if m.tailSource == "wrangler" {
+			m.wrangler.SetTailError(msg.Err)
+		} else {
+			m.detail.SetTailError(msg.Err)
+		}
 		m.tailSession = nil
 		return m, nil
 
@@ -1067,7 +1081,7 @@ func (m Model) waitForTailLines() tea.Cmd {
 	}
 }
 
-// stopTail closes the active tail session and cleans up.
+// stopTail closes the active tail session and cleans up both views.
 func (m *Model) stopTail() {
 	if m.tailSession == nil {
 		return
@@ -1076,7 +1090,14 @@ func (m *Model) stopTail() {
 	session := m.tailSession
 	client := m.client
 	m.tailSession = nil
-	m.detail.SetTailStopped()
+
+	// Clean up the view that owns this tail
+	if m.tailSource == "wrangler" {
+		m.wrangler.StopTailPane()
+	} else {
+		m.detail.SetTailStopped()
+	}
+	m.tailSource = ""
 
 	go func() {
 		ctx := context.Background()
@@ -1217,6 +1238,11 @@ func (m *Model) startWranglerCmd(action, envName string) tea.Cmd {
 		return nil
 	}
 
+	// Stop any active wrangler tail since the CmdPane is being taken over
+	if m.tailSource == "wrangler" && m.tailSession != nil {
+		m.stopTail()
+	}
+
 	cmd := wcfg.Command{
 		Action:     action,
 		ConfigPath: m.wrangler.ConfigPath(),
@@ -1272,6 +1298,11 @@ func waitForWranglerOutput(runner *wcfg.Runner) tea.Cmd {
 func (m *Model) startWranglerCmdWithArgs(action, envName string, extraArgs []string) tea.Cmd {
 	if m.wranglerRunner != nil && m.wranglerRunner.IsRunning() {
 		return nil
+	}
+
+	// Stop any active wrangler tail since the CmdPane is being taken over
+	if m.tailSource == "wrangler" && m.tailSession != nil {
+		m.stopTail()
 	}
 
 	cmd := wcfg.Command{
@@ -1456,6 +1487,23 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 			Disabled:    cmdRunning,
 		})
 
+		// Monitoring section
+		if workerName != "" {
+			tailLabel := "Tail Logs"
+			tailDesc := fmt.Sprintf("Stream live logs from %s", workerName)
+			if m.tailSession != nil && m.wrangler.TailActive() {
+				tailLabel = "Stop Tail Logs"
+				tailDesc = "Stop the live log stream"
+			}
+			items = append(items, actions.Item{
+				Label:       tailLabel,
+				Description: tailDesc,
+				Section:     "Monitoring",
+				Action:      "wrangler_tail_toggle",
+				Disabled:    cmdRunning && !m.wrangler.TailActive(),
+			})
+		}
+
 		// Bindings section (from the focused env box, if inside)
 		if m.wrangler.InsideBox() {
 			envName := m.wrangler.FocusedEnvName()
@@ -1596,6 +1644,35 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		return m.openVersionPicker(uiwrangler.PickerModeGradual, envName)
 	}
 
+	// Wrangler tail toggle (must be checked before generic wrangler_ prefix)
+	if item.Action == "wrangler_tail_toggle" {
+		if m.tailSession != nil {
+			// Stop any active tail (wrangler or detail)
+			m.stopTail()
+			m.detail.ClearTail()
+			return nil
+		}
+		// Start tailing the focused env's worker
+		envName := m.wrangler.FocusedEnvName()
+		cfg := m.wrangler.Config()
+		if cfg == nil || m.client == nil {
+			return nil
+		}
+		workerName := cfg.ResolvedEnvName(envName)
+		if workerName == "" {
+			return nil
+		}
+		// Stop any running wrangler command first
+		m.stopWranglerRunner()
+		// Stop any active detail tail
+		m.detail.ClearTail()
+		// Start tail in wrangler view
+		m.tailSource = "wrangler"
+		m.wrangler.StartTail(workerName)
+		accountID := m.registry.ActiveAccountID()
+		return tea.Batch(m.startTailCmd(accountID, workerName), m.wrangler.SpinnerInit())
+	}
+
 	// Wrangler dev server actions
 	if item.Action == "wrangler_dev" || item.Action == "wrangler_dev --remote" {
 		action := strings.TrimPrefix(item.Action, "wrangler_")
@@ -1628,6 +1705,9 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		}
 		// Start tailing
 		if m.detail.IsWorkersDetail() && m.client != nil {
+			// Stop any wrangler tail first
+			m.wrangler.StopTailPane()
+			m.tailSource = "detail"
 			scriptName := m.detail.CurrentDetailName()
 			accountID := m.registry.ActiveAccountID()
 			m.detail.SetTailStarting()

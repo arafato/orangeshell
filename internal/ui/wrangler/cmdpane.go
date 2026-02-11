@@ -6,27 +6,35 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/lipgloss"
+	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
 
 // CmdPane renders the command output pane at the bottom of the wrangler view.
-// Modeled after the Workers tail console.
+// Supports two modes: command output (deploy, dev, etc.) and tail log streaming.
 type CmdPane struct {
 	lines        []cmdLine // output lines
-	running      bool      // command is in flight
+	running      bool      // command/tail is in flight
 	action       string    // raw action string (e.g. "deploy", "dev", "dev --remote")
 	label        string    // "Deploy (staging)" etc.
 	exitMsg      string    // "Exited with code 0" etc.
 	exitFailed   bool      // true if the command failed (for styling)
 	scrollOffset int       // lines scrolled up from bottom (0 = at bottom)
 	userScrolled bool      // true if user has manually scrolled
+
+	// Tail mode
+	isTail     bool   // true when showing tail output (vs command output)
+	tailScript string // script name being tailed
+	tailError  string // tail error message
 }
 
 type cmdLine struct {
 	text     string
 	isStderr bool
 	ts       time.Time
+	level    string // tail log level (empty for command output lines)
 }
 
 // NewCmdPane creates an empty command pane.
@@ -93,6 +101,57 @@ func (p *CmdPane) FinishWithMessage(msg string, failed bool) {
 	p.exitFailed = failed
 }
 
+// --- Tail mode methods ---
+
+// StartTail resets the pane and enters tail mode for the given script.
+func (p *CmdPane) StartTail(scriptName string) {
+	p.lines = nil
+	p.running = true
+	p.action = ""
+	p.label = ""
+	p.exitMsg = ""
+	p.exitFailed = false
+	p.scrollOffset = 0
+	p.userScrolled = false
+	p.isTail = true
+	p.tailScript = scriptName
+	p.tailError = ""
+}
+
+// AppendTailLine adds a single tail log line with level information.
+func (p *CmdPane) AppendTailLine(line svc.TailLine) {
+	p.lines = append(p.lines, cmdLine{
+		text:  line.Text,
+		ts:    line.Timestamp,
+		level: line.Level,
+	})
+	// Cap buffer at 500 lines
+	if len(p.lines) > 500 {
+		p.lines = p.lines[len(p.lines)-500:]
+	}
+	if !p.userScrolled {
+		p.scrollOffset = 0
+	}
+}
+
+// SetTailError records a tail error message in the pane.
+func (p *CmdPane) SetTailError(errMsg string) {
+	p.running = false
+	p.tailError = errMsg
+}
+
+// StopTail marks the tail as finished with a clean message.
+func (p *CmdPane) StopTail() {
+	p.running = false
+	p.exitMsg = "Stopped"
+	p.exitFailed = false
+}
+
+// IsTail returns whether the pane is in tail mode.
+func (p CmdPane) IsTail() bool {
+	return p.isTail
+}
+
 // IsRunning returns whether a command is in flight.
 func (p CmdPane) IsRunning() bool {
 	return p.running
@@ -122,6 +181,9 @@ func (p *CmdPane) Clear() {
 	p.exitFailed = false
 	p.scrollOffset = 0
 	p.userScrolled = false
+	p.isTail = false
+	p.tailScript = ""
+	p.tailError = ""
 }
 
 // ScrollUp moves the viewport up by n lines.
@@ -169,7 +231,9 @@ func (p CmdPane) View(height, width int, spinnerView string) string {
 
 	// Header
 	var headerText string
-	if p.running {
+	if p.isTail {
+		headerText = p.tailHeader(spinnerView)
+	} else if p.running {
 		headerText = fmt.Sprintf("  %s %s",
 			spinnerView,
 			theme.LogConsoleHeaderStyle.Render(fmt.Sprintf("Running: %s", p.label)))
@@ -211,7 +275,14 @@ func (p CmdPane) View(height, width int, spinnerView string) string {
 			}
 		}
 
-		if cl.isStderr {
+		if cl.level != "" {
+			// Tail mode: level-based coloring with timestamp
+			tsStr := ""
+			if !cl.ts.IsZero() {
+				tsStr = theme.LogTimestampStyle.Render(cl.ts.Format("15:04:05")) + "  "
+			}
+			outputLines = append(outputLines, "  "+tsStr+styleTailLevel(cl.level).Render(text))
+		} else if cl.isStderr {
 			outputLines = append(outputLines, "  "+theme.ErrorStyle.Render(text))
 		} else {
 			outputLines = append(outputLines, "  "+theme.ValueStyle.Render(text))
@@ -243,7 +314,13 @@ func (p CmdPane) View(height, width int, spinnerView string) string {
 
 	// Help
 	var helpText string
-	if p.userScrolled {
+	if p.isTail && p.running {
+		if p.userScrolled {
+			helpText = theme.DimStyle.Render("  pgup/pgdn scroll  |  end bottom  |  ctrl+p stop tail")
+		} else {
+			helpText = theme.DimStyle.Render("  pgup/pgdn scroll  |  ctrl+p stop tail")
+		}
+	} else if p.userScrolled {
 		helpText = theme.DimStyle.Render("  pgup/pgdn scroll  |  end bottom  |  ctrl+p actions")
 	} else {
 		helpText = theme.DimStyle.Render("  pgup/pgdn scroll  |  ctrl+p actions")
@@ -259,4 +336,40 @@ func (p CmdPane) View(height, width int, spinnerView string) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// tailHeader renders the header line for tail mode.
+func (p CmdPane) tailHeader(spinnerView string) string {
+	if p.tailError != "" {
+		return fmt.Sprintf("  %s  %s",
+			theme.LogConsoleHeaderStyle.Render(fmt.Sprintf("Tail: %s", p.tailScript)),
+			theme.ErrorStyle.Render(p.tailError))
+	}
+	if p.running {
+		return fmt.Sprintf("  %s %s",
+			spinnerView,
+			theme.LogConsoleHeaderStyle.Render(fmt.Sprintf("Tailing: %s", p.tailScript)))
+	}
+	if p.exitMsg != "" {
+		return fmt.Sprintf("  %s  %s",
+			theme.LogConsoleHeaderStyle.Render(fmt.Sprintf("Tail: %s", p.tailScript)),
+			theme.DimStyle.Render(p.exitMsg))
+	}
+	return theme.DimStyle.Render(fmt.Sprintf("  Tail: %s", p.tailScript))
+}
+
+// styleTailLevel returns the lipgloss style for a given tail log level.
+func styleTailLevel(level string) lipgloss.Style {
+	switch level {
+	case "warn":
+		return theme.LogLevelWarn
+	case "error", "exception":
+		return theme.LogLevelError
+	case "request":
+		return theme.LogLevelRequest
+	case "system":
+		return theme.LogLevelSystem
+	default: // "log", "info", etc.
+		return theme.LogLevelLog
+	}
 }

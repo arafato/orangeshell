@@ -849,7 +849,7 @@ func (m Model) viewDetail(maxHeight int) string {
 	}
 
 	d := m.detail
-	title := theme.TitleStyle.Render(fmt.Sprintf("  %s", d.Name)) + copyIcon()
+	title := theme.DimStyle.Render(fmt.Sprintf("  %s ", m.service)) + theme.TitleStyle.Render(d.Name) + copyIcon()
 	sepWidth := m.width - 6
 	if sepWidth < 0 {
 		sepWidth = 0

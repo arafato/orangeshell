@@ -685,21 +685,42 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateProjectList handles navigation on the monorepo project list.
+// updateProjectList handles 2D grid navigation on the monorepo project list.
+// Projects are arranged in a 2-column grid. The linear cursor maps to:
+//
+//	column = cursor % 2, row = cursor / 2
 func (m Model) updateProjectList(msg tea.KeyMsg) (Model, tea.Cmd) {
+	n := len(m.projects)
 	switch msg.String() {
 	case "up", "k":
-		if m.projectCursor > 0 {
-			m.projectCursor--
+		// Move up one row (stride of 2)
+		if m.projectCursor-2 >= 0 {
+			m.projectCursor -= 2
 			m.adjustProjectScroll()
 		}
 	case "down", "j":
-		if m.projectCursor < len(m.projects)-1 {
+		// Move down one row (stride of 2)
+		if m.projectCursor+2 < n {
+			m.projectCursor += 2
+			m.adjustProjectScroll()
+		} else if m.projectCursor+2 >= n && m.projectCursor%2 == 0 && m.projectCursor+1 < n {
+			// On left column of last full row, but there's an item on the right in this row
+			// and no row below — stay put
+		}
+	case "left", "h":
+		// Move to left column if currently on the right
+		if m.projectCursor%2 == 1 {
+			m.projectCursor--
+			m.adjustProjectScroll()
+		}
+	case "right", "l":
+		// Move to right column if currently on the left and right exists
+		if m.projectCursor%2 == 0 && m.projectCursor+1 < n {
 			m.projectCursor++
 			m.adjustProjectScroll()
 		}
 	case "enter":
-		if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
+		if m.projectCursor >= 0 && m.projectCursor < n {
 			return m.drillIntoProject(m.projectCursor)
 		}
 	}
@@ -743,19 +764,34 @@ func (m Model) drillIntoProject(idx int) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// adjustProjectScroll ensures the focused project is visible in the scroll window.
+// adjustProjectScroll ensures the focused project row is visible in the scroll window.
+// projectScrollY is a line offset. We estimate ~12 lines per grid row (box height + spacer)
+// and convert between row index and line offset.
 func (m *Model) adjustProjectScroll() {
-	if m.projectCursor < m.projectScrollY {
-		m.projectScrollY = m.projectCursor
+	const estRowHeight = 12 // estimated lines per grid row (box + spacer)
+	const headerLines = 3   // title + separator + blank line
+
+	focusedRow := m.projectCursor / 2
+
+	// Estimate the line offset where this row starts
+	rowStartLine := headerLines + focusedRow*estRowHeight
+	rowEndLine := rowStartLine + estRowHeight
+
+	// How many content lines are visible
+	visibleHeight := m.height - 4 // approximate content area
+	if visibleHeight < estRowHeight {
+		visibleHeight = estRowHeight
 	}
-	// Estimate ~10 lines per project box
-	visibleCount := m.height / 10
-	if visibleCount < 1 {
-		visibleCount = 1
+
+	// If focused row is above the current scroll window, scroll up
+	if rowStartLine < m.projectScrollY {
+		m.projectScrollY = rowStartLine
 	}
-	if m.projectCursor >= m.projectScrollY+visibleCount {
-		m.projectScrollY = m.projectCursor - visibleCount + 1
+	// If focused row is below the current scroll window, scroll down
+	if rowEndLine > m.projectScrollY+visibleHeight {
+		m.projectScrollY = rowEndLine - visibleHeight
 	}
+
 	if m.projectScrollY < 0 {
 		m.projectScrollY = 0
 	}
@@ -1049,29 +1085,53 @@ func (m Model) View() string {
 	return m.renderBorder(content, contentHeight)
 }
 
-// viewProjectList renders the monorepo project list view.
+// viewProjectList renders the monorepo project list view as a 2-column grid.
 func (m Model) viewProjectList(contentHeight, boxWidth int, title, sep string) string {
 	// Monorepo title uses the root name with project count inline
 	monoTitle := theme.TitleStyle.Render(fmt.Sprintf("  %s", m.rootName)) +
 		"  " + theme.DimStyle.Render(fmt.Sprintf("%d projects", len(m.projects)))
 
-	helpText := theme.DimStyle.Render("  j/k navigate  |  enter drill into  |  ctrl+p actions  |  ctrl+l services")
+	helpText := theme.DimStyle.Render("  h/j/k/l navigate  |  enter drill into  |  ctrl+p actions  |  ctrl+l services")
 
-	// Build project box views
+	n := len(m.projects)
+	totalRows := (n + 1) / 2 // ceiling division
+	colWidth := boxWidth / 2
+
+	// Build all lines by rendering each grid row
 	var allLines []string
 	allLines = append(allLines, monoTitle, sep, "")
 
-	for i, p := range m.projects {
-		focused := i == m.projectCursor
-		boxView := p.box.View(boxWidth, focused)
-		boxLines := strings.Split(boxView, "\n")
-		allLines = append(allLines, boxLines...)
-		allLines = append(allLines, "") // spacer between boxes
+	// Track the starting line index for each grid row (for scroll adjustment)
+	rowLineOffsets := make([]int, totalRows)
+	for row := 0; row < totalRows; row++ {
+		rowLineOffsets[row] = len(allLines)
+
+		leftIdx := row * 2
+		rightIdx := leftIdx + 1
+
+		leftFocused := leftIdx == m.projectCursor
+		leftView := m.projects[leftIdx].box.View(colWidth, leftFocused)
+
+		var rightView string
+		if rightIdx < n {
+			rightFocused := rightIdx == m.projectCursor
+			rightView = m.projects[rightIdx].box.View(colWidth, rightFocused)
+		} else {
+			// Empty placeholder for odd count — match the left box height
+			leftLines := strings.Split(leftView, "\n")
+			placeholder := strings.Repeat("\n", len(leftLines)-1)
+			rightView = lipgloss.NewStyle().Width(colWidth).Render(placeholder)
+		}
+
+		rowView := lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
+		rowLines := strings.Split(rowView, "\n")
+		allLines = append(allLines, rowLines...)
+		allLines = append(allLines, "") // spacer between rows
 	}
 
 	allLines = append(allLines, helpText)
 
-	// Apply vertical scrolling
+	// Apply vertical scrolling (projectScrollY is a line offset)
 	visibleHeight := contentHeight
 	if visibleHeight < 1 {
 		visibleHeight = 1

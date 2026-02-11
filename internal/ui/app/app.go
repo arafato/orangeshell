@@ -164,7 +164,10 @@ func NewModel(cfg *config.Config) Model {
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
 	if m.phase == PhaseDashboard {
-		cmds := []tea.Cmd{m.initDashboardCmd(), m.wrangler.SpinnerInit()}
+		// Discover wrangler configs immediately (pure filesystem I/O) in parallel with auth.
+		// This eliminates the "Loading wrangler configuration..." spinner delay that
+		// previously waited for API auth to complete before starting discovery.
+		cmds := []tea.Cmd{m.initDashboardCmd(), m.discoverProjectsCmd(), m.wrangler.SpinnerInit()}
 		return tea.Batch(cmds...)
 	}
 	return nil
@@ -237,10 +240,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Start the periodic background refresh ticker
 		tickCmd := m.scheduleRefreshTick()
 
-		// Discover wrangler projects in the background (supports monorepo)
-		wranglerCmd := m.discoverProjectsCmd()
+		cmds := []tea.Cmd{tickCmd}
 
-		cmds := []tea.Cmd{tickCmd, wranglerCmd, m.wrangler.SpinnerInit()}
+		// If wrangler config was already discovered (it runs in parallel with auth),
+		// trigger deployment fetching now that the client is available.
+		if m.wrangler.IsMonorepo() {
+			if cmd := m.fetchAllProjectDeployments(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		} else if cfg := m.wrangler.Config(); cfg != nil {
+			if cmd := m.fetchSingleProjectDeployments(cfg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+
 		return m, tea.Batch(cmds...)
 
 	case errMsg:
@@ -1771,22 +1784,22 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 	title := fmt.Sprintf("Monorepo — %s", m.wrangler.RootName())
 	var items []actions.Item
 
-	// Monitoring section: "Tail <envName>" for each env across all projects
+	// Monitoring section: single entry that opens an environment sub-popup
 	envNames := m.wrangler.AllEnvNames()
 	if len(envNames) > 0 && m.client != nil {
-		for _, envName := range envNames {
-			label := fmt.Sprintf("Tail %s", envName)
-			desc := fmt.Sprintf("Stream live logs from all %s workers", envName)
-			if m.parallelTailActive && m.wrangler.IsParallelTailActive() {
-				// Already tailing — show stop option instead
-				label = fmt.Sprintf("Stop Tail %s", envName)
-				desc = "Stop all live log streams"
-			}
+		if m.parallelTailActive && m.wrangler.IsParallelTailActive() {
 			items = append(items, actions.Item{
-				Label:       label,
-				Description: desc,
+				Label:       "Stop Parallel Tail",
+				Description: "Stop all live log streams",
 				Section:     "Monitoring",
-				Action:      "parallel_tail_" + envName,
+				Action:      "parallel_tail_stop",
+			})
+		} else {
+			items = append(items, actions.Item{
+				Label:       "Parallel Tail...",
+				Description: "Stream live logs from all workers in an environment",
+				Section:     "Monitoring",
+				Action:      "parallel_tail",
 			})
 		}
 	}
@@ -1797,6 +1810,34 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		Section:     "Configuration",
 		Action:      "wrangler_load_config",
 	})
+	return actions.New(title, items)
+}
+
+// buildParallelTailEnvPopup creates a sub-popup listing environments for parallel tailing.
+func (m Model) buildParallelTailEnvPopup() actions.Model {
+	title := "Parallel Tail — Select Environment"
+	var items []actions.Item
+	for _, envName := range m.wrangler.AllEnvNames() {
+		// Count how many workers actually define this environment
+		count := 0
+		for _, pc := range m.wrangler.ProjectConfigs() {
+			if pc.Config == nil {
+				continue
+			}
+			if !pc.Config.HasEnv(envName) {
+				continue
+			}
+			if scriptName := pc.Config.ResolvedEnvName(envName); scriptName != "" {
+				count++
+			}
+		}
+		items = append(items, actions.Item{
+			Label:       envName,
+			Description: fmt.Sprintf("%d workers", count),
+			Section:     "Environments",
+			Action:      "parallel_tail_env_" + envName,
+		})
+	}
 	return actions.New(title, items)
 }
 
@@ -2023,19 +2064,30 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		return nil
 	}
 
-	// Parallel tail actions (monorepo: "parallel_tail_<envName>")
-	if strings.HasPrefix(item.Action, "parallel_tail_") {
-		envName := strings.TrimPrefix(item.Action, "parallel_tail_")
-		// If already parallel tailing, stop
-		if m.parallelTailActive {
-			m.stopAllParallelTails()
-			return nil
-		}
-		// Gather all scripts for this env across all projects
+	// Parallel tail: open environment sub-popup
+	if item.Action == "parallel_tail" {
+		m.showActions = true
+		m.actionsPopup = m.buildParallelTailEnvPopup()
+		return nil
+	}
+
+	// Parallel tail: stop all sessions
+	if item.Action == "parallel_tail_stop" {
+		m.stopAllParallelTails()
+		return nil
+	}
+
+	// Parallel tail: start tailing for selected environment
+	if strings.HasPrefix(item.Action, "parallel_tail_env_") {
+		envName := strings.TrimPrefix(item.Action, "parallel_tail_env_")
 		var targets []uiwrangler.ParallelTailTarget
 		caches := m.registry.GetAllDeploymentCaches()
 		for _, pc := range m.wrangler.ProjectConfigs() {
 			if pc.Config == nil {
+				continue
+			}
+			// Only include workers that actually define this environment
+			if !pc.Config.HasEnv(envName) {
 				continue
 			}
 			scriptName := pc.Config.ResolvedEnvName(envName)

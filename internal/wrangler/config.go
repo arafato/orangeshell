@@ -416,6 +416,17 @@ func (c *WranglerConfig) ResolvedCompatDate(envName string) string {
 	return c.CompatDate
 }
 
+// HasEnv returns whether the config defines the given environment.
+// "default" always returns true (every worker has a top-level/default env).
+// Named environments return true only if explicitly defined in the config.
+func (c *WranglerConfig) HasEnv(envName string) bool {
+	if envName == "" || envName == "default" {
+		return true
+	}
+	_, ok := c.Environments[envName]
+	return ok
+}
+
 // EnvNames returns all environment names in sorted order, with "default" first.
 func (c *WranglerConfig) EnvNames() []string {
 	names := []string{"default"}

@@ -24,6 +24,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
+	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/setup"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
@@ -144,6 +145,10 @@ type Model struct {
 	// Add environment popup overlay
 	showEnvPopup bool
 	envPopup     envpopup.Model
+
+	// Create project popup overlay
+	showProjectPopup bool
+	projectPopup     projectpopup.Model
 
 	// Toast notification
 	toastMsg    string
@@ -507,7 +512,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.ProjectsDiscoveredMsg:
-		m.wrangler.SetProjects(msg.Projects, msg.RootName)
+		m.wrangler.SetProjects(msg.Projects, msg.RootName, msg.RootDir)
 		// Trigger deployment fetching for all projects
 		return m, m.fetchAllProjectDeployments()
 
@@ -769,6 +774,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Create project popup messages
+	case projectpopup.CloseMsg:
+		m.showProjectPopup = false
+		return m, nil
+
+	case projectpopup.CreateProjectMsg:
+		return m, m.createProjectCmd(msg.Name, msg.Lang, msg.Dir)
+
+	case projectpopup.CreateProjectDoneMsg:
+		var cmd tea.Cmd
+		m.projectPopup, cmd = m.projectPopup.Update(msg)
+		return m, cmd
+
+	case projectpopup.DoneMsg:
+		m.showProjectPopup = false
+		m.toastMsg = "Project created"
+		m.toastExpiry = time.Now().Add(3 * time.Second)
+		// Rescan the monorepo root dir to pick up the new project
+		rootDir := m.wrangler.RootDir()
+		if rootDir != "" {
+			return m, m.discoverProjectsFromDir(rootDir)
+		}
+		return m, m.discoverProjectsCmd()
+
 	// Launcher messages
 	case launcher.LaunchServiceMsg:
 		m.showLauncher = false
@@ -790,6 +819,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.wrangler.IsLoading() {
 			cmds = append(cmds, m.wrangler.UpdateSpinner(msg))
+		}
+		if m.showProjectPopup && m.projectPopup.IsCreating() {
+			var cmd tea.Cmd
+			m.projectPopup, cmd = m.projectPopup.Update(msg)
+			cmds = append(cmds, cmd)
 		}
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
@@ -847,6 +881,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If env popup is active, route everything there
 	if m.showEnvPopup {
 		return m.updateEnvPopup(msg)
+	}
+
+	// If project popup is active, route everything there
+	if m.showProjectPopup {
+		return m.updateProjectPopup(msg)
 	}
 
 	// If action popup is active, route everything there
@@ -1491,7 +1530,7 @@ func (m Model) discoverProjectsCmd() tea.Cmd {
 			return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: projects[0].ConfigPath, Err: err}
 		default:
 			// Monorepo — return all projects for the project list view
-			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName}
+			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName, RootDir: cwd}
 		}
 	}
 }
@@ -1516,7 +1555,7 @@ func (m Model) discoverProjectsFromDir(dir string) tea.Cmd {
 			cfg, err := wcfg.Parse(projects[0].ConfigPath)
 			return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: projects[0].ConfigPath, Err: err}
 		default:
-			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName}
+			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName, RootDir: absDir}
 		}
 	}
 }
@@ -1943,6 +1982,14 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		}
 	}
 
+	// Create project action
+	items = append(items, actions.Item{
+		Label:       "Create Project",
+		Description: "Scaffold a new Worker project in this monorepo",
+		Section:     "Configuration",
+		Action:      "create_project",
+	})
+
 	// Add/Delete environment actions (if the selected project has a config)
 	if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
 		items = append(items, actions.Item{
@@ -2242,6 +2289,13 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	}
 
 	// Add environment action
+	// Create project action
+	if item.Action == "create_project" {
+		m.showProjectPopup = true
+		m.projectPopup = projectpopup.New(m.wrangler.ProjectDirNames(), m.wrangler.RootDir())
+		return nil
+	}
+
 	if item.Action == "add_environment" {
 		var configPath string
 		var workerName string
@@ -2543,6 +2597,31 @@ func (m Model) deleteEnvCmd(configPath, envName string) tea.Cmd {
 	}
 }
 
+// --- Create project popup helpers ---
+
+// updateProjectPopup forwards messages to the project popup when it's active.
+func (m Model) updateProjectPopup(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.projectPopup, cmd = m.projectPopup.Update(msg)
+	return m, cmd
+}
+
+// createProjectCmd runs C3 to scaffold a new Worker project.
+func (m Model) createProjectCmd(name, lang, dir string) tea.Cmd {
+	return func() tea.Msg {
+		result := wcfg.CreateProject(context.Background(), wcfg.CreateProjectCmd{
+			Name: name,
+			Lang: lang,
+			Dir:  dir,
+		})
+		return projectpopup.CreateProjectDoneMsg{
+			Name:    name,
+			Success: result.Success,
+			Output:  result.Output,
+		}
+	}
+}
+
 // resourceTypeToServiceName maps a binding resource type to its service name in the registry.
 func resourceTypeToServiceName(resourceType string) string {
 	switch resourceType {
@@ -2595,6 +2674,11 @@ func (m Model) viewDashboard() string {
 	if m.showEnvPopup {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.envPopup.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
+	if m.showProjectPopup {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.projectPopup.View(m.width, m.height)
 		return overlayCenter(bg, fg, m.width, m.height)
 	}
 	if m.showActions {

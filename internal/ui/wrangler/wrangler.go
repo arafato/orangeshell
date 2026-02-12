@@ -66,6 +66,7 @@ type VersionsFetchedMsg struct {
 type ProjectsDiscoveredMsg struct {
 	Projects []wcfg.ProjectInfo
 	RootName string // CWD basename (monorepo name)
+	RootDir  string // absolute path to the monorepo root directory
 }
 
 // ProjectDeploymentLoadedMsg delivers deployment data for a single project+env.
@@ -124,6 +125,7 @@ type Model struct {
 	projectScrollY int            // vertical scroll offset for project list
 	activeProject  int            // index of drilled-in project, -1 = on project list
 	rootName       string         // CWD basename (monorepo name)
+	rootDir        string         // absolute path to the monorepo root directory
 
 	// Directory browser for loading config from a custom directory
 	dirBrowser     DirBrowser
@@ -251,19 +253,29 @@ func (m Model) RootName() string {
 	return m.rootName
 }
 
+// RootDir returns the absolute path to the monorepo root directory.
+func (m Model) RootDir() string {
+	return m.rootDir
+}
+
 // SetProjects sets up the monorepo project list, parsing each config.
-func (m *Model) SetProjects(projects []wcfg.ProjectInfo, rootName string) {
+func (m *Model) SetProjects(projects []wcfg.ProjectInfo, rootName, rootDir string) {
 	m.configLoading = false
 	m.rootName = rootName
+	m.rootDir = rootDir
 
-	cwd, _ := filepath.Abs(".")
+	// Use rootDir for relative paths if available, otherwise fall back to CWD
+	baseDir := rootDir
+	if baseDir == "" {
+		baseDir, _ = filepath.Abs(".")
+	}
 
 	m.projects = make([]projectEntry, len(projects))
 	for i, p := range projects {
 		cfg, err := wcfg.Parse(p.ConfigPath)
 
-		// Compute relative path from CWD
-		relPath, _ := filepath.Rel(cwd, p.Dir)
+		// Compute relative path from root dir
+		relPath, _ := filepath.Rel(baseDir, p.Dir)
 		if relPath == "" {
 			relPath = "."
 		}
@@ -328,6 +340,15 @@ func (m Model) ProjectConfigs() [](struct {
 	return result
 }
 
+// ProjectDirNames returns the directory basenames of all projects in the monorepo.
+func (m Model) ProjectDirNames() []string {
+	names := make([]string, len(m.projects))
+	for i, p := range m.projects {
+		names[i] = p.box.Name
+	}
+	return names
+}
+
 // Config returns the loaded wrangler config (may be nil).
 // In monorepo mode, returns the active project's config.
 func (m Model) Config() *wcfg.WranglerConfig {
@@ -370,6 +391,7 @@ func (m *Model) SetConfigLoading() {
 	m.projectScrollY = 0
 	m.activeProject = -1
 	m.rootName = ""
+	m.rootDir = ""
 }
 
 // SetSize updates the view dimensions.

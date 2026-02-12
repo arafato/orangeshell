@@ -9,6 +9,76 @@ import (
 	"time"
 )
 
+// CreateProjectCmd describes a project creation command via C3.
+type CreateProjectCmd struct {
+	// Name is the project/directory name to create.
+	Name string
+	// Lang is the programming language: "ts", "js", or "python".
+	Lang string
+	// Dir is the parent directory where the project subdirectory will be created.
+	// If empty, the process's current working directory is used.
+	Dir string
+}
+
+// CreateProjectResult holds the output of a project creation command.
+type CreateProjectResult struct {
+	Success bool
+	Output  string // combined stdout+stderr
+}
+
+// CreateProject runs the C3 CLI to scaffold a new Cloudflare Worker project.
+// The project is created as a subdirectory of cmd.Dir (or CWD if Dir is empty).
+func CreateProject(ctx context.Context, cmd CreateProjectCmd) CreateProjectResult {
+	execCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	args := []string{
+		"create", "cloudflare@latest", "--",
+		cmd.Name,
+		"--type=hello-world",
+		"--lang=" + cmd.Lang,
+		"--no-deploy",
+		"--no-git",
+		"-y",
+	}
+
+	c := exec.CommandContext(execCtx, "npm", args...)
+	// Inherit the current environment; C3 needs npm/node on PATH
+	c.Env = os.Environ()
+	if cmd.Dir != "" {
+		c.Dir = cmd.Dir
+	}
+
+	out, err := c.CombinedOutput()
+	output := strings.TrimSpace(string(out))
+
+	if err != nil {
+		return CreateProjectResult{
+			Success: false,
+			Output:  output,
+		}
+	}
+
+	return CreateProjectResult{
+		Success: true,
+		Output:  output,
+	}
+}
+
+// LangLabel returns a human-readable label for a language code.
+func LangLabel(lang string) string {
+	switch lang {
+	case "ts":
+		return "TypeScript"
+	case "js":
+		return "JavaScript"
+	case "python":
+		return "Python"
+	default:
+		return lang
+	}
+}
+
 // CreateResourceCmd describes a wrangler CLI resource creation command.
 type CreateResourceCmd struct {
 	// ResourceType is one of: "d1", "kv", "r2", "queue"

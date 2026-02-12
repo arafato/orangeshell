@@ -95,9 +95,10 @@ func (b ProjectBox) renderEnvSection(envName string) string {
 		theme.ValueStyle.Render(workerName),
 		theme.ActionNavArrowStyle.Render("\u2192"))
 
-	// URL line (clickable hyperlink)
+	// URL line (clickable hyperlink) — only shown when the worker is actually deployed
 	var urlLine string
-	if b.Subdomain != "" {
+	dep := b.Deployments[envName]
+	if b.Subdomain != "" && dep != nil && len(dep.Versions) > 0 {
 		url := fmt.Sprintf("https://%s.%s.workers.dev", workerName, b.Subdomain)
 		urlLine = fmt.Sprintf("  %s  %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-9s", "URL")),

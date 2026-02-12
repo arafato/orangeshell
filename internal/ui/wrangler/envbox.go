@@ -150,9 +150,9 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 			navArrow)
 	}
 
-	// URL line (clickable hyperlink)
+	// URL line (clickable hyperlink) — only shown when the worker is actually deployed
 	var urlLine string
-	if b.WorkerName != "" && b.Subdomain != "" {
+	if b.WorkerName != "" && b.Subdomain != "" && b.Deployment != nil && len(b.Deployment.Versions) > 0 {
 		url := fmt.Sprintf("https://%s.%s.workers.dev", b.WorkerName, b.Subdomain)
 		urlLine = fmt.Sprintf("  %s %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-10s", "URL")),

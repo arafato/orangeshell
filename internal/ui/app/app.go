@@ -74,6 +74,57 @@ type errMsg struct {
 // toastExpireMsg fires after the toast display duration to clear the toast.
 type toastExpireMsg struct{}
 
+// toastTick returns a command that fires toastExpireMsg after 3 seconds.
+func toastTick() tea.Cmd {
+	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+}
+
+// setToast sets the toast message and expiry. Call toastTick() to get the auto-clear command.
+func (m *Model) setToast(msg string) {
+	m.toastMsg = msg
+	m.toastExpiry = time.Now().Add(3 * time.Second)
+}
+
+// isStaleAccount returns true if the given accountID is non-empty and doesn't
+// match the currently active account, indicating the response is stale.
+func (m Model) isStaleAccount(accountID string) bool {
+	return accountID != "" && accountID != m.registry.ActiveAccountID()
+}
+
+// reloadWranglerConfig re-parses the wrangler config at configPath and updates the
+// wrangler model. On success it shows successToast. On error it shows the parse error.
+// Returns the reloaded config (nil on error).
+func (m *Model) reloadWranglerConfig(configPath, successToast string) *wcfg.WranglerConfig {
+	cfg, err := wcfg.Parse(configPath)
+	if err != nil {
+		m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
+		m.toastExpiry = time.Now().Add(3 * time.Second)
+		return nil
+	}
+	m.wrangler.ReloadConfig(configPath, cfg)
+	m.toastMsg = successToast
+	m.toastExpiry = time.Now().Add(3 * time.Second)
+	return cfg
+}
+
+// resolveActiveProjectConfig returns the config path and project name for the
+// currently active project — either the selected project on the monorepo list,
+// or the drilled-into / single-project config.
+func (m Model) resolveActiveProjectConfig() (configPath, projectName string) {
+	if m.wrangler.IsOnProjectList() {
+		configPath = m.wrangler.SelectedProjectConfigPath()
+		if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+			projectName = cfg.Name
+		}
+	} else if m.wrangler.HasConfig() {
+		configPath = m.wrangler.ConfigPath()
+		if cfg := m.wrangler.Config(); cfg != nil {
+			projectName = cfg.Name
+		}
+	}
+	return
+}
+
 // bindingIndexBuiltMsg carries a newly built binding index from the background.
 type bindingIndexBuiltMsg struct {
 	index     *svc.BindingIndex
@@ -310,8 +361,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Service data messages
 	case detail.ResourcesLoadedMsg:
-		// Staleness check: discard responses from a different account
-		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+		if m.isStaleAccount(msg.AccountID) {
 			return m, nil
 		}
 		// Cache the result regardless of which service is displayed
@@ -409,8 +459,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case detail.BackgroundRefreshMsg:
-		// Staleness check: discard responses from a different account
-		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+		if m.isStaleAccount(msg.AccountID) {
 			return m, nil
 		}
 		// Cache the refreshed result
@@ -570,24 +619,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showDeletePopup = false
 		if msg.ConfigPath != "" {
 			// Binding delete — re-parse the config to refresh the UI
-			cfg, err := wcfg.Parse(msg.ConfigPath)
-			if err != nil {
-				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
-				m.toastExpiry = time.Now().Add(3 * time.Second)
-			} else {
-				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
-				m.toastMsg = "Binding removed"
-				m.toastExpiry = time.Now().Add(3 * time.Second)
-			}
+			m.reloadWranglerConfig(msg.ConfigPath, "Binding removed")
 			// Invalidate the binding index so the next delete attempt rebuilds
 			// it fresh from the API (the deployed state may have changed if the
 			// user redeployed after removing the binding locally).
 			m.registry.SetBindingIndex(nil)
-			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+			return m, toastTick()
 		}
 		// Resource delete — optimistic cache removal + background refresh
-		m.toastMsg = "Resource deleted"
-		m.toastExpiry = time.Now().Add(3 * time.Second)
+		m.setToast("Resource deleted")
 		if entry := m.registry.GetCache(msg.ServiceName); entry != nil {
 			filtered := make([]svc.Resource, 0, len(entry.Resources))
 			for _, r := range entry.Resources {
@@ -602,12 +642,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(
 			m.backgroundRefresh(msg.ServiceName),
-			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
+			toastTick(),
 		)
 
 	case bindingIndexBuiltMsg:
-		// Staleness check: discard if account changed
-		if msg.accountID != m.registry.ActiveAccountID() {
+		if m.isStaleAccount(msg.accountID) {
 			return m, nil
 		}
 		m.registry.SetBindingIndex(msg.index)
@@ -641,8 +680,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.EnvDeploymentLoadedMsg:
-		// Discard stale responses from a previous account
-		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+		if m.isStaleAccount(msg.AccountID) {
 			return m, nil
 		}
 		// Always update (even on error) so DeploymentFetched gets set and
@@ -661,8 +699,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.fetchAllProjectDeployments()
 
 	case uiwrangler.ProjectDeploymentLoadedMsg:
-		// Discard stale responses from a previous account
-		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
+		if m.isStaleAccount(msg.AccountID) {
 			return m, nil
 		}
 		// Always update so DeploymentFetched gets set
@@ -890,17 +927,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bindings.DoneMsg:
 		m.showBindings = false
-		// Re-parse the config to refresh bindings display
 		if msg.ConfigPath != "" {
-			cfg, err := wcfg.Parse(msg.ConfigPath)
-			if err != nil {
-				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
-				m.toastExpiry = time.Now().Add(3 * time.Second)
-			} else {
-				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
-				m.toastMsg = "Binding added"
-				m.toastExpiry = time.Now().Add(3 * time.Second)
-			}
+			m.reloadWranglerConfig(msg.ConfigPath, "Binding added")
 		}
 		// If a resource was created, refresh the corresponding service cache
 		if msg.ResourceType != "" {
@@ -933,21 +961,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case envpopup.DoneMsg:
 		m.showEnvPopup = false
-		// Re-parse the config to refresh the environment display
 		if msg.ConfigPath != "" {
-			cfg, err := wcfg.Parse(msg.ConfigPath)
-			if err != nil {
-				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
-				m.toastExpiry = time.Now().Add(3 * time.Second)
-			} else {
-				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
-				if m.envPopup.IsDeleteMode() {
-					m.toastMsg = "Environment deleted"
-				} else {
-					m.toastMsg = "Environment added"
-				}
-				m.toastExpiry = time.Now().Add(3 * time.Second)
+			toastMsg := "Environment added"
+			if m.envPopup.IsDeleteMode() {
+				toastMsg = "Environment deleted"
 			}
+			m.reloadWranglerConfig(msg.ConfigPath, toastMsg)
 		}
 		return m, nil
 
@@ -966,8 +985,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectpopup.DoneMsg:
 		m.showProjectPopup = false
-		m.toastMsg = "Project created"
-		m.toastExpiry = time.Now().Add(3 * time.Second)
+		m.setToast("Project created")
 		// Rescan to pick up the new project. Prefer the directory the project
 		// was created in, then the monorepo root, then fall back to CWD.
 		var rescanCmd tea.Cmd
@@ -978,10 +996,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			rescanCmd = m.discoverProjectsCmd()
 		}
-		return m, tea.Batch(
-			rescanCmd,
-			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
-		)
+		return m, tea.Batch(rescanCmd, toastTick())
 
 	// Remove project popup messages
 	case removeprojectpopup.CloseMsg:
@@ -1002,18 +1017,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case removeprojectpopup.DoneMsg:
 		m.showRemoveProjectPopup = false
-		m.toastMsg = "Project removed"
-		m.toastExpiry = time.Now().Add(3 * time.Second)
+		m.setToast("Project removed")
 		var rescanCmd tea.Cmd
 		if rootDir := m.wrangler.RootDir(); rootDir != "" {
 			rescanCmd = m.discoverProjectsFromDir(rootDir)
 		} else {
 			rescanCmd = m.discoverProjectsCmd()
 		}
-		return m, tea.Batch(
-			rescanCmd,
-			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
-		)
+		return m, tea.Batch(rescanCmd, toastTick())
 
 	// Environment variables view messages
 	case envvars.CloseMsg:
@@ -1043,22 +1054,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case envvars.DoneMsg:
-		// Re-parse config to refresh the wrangler view and envvars list
 		if msg.ConfigPath != "" {
-			cfg, err := wcfg.Parse(msg.ConfigPath)
-			if err != nil {
-				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
-				m.toastExpiry = time.Now().Add(3 * time.Second)
-			} else {
-				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
+			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Variable saved. Deploy to apply."); cfg != nil {
 				// Rebuild the envvars list with fresh data
 				vars := m.buildEnvVarsList(msg.ConfigPath, cfg)
 				m.envvarsView.SetVars(vars)
-				m.toastMsg = "Variable saved. Deploy to apply."
-				m.toastExpiry = time.Now().Add(3 * time.Second)
 			}
 		}
-		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+		return m, toastTick()
 
 	// Cron triggers view messages
 	case uitriggers.CloseMsg:
@@ -1087,20 +1090,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case uitriggers.DoneMsg:
-		// Re-parse config to refresh the wrangler view and triggers list
 		if msg.ConfigPath != "" {
-			cfg, err := wcfg.Parse(msg.ConfigPath)
-			if err != nil {
-				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
-				m.toastExpiry = time.Now().Add(3 * time.Second)
-			} else {
-				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
+			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Trigger saved. Deploy to apply."); cfg != nil {
 				m.triggersView.SetCrons(cfg.CronTriggers())
-				m.toastMsg = "Trigger saved. Deploy to apply."
-				m.toastExpiry = time.Now().Add(3 * time.Second)
 			}
 		}
-		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+		return m, toastTick()
 
 	// Deploy All popup messages
 	case deployallpopup.ProjectDoneMsg:
@@ -1692,9 +1687,9 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.restoreDeploymentsFromCache()
 	var deployCmd tea.Cmd
 	if m.wrangler.IsMonorepo() {
-		deployCmd = m.fetchAllProjectDeploymentsForced()
+		deployCmd = m.fetchAllProjectDeployments(true)
 	} else if cfg := m.wrangler.Config(); cfg != nil {
-		deployCmd = m.fetchSingleProjectDeploymentsForced(cfg)
+		deployCmd = m.fetchSingleProjectDeployments(cfg, true)
 	}
 
 	// If we're viewing a service, reload it with the new account
@@ -1964,15 +1959,16 @@ func (m Model) discoverProjectsFromDir(dir string) tea.Cmd {
 }
 
 // fetchAllProjectDeployments returns a batch command that fetches deployment data
-// for every project+environment combination in the monorepo whose deployment cache
-// is stale or missing. Fresh entries are skipped to avoid unnecessary API calls.
-// Results arrive as ProjectDeploymentLoadedMsg.
-func (m Model) fetchAllProjectDeployments() tea.Cmd {
+// for every project+environment combination in the monorepo. When force is false,
+// fresh cache entries are skipped. When force is true (after mutations / account
+// switches), every environment is fetched unconditionally.
+func (m Model) fetchAllProjectDeployments(force ...bool) tea.Cmd {
 	workersSvc := m.getWorkersService()
 	if workersSvc == nil {
 		return nil
 	}
 
+	forceRefresh := len(force) > 0 && force[0]
 	accountID := m.registry.ActiveAccountID()
 	projectConfigs := m.wrangler.ProjectConfigs()
 	var cmds []tea.Cmd
@@ -1986,39 +1982,7 @@ func (m Model) fetchAllProjectDeployments() tea.Cmd {
 			if scriptName == "" {
 				continue
 			}
-			if !m.registry.IsDeploymentCacheStale(scriptName) {
-				continue // cache is fresh, skip
-			}
-			cmds = append(cmds, m.fetchProjectDeployment(workersSvc, accountID, i, envName, scriptName))
-		}
-	}
-
-	if len(cmds) == 0 {
-		return nil
-	}
-	return tea.Batch(cmds...)
-}
-
-// fetchAllProjectDeploymentsForced is like fetchAllProjectDeployments but ignores
-// cache staleness — every environment is fetched unconditionally. Used after
-// mutating actions (deploy, versions deploy) and account switches.
-func (m Model) fetchAllProjectDeploymentsForced() tea.Cmd {
-	workersSvc := m.getWorkersService()
-	if workersSvc == nil {
-		return nil
-	}
-
-	accountID := m.registry.ActiveAccountID()
-	projectConfigs := m.wrangler.ProjectConfigs()
-	var cmds []tea.Cmd
-
-	for i, pc := range projectConfigs {
-		if pc.Config == nil {
-			continue
-		}
-		for _, envName := range pc.Config.EnvNames() {
-			scriptName := pc.Config.ResolvedEnvName(envName)
-			if scriptName == "" {
+			if !forceRefresh && !m.registry.IsDeploymentCacheStale(scriptName) {
 				continue
 			}
 			cmds = append(cmds, m.fetchProjectDeployment(workersSvc, accountID, i, envName, scriptName))
@@ -2032,14 +1996,16 @@ func (m Model) fetchAllProjectDeploymentsForced() tea.Cmd {
 }
 
 // fetchSingleProjectDeployments returns a batch command that fetches deployment data
-// for every environment in a single-project wrangler config whose deployment cache
-// is stale or missing. Results arrive as EnvDeploymentLoadedMsg.
-func (m Model) fetchSingleProjectDeployments(cfg *wcfg.WranglerConfig) tea.Cmd {
+// for every environment in a single-project wrangler config. When force is false,
+// fresh cache entries are skipped. When force is true (after mutations / account
+// switches), every environment is fetched unconditionally.
+func (m Model) fetchSingleProjectDeployments(cfg *wcfg.WranglerConfig, force ...bool) tea.Cmd {
 	workersSvc := m.getWorkersService()
 	if workersSvc == nil {
 		return nil
 	}
 
+	forceRefresh := len(force) > 0 && force[0]
 	accountID := m.registry.ActiveAccountID()
 	var cmds []tea.Cmd
 	for _, envName := range cfg.EnvNames() {
@@ -2047,31 +2013,7 @@ func (m Model) fetchSingleProjectDeployments(cfg *wcfg.WranglerConfig) tea.Cmd {
 		if scriptName == "" {
 			continue
 		}
-		if !m.registry.IsDeploymentCacheStale(scriptName) {
-			continue // cache is fresh, skip
-		}
-		cmds = append(cmds, m.fetchEnvDeployment(workersSvc, accountID, envName, scriptName))
-	}
-
-	if len(cmds) == 0 {
-		return nil
-	}
-	return tea.Batch(cmds...)
-}
-
-// fetchSingleProjectDeploymentsForced is like fetchSingleProjectDeployments but
-// ignores cache staleness. Used after mutating actions and account switches.
-func (m Model) fetchSingleProjectDeploymentsForced(cfg *wcfg.WranglerConfig) tea.Cmd {
-	workersSvc := m.getWorkersService()
-	if workersSvc == nil {
-		return nil
-	}
-
-	accountID := m.registry.ActiveAccountID()
-	var cmds []tea.Cmd
-	for _, envName := range cfg.EnvNames() {
-		scriptName := cfg.ResolvedEnvName(envName)
-		if scriptName == "" {
+		if !forceRefresh && !m.registry.IsDeploymentCacheStale(scriptName) {
 			continue
 		}
 		cmds = append(cmds, m.fetchEnvDeployment(workersSvc, accountID, envName, scriptName))
@@ -2830,50 +2772,19 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 
 	// Triggers action
 	if item.Action == "show_triggers" {
-		var configPath string
-		var projectName string
-
-		if m.wrangler.IsOnProjectList() {
-			configPath = m.wrangler.SelectedProjectConfigPath()
-			if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
-				projectName = cfg.Name
-			}
-		} else if m.wrangler.HasConfig() {
-			configPath = m.wrangler.ConfigPath()
-			if cfg := m.wrangler.Config(); cfg != nil {
-				projectName = cfg.Name
-			}
-		}
-
+		configPath, projectName := m.resolveActiveProjectConfig()
 		if configPath == "" {
 			return nil
 		}
-
 		m.triggersFromResourceList = false
 		return m.openTriggersView(configPath, projectName)
 	}
 
-	// Environment Variables action
 	if item.Action == "show_env_vars" {
-		var configPath string
-		var projectName string
-
-		if m.wrangler.IsOnProjectList() {
-			configPath = m.wrangler.SelectedProjectConfigPath()
-			if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
-				projectName = cfg.Name
-			}
-		} else if m.wrangler.HasConfig() {
-			configPath = m.wrangler.ConfigPath()
-			if cfg := m.wrangler.Config(); cfg != nil {
-				projectName = cfg.Name
-			}
-		}
-
+		configPath, projectName := m.resolveActiveProjectConfig()
 		if configPath == "" {
 			return nil
 		}
-
 		m.envVarsFromResourceList = false
 		return m.openEnvVarsView(configPath, "", projectName)
 	}
@@ -3365,9 +3276,8 @@ func (m *Model) navigateToTriggersList() tea.Cmd {
 func (m *Model) openEnvVarsView(configPath, envName, projectName string) tea.Cmd {
 	cfg, err := wcfg.Parse(configPath)
 	if err != nil {
-		m.toastMsg = fmt.Sprintf("Failed to read config: %v", err)
-		m.toastExpiry = time.Now().Add(3 * time.Second)
-		return tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+		m.setToast(fmt.Sprintf("Failed to read config: %v", err))
+		return toastTick()
 	}
 
 	vars := m.buildEnvVarsList(configPath, cfg)
@@ -3428,9 +3338,8 @@ func (m Model) removeVarCmd(configPath, envName, varName string) tea.Cmd {
 func (m *Model) openTriggersView(configPath, projectName string) tea.Cmd {
 	cfg, err := wcfg.Parse(configPath)
 	if err != nil {
-		m.toastMsg = fmt.Sprintf("Failed to read config: %v", err)
-		m.toastExpiry = time.Now().Add(3 * time.Second)
-		return tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+		m.setToast(fmt.Sprintf("Failed to read config: %v", err))
+		return toastTick()
 	}
 
 	m.triggersView = uitriggers.New(configPath, projectName, cfg.CronTriggers())
@@ -3667,11 +3576,11 @@ func (m Model) refreshAfterMutation() tea.Cmd {
 	var cmds []tea.Cmd
 	// Refresh deployment data (env boxes / project cards)
 	if m.wrangler.IsMonorepo() {
-		if cmd := m.fetchAllProjectDeploymentsForced(); cmd != nil {
+		if cmd := m.fetchAllProjectDeployments(true); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	} else if cfg := m.wrangler.Config(); cfg != nil {
-		if cmd := m.fetchSingleProjectDeploymentsForced(cfg); cmd != nil {
+		if cmd := m.fetchSingleProjectDeployments(cfg, true); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}

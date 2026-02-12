@@ -25,6 +25,20 @@ type NavigateMsg struct {
 	ResourceID  string // namespace_id, bucket_name, database_id, script_name
 }
 
+// DirBrowserMode indicates what the directory browser was opened for.
+type DirBrowserMode int
+
+const (
+	DirBrowserModeOpen   DirBrowserMode = iota // Browse for an existing project
+	DirBrowserModeCreate                       // Browse for a location to create a new project
+)
+
+// EmptyMenuSelectMsg is sent when the user selects an option from the empty-state menu
+// (no wrangler config found). The parent (app.go) handles this.
+type EmptyMenuSelectMsg struct {
+	Action string // "create_project" or "open_project"
+}
+
 // DeleteBindingRequestMsg is sent when the user presses 'd' on a binding inside an env box.
 // The parent (app.go) handles this to show the delete confirmation popup.
 type DeleteBindingRequestMsg struct {
@@ -137,9 +151,13 @@ type Model struct {
 	rootName       string         // CWD basename (monorepo name)
 	rootDir        string         // absolute path to the monorepo root directory
 
+	// Empty state menu (shown when no config found)
+	emptyMenuCursor int // 0 = create project, 1 = browse directory
+
 	// Directory browser for loading config from a custom directory
 	dirBrowser     DirBrowser
 	showDirBrowser bool
+	dirBrowserMode DirBrowserMode // what the dir browser was opened for
 
 	// Command output pane (bottom split)
 	cmdPane CmdPane
@@ -223,14 +241,19 @@ func (m Model) ConfigPath() string {
 	return m.configPath
 }
 
-// IsMonorepo returns true if multiple projects were discovered.
+// IsMonorepo returns true if the project list mode is active (1 or more projects discovered).
 func (m Model) IsMonorepo() bool {
-	return m.projects != nil && len(m.projects) > 1
+	return len(m.projects) > 0
 }
 
 // IsOnProjectList returns true if we're in monorepo mode and showing the project list.
 func (m Model) IsOnProjectList() bool {
 	return m.IsMonorepo() && m.activeProject == -1
+}
+
+// IsEmpty returns true when no wrangler config was found and the empty-state menu should show.
+func (m Model) IsEmpty() bool {
+	return !m.configLoading && m.config == nil && m.configErr == nil && !m.IsMonorepo() && !m.showDirBrowser
 }
 
 // SelectedProjectConfigPath returns the config path of the currently selected
@@ -390,14 +413,26 @@ func (m *Model) SetFocused(f bool) {
 }
 
 // ActivateDirBrowser opens the directory browser starting from CWD.
-func (m *Model) ActivateDirBrowser() {
+func (m *Model) ActivateDirBrowser(mode DirBrowserMode) {
 	m.dirBrowser = NewDirBrowser(".")
+	m.dirBrowser.SetMode(mode)
 	m.showDirBrowser = true
+	m.dirBrowserMode = mode
 }
 
 // IsDirBrowserActive returns whether the directory browser is currently shown.
 func (m Model) IsDirBrowserActive() bool {
 	return m.showDirBrowser
+}
+
+// CloseDirBrowser closes the directory browser without triggering any action.
+func (m *Model) CloseDirBrowser() {
+	m.showDirBrowser = false
+}
+
+// DirBrowserActiveMode returns the mode the directory browser was opened in.
+func (m Model) DirBrowserActiveMode() DirBrowserMode {
+	return m.dirBrowserMode
 }
 
 // SetConfigLoading resets the view to a loading state (e.g. when re-scanning a new path).
@@ -780,6 +815,32 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 
+		// Empty state menu (no config found, no monorepo)
+		if m.IsEmpty() {
+			switch msg.String() {
+			case "up", "k":
+				if m.emptyMenuCursor > 0 {
+					m.emptyMenuCursor--
+				}
+			case "down", "j":
+				if m.emptyMenuCursor < 1 {
+					m.emptyMenuCursor++
+				}
+			case "enter":
+				switch m.emptyMenuCursor {
+				case 0:
+					return m, func() tea.Msg {
+						return EmptyMenuSelectMsg{Action: "create_project"}
+					}
+				case 1:
+					return m, func() tea.Msg {
+						return EmptyMenuSelectMsg{Action: "open_project"}
+					}
+				}
+			}
+			return m, nil
+		}
+
 		if m.config == nil {
 			return m, nil
 		}
@@ -1098,12 +1159,26 @@ func (m Model) View() string {
 		return m.viewProjectList(contentHeight, boxWidth, title, sep)
 	}
 
-	// No config found
+	// No config found — show interactive menu
 	if m.config == nil {
-		body := theme.DimStyle.Render("\n  No wrangler configuration found")
-		hint := theme.DimStyle.Render("\n  Place a wrangler.jsonc, wrangler.json, or wrangler.toml\n  in the current directory.")
-		helpHint := theme.DimStyle.Render("\n  Press ctrl+p to load from a custom path.")
-		content := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", title, sep, body, hint, helpHint)
+		body := theme.DimStyle.Render("\n  No wrangler configuration found.\n")
+
+		options := []string{
+			"Create a new project...",
+			"Open an existing project...",
+		}
+		var menu string
+		for i, opt := range options {
+			if i == m.emptyMenuCursor {
+				menu += fmt.Sprintf("  %s %s\n",
+					lipgloss.NewStyle().Foreground(theme.ColorOrange).Bold(true).Render(">"),
+					lipgloss.NewStyle().Foreground(theme.ColorOrange).Render(opt))
+			} else {
+				menu += fmt.Sprintf("    %s\n", theme.DimStyle.Render(opt))
+			}
+		}
+
+		content := fmt.Sprintf("%s\n%s\n%s\n%s", title, sep, body, menu)
 		return m.renderBorder(content, contentHeight)
 	}
 

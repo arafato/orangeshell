@@ -574,6 +574,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case uiwrangler.EmptyMenuSelectMsg:
+		switch msg.Action {
+		case "create_project":
+			m.wrangler.ActivateDirBrowser(uiwrangler.DirBrowserModeCreate)
+		case "open_project":
+			m.wrangler.ActivateDirBrowser(uiwrangler.DirBrowserModeOpen)
+		}
+		return m, nil
+
 	case uiwrangler.EnvDeploymentLoadedMsg:
 		// Discard stale responses from a previous account
 		if msg.AccountID != "" && msg.AccountID != m.registry.ActiveAccountID() {
@@ -694,6 +703,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.LoadConfigPathMsg:
+		if m.wrangler.DirBrowserActiveMode() == uiwrangler.DirBrowserModeCreate {
+			// User chose a directory to create a new project in
+			m.wrangler.CloseDirBrowser()
+			m.showProjectPopup = true
+			m.projectPopup = projectpopup.New(nil, msg.Path)
+			return m, nil
+		}
 		// User entered a custom path — scan it for wrangler config
 		m.wrangler.SetConfigLoading()
 		return m, tea.Batch(m.discoverProjectsFromDir(msg.Path), m.wrangler.SpinnerInit())
@@ -887,12 +903,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showProjectPopup = false
 		m.toastMsg = "Project created"
 		m.toastExpiry = time.Now().Add(3 * time.Second)
-		// Rescan the monorepo root dir to pick up the new project
-		rootDir := m.wrangler.RootDir()
-		if rootDir != "" {
-			return m, m.discoverProjectsFromDir(rootDir)
+		// Rescan to pick up the new project. Prefer the directory the project
+		// was created in, then the monorepo root, then fall back to CWD.
+		var rescanCmd tea.Cmd
+		if msg.Dir != "" {
+			rescanCmd = m.discoverProjectsFromDir(msg.Dir)
+		} else if rootDir := m.wrangler.RootDir(); rootDir != "" {
+			rescanCmd = m.discoverProjectsFromDir(rootDir)
+		} else {
+			rescanCmd = m.discoverProjectsCmd()
 		}
-		return m, m.discoverProjectsCmd()
+		return m, tea.Batch(
+			rescanCmd,
+			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
+		)
 
 	// Launcher messages
 	case launcher.LaunchServiceMsg:
@@ -1633,32 +1657,23 @@ func (m *Model) stopAllParallelTails() {
 // --- Wrangler config helpers ---
 
 // discoverProjectsCmd returns a command that discovers wrangler projects in the CWD tree.
-// If 0 found: sends ConfigLoadedMsg{nil, "", nil} (no config)
-// If 1 found: sends ConfigLoadedMsg with parsed config (backward compatible)
-// If 2+ found: sends ProjectsDiscoveredMsg for monorepo mode
+// If 0 found: sends ConfigLoadedMsg{nil, "", nil} (empty state)
+// If 1+ found: sends ProjectsDiscoveredMsg for project list view
 func (m Model) discoverProjectsCmd() tea.Cmd {
 	return func() tea.Msg {
 		projects := wcfg.DiscoverProjects(".")
 		cwd, _ := filepath.Abs(".")
 		rootName := filepath.Base(cwd)
 
-		switch len(projects) {
-		case 0:
+		if len(projects) == 0 {
 			return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
-		case 1:
-			// Single project — backward compatible: parse and return ConfigLoadedMsg
-			cfg, err := wcfg.Parse(projects[0].ConfigPath)
-			return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: projects[0].ConfigPath, Err: err}
-		default:
-			// Monorepo — return all projects for the project list view
-			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName, RootDir: cwd}
 		}
+		return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName, RootDir: cwd}
 	}
 }
 
 // discoverProjectsFromDir returns a command that discovers wrangler projects starting
-// from a user-specified directory (via the directory browser). Uses the same 0/1/2+
-// branching as discoverProjectsCmd so monorepo directories are handled correctly.
+// from a user-specified directory (via the directory browser).
 func (m Model) discoverProjectsFromDir(dir string) tea.Cmd {
 	return func() tea.Msg {
 		absDir, err := filepath.Abs(dir)
@@ -1669,15 +1684,10 @@ func (m Model) discoverProjectsFromDir(dir string) tea.Cmd {
 
 		projects := wcfg.DiscoverProjects(absDir)
 
-		switch len(projects) {
-		case 0:
+		if len(projects) == 0 {
 			return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
-		case 1:
-			cfg, err := wcfg.Parse(projects[0].ConfigPath)
-			return uiwrangler.ConfigLoadedMsg{Config: cfg, Path: projects[0].ConfigPath, Err: err}
-		default:
-			return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName, RootDir: absDir}
 		}
+		return uiwrangler.ProjectsDiscoveredMsg{Projects: projects, RootName: rootName, RootDir: absDir}
 	}
 }
 
@@ -2479,7 +2489,7 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 
 	// Wrangler load config action
 	if item.Action == "wrangler_load_config" {
-		m.wrangler.ActivateDirBrowser()
+		m.wrangler.ActivateDirBrowser(uiwrangler.DirBrowserModeOpen)
 		return nil
 	}
 
@@ -3095,6 +3105,14 @@ func (m Model) renderHelp() string {
 			entries = []helpEntry{
 				{"esc", "back"},
 				{"j/k", "scroll"},
+			}
+		} else if m.wrangler.IsEmpty() {
+			entries = []helpEntry{
+				{"j/k", "navigate"},
+				{"enter", "select"},
+				{"ctrl+l", "services"},
+				{"[/]", "accounts"},
+				{"q", "quit"},
 			}
 		} else {
 			entries = []helpEntry{

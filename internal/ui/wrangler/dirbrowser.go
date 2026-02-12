@@ -7,22 +7,35 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
 
-const loadFromHereLabel = "[ Load from here ]"
+const (
+	loadFromHereLabel = "[ Load from here ]"
+	createHereLabel   = "[ Create here ]"
+	createFolderLabel = "+ Create folder"
+)
 
 // DirBrowser is a simple directory browser for selecting a wrangler project directory.
 // Navigation: up/down to select, right/enter to drill in, left/backspace to go up, esc to cancel.
-// The first entry is always "[ Load from here ]" which confirms the current directory.
+// The first entry is always an action label ("[ Load from here ]" or "[ Create here ]").
+// In create mode, a "+ Create folder" entry appears below the action label.
 type DirBrowser struct {
 	currentDir string   // absolute path being browsed
-	entries    []string // "[ Load from here ]", "..", then sorted subdirectories
+	entries    []string // action label, optional create folder, "..", then sorted subdirectories
 	cursor     int
 	scrollY    int
 	scanErr    error // permission or read errors
+	mode       DirBrowserMode
+
+	// Inline folder creation
+	creatingFolder bool
+	folderInput    textinput.Model
+	folderErr      error
 }
 
 // NewDirBrowser creates a directory browser starting at the given directory.
@@ -36,6 +49,12 @@ func NewDirBrowser(startDir string) DirBrowser {
 	return b
 }
 
+// SetMode sets the browser mode (must be called before first scan for correct labels).
+func (b *DirBrowser) SetMode(mode DirBrowserMode) {
+	b.mode = mode
+	b.scan() // rescan to update entries with correct labels
+}
+
 // scan reads the current directory and populates entries.
 func (b *DirBrowser) scan() {
 	b.scanErr = nil
@@ -43,8 +62,13 @@ func (b *DirBrowser) scan() {
 	b.cursor = 0
 	b.scrollY = 0
 
-	// Always start with the "load from here" action
-	b.entries = append(b.entries, loadFromHereLabel)
+	// Action label depends on mode
+	if b.mode == DirBrowserModeCreate {
+		b.entries = append(b.entries, createHereLabel)
+		b.entries = append(b.entries, createFolderLabel)
+	} else {
+		b.entries = append(b.entries, loadFromHereLabel)
+	}
 
 	// Add ".." unless we're at the filesystem root
 	parent := filepath.Dir(b.currentDir)
@@ -79,6 +103,11 @@ func (b DirBrowser) CurrentDir() string {
 // Update handles key events for the directory browser.
 // Returns the updated browser and an optional command (LoadConfigPathMsg when confirmed).
 func (b DirBrowser) Update(msg tea.KeyMsg) (DirBrowser, tea.Cmd) {
+	// Inline folder creation mode — text input takes exclusive focus
+	if b.creatingFolder {
+		return b.updateCreateFolder(msg)
+	}
+
 	switch msg.String() {
 	case "up", "k":
 		if b.cursor > 0 {
@@ -101,6 +130,37 @@ func (b DirBrowser) Update(msg tea.KeyMsg) (DirBrowser, tea.Cmd) {
 	return b, nil
 }
 
+// updateCreateFolder handles keys while the folder name input is active.
+func (b DirBrowser) updateCreateFolder(msg tea.KeyMsg) (DirBrowser, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		b.creatingFolder = false
+		b.folderErr = nil
+		return b, nil
+	case "enter":
+		name := strings.TrimSpace(b.folderInput.Value())
+		if name == "" {
+			return b, nil
+		}
+		// Create the directory
+		target := filepath.Join(b.currentDir, name)
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			b.folderErr = err
+			return b, nil
+		}
+		// Navigate into the new folder
+		b.creatingFolder = false
+		b.folderErr = nil
+		b.currentDir = target
+		b.scan()
+		return b, nil
+	default:
+		var cmd tea.Cmd
+		b.folderInput, cmd = b.folderInput.Update(msg)
+		return b, cmd
+	}
+}
+
 // dirBrowserCloseMsg is an internal message to signal the browser should close.
 type dirBrowserCloseMsg struct{}
 
@@ -113,12 +173,27 @@ func (b DirBrowser) selectEntry() (DirBrowser, tea.Cmd) {
 	entry := b.entries[b.cursor]
 
 	switch entry {
-	case loadFromHereLabel:
+	case loadFromHereLabel, createHereLabel:
 		// Confirm current directory — emit load message
 		dir := b.currentDir
 		return b, func() tea.Msg {
 			return LoadConfigPathMsg{Path: dir}
 		}
+	case createFolderLabel:
+		// Activate inline text input for folder name
+		ni := textinput.New()
+		ni.Placeholder = "my-project"
+		ni.CharLimit = 255
+		ni.Width = 40
+		ni.Prompt = "  "
+		ni.PromptStyle = lipgloss.NewStyle().Foreground(theme.ColorGreen)
+		ni.TextStyle = theme.ValueStyle
+		ni.PlaceholderStyle = theme.DimStyle
+		ni.Focus()
+		b.creatingFolder = true
+		b.folderInput = ni
+		b.folderErr = nil
+		return b, nil
 	case "..":
 		b.navigateUp()
 		return b, nil
@@ -172,7 +247,11 @@ func (b DirBrowser) View(width, height int) string {
 	var lines []string
 
 	// Title
-	lines = append(lines, theme.TitleStyle.Render("  Browse for Wrangler project"))
+	if b.mode == DirBrowserModeCreate {
+		lines = append(lines, theme.TitleStyle.Render("  Choose project location"))
+	} else {
+		lines = append(lines, theme.TitleStyle.Render("  Browse for Wrangler project"))
+	}
 
 	// Separator
 	sepWidth := width - 2
@@ -200,6 +279,26 @@ func (b DirBrowser) View(width, height int) string {
 		entryHeight = 1
 	}
 
+	// If creating a folder, render the input inline instead of the entry list
+	if b.creatingFolder {
+		lines = append(lines, lipgloss.NewStyle().Foreground(theme.ColorGreen).Render("  Folder name:"))
+		lines = append(lines, b.folderInput.View())
+		if b.folderErr != nil {
+			lines = append(lines, theme.ErrorStyle.Render(fmt.Sprintf("  %s", b.folderErr.Error())))
+		}
+		lines = append(lines, "")
+		lines = append(lines, theme.DimStyle.Render("  enter confirm  esc cancel"))
+
+		// Pad to height
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		return strings.Join(lines, "\n")
+	}
+
 	// Adjust scroll so cursor is visible
 	if b.cursor < b.scrollY {
 		b.scrollY = b.cursor
@@ -217,17 +316,30 @@ func (b DirBrowser) View(width, height int) string {
 		endIdx = len(b.entries)
 	}
 
+	greenStyle := lipgloss.NewStyle().Foreground(theme.ColorGreen)
+
 	for i := b.scrollY; i < endIdx; i++ {
 		entry := b.entries[i]
 		selected := i == b.cursor
 
 		// Format display name
 		displayName := entry
-		if entry != loadFromHereLabel && entry != ".." {
+		if entry != loadFromHereLabel && entry != createHereLabel &&
+			entry != createFolderLabel && entry != ".." {
 			displayName = entry + "/"
 		}
 
-		if selected {
+		if entry == createFolderLabel {
+			// Always render in green
+			if selected {
+				line := fmt.Sprintf("  %s %s",
+					greenStyle.Bold(true).Render("\u25b8"), // ▸
+					greenStyle.Bold(true).Render(displayName))
+				lines = append(lines, line)
+			} else {
+				lines = append(lines, fmt.Sprintf("    %s", greenStyle.Render(displayName)))
+			}
+		} else if selected {
 			line := fmt.Sprintf("  %s %s",
 				theme.SelectedItemStyle.Render("\u25b8"), // ▸
 				theme.SelectedItemStyle.Render(displayName))

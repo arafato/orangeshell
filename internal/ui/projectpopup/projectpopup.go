@@ -42,8 +42,10 @@ type CreateProjectDoneMsg struct {
 // CloseMsg signals the popup should close without changes.
 type CloseMsg struct{}
 
-// DoneMsg signals the project was created. The app should rescan the monorepo.
-type DoneMsg struct{}
+// DoneMsg signals the project was created. The app should rescan the directory.
+type DoneMsg struct {
+	Dir string // parent directory where the project was created
+}
 
 // --- Language entry ---
 
@@ -261,7 +263,8 @@ func (m Model) updateResult(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "enter", "ctrl+p":
 		if !m.resultIsErr {
-			return m, func() tea.Msg { return DoneMsg{} }
+			dir := m.rootDir
+			return m, func() tea.Msg { return DoneMsg{Dir: dir} }
 		}
 		return m, func() tea.Msg { return CloseMsg{} }
 	}

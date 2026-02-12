@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -298,6 +297,24 @@ func (m Model) initDashboardCmd() tea.Cmd {
 
 // Update handles all messages for the application.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Delegate to domain-specific message handlers (Tier 3).
+	// Each returns (Model, Cmd, handled). If handled, we're done.
+	handlers := []func(*Model, tea.Msg) (Model, tea.Cmd, bool){
+		(*Model).handleDeletePopupMsg,
+		(*Model).handleBindingsMsg,
+		(*Model).handleEnvPopupMsg,
+		(*Model).handleProjectPopupMsg,
+		(*Model).handleRemoveProjectMsg,
+		(*Model).handleEnvVarsMsg,
+		(*Model).handleTriggersMsg,
+		(*Model).handleDeployAllMsg,
+	}
+	for _, h := range handlers {
+		if result, cmd, handled := h(&m, msg); handled {
+			return result, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -587,57 +604,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(fetchCmds...)
 
-	case deletepopup.CloseMsg:
-		m.showDeletePopup = false
-		m.pendingDeleteReq = nil
-		return m, nil
-
-	case deletepopup.DeleteMsg:
-		return m, m.deleteResourceCmd(msg.ServiceName, msg.ResourceID)
-
-	case deletepopup.DeleteDoneMsg:
-		var cmd tea.Cmd
-		m.deletePopup, cmd = m.deletePopup.Update(msg)
-		return m, cmd
-
-	case deletepopup.DeleteBindingMsg:
-		return m, m.removeBindingCmd(msg.ConfigPath, msg.EnvName, msg.BindingName, msg.BindingType)
-
-	case deletepopup.DeleteBindingDoneMsg:
-		var cmd tea.Cmd
-		m.deletePopup, cmd = m.deletePopup.Update(msg)
-		return m, cmd
-
-	case deletepopup.DoneMsg:
-		m.showDeletePopup = false
-		if msg.ConfigPath != "" {
-			// Binding delete — re-parse the config to refresh the UI
-			m.reloadWranglerConfig(msg.ConfigPath, "Binding removed")
-			// Invalidate the binding index so the next delete attempt rebuilds
-			// it fresh from the API (the deployed state may have changed if the
-			// user redeployed after removing the binding locally).
-			m.registry.SetBindingIndex(nil)
-			return m, toastTick()
-		}
-		// Resource delete — optimistic cache removal + background refresh
-		m.setToast("Resource deleted")
-		if entry := m.registry.GetCache(msg.ServiceName); entry != nil {
-			filtered := make([]svc.Resource, 0, len(entry.Resources))
-			for _, r := range entry.Resources {
-				if r.ID != msg.ResourceID {
-					filtered = append(filtered, r)
-				}
-			}
-			m.registry.SetCache(msg.ServiceName, filtered)
-			if m.detail.Service() == msg.ServiceName {
-				m.detail.RefreshResources(filtered)
-			}
-		}
-		return m, tea.Batch(
-			m.backgroundRefresh(msg.ServiceName),
-			toastTick(),
-		)
-
 	case bindingIndexBuiltMsg:
 		if m.isStaleAccount(msg.accountID) {
 			return m, nil
@@ -889,225 +855,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actions.CloseMsg:
 		m.showActions = false
-		return m, nil
-
-	// Binding popup messages
-	case bindings.CloseMsg:
-		m.showBindings = false
-		return m, nil
-
-	case bindings.ListResourcesMsg:
-		return m, m.listResourcesCmd(msg.ResourceType)
-
-	case bindings.ResourcesLoadedMsg:
-		m.bindingsPopup, _ = m.bindingsPopup.Update(msg)
-		return m, nil
-
-	case bindings.CreateResourceMsg:
-		return m, m.createResourceCmd(msg.ResourceType, msg.Name)
-
-	case bindings.CreateResourceDoneMsg:
-		m.bindingsPopup, _ = m.bindingsPopup.Update(msg)
-		return m, nil
-
-	case bindings.WriteBindingMsg:
-		return m, m.writeBindingCmd(msg.ConfigPath, msg.EnvName, msg.Binding)
-
-	case bindings.WriteBindingDoneMsg:
-		var cmd tea.Cmd
-		m.bindingsPopup, cmd = m.bindingsPopup.Update(msg)
-		return m, cmd
-
-	case bindings.DoneMsg:
-		m.showBindings = false
-		if msg.ConfigPath != "" {
-			m.reloadWranglerConfig(msg.ConfigPath, "Binding added")
-		}
-		// If a resource was created, refresh the corresponding service cache
-		if msg.ResourceType != "" {
-			if svcName := resourceTypeToServiceName(msg.ResourceType); svcName != "" {
-				return m, m.backgroundRefresh(svcName)
-			}
-		}
-		return m, nil
-
-	// Add environment popup messages
-	case envpopup.CloseMsg:
-		m.showEnvPopup = false
-		return m, nil
-
-	case envpopup.CreateEnvMsg:
-		return m, m.createEnvCmd(msg.ConfigPath, msg.EnvName)
-
-	case envpopup.CreateEnvDoneMsg:
-		var cmd tea.Cmd
-		m.envPopup, cmd = m.envPopup.Update(msg)
-		return m, cmd
-
-	case envpopup.DeleteEnvMsg:
-		return m, m.deleteEnvCmd(msg.ConfigPath, msg.EnvName)
-
-	case envpopup.DeleteEnvDoneMsg:
-		var cmd tea.Cmd
-		m.envPopup, cmd = m.envPopup.Update(msg)
-		return m, cmd
-
-	case envpopup.DoneMsg:
-		m.showEnvPopup = false
-		if msg.ConfigPath != "" {
-			toastMsg := "Environment added"
-			if m.envPopup.IsDeleteMode() {
-				toastMsg = "Environment deleted"
-			}
-			m.reloadWranglerConfig(msg.ConfigPath, toastMsg)
-		}
-		return m, nil
-
-	// Create project popup messages
-	case projectpopup.CloseMsg:
-		m.showProjectPopup = false
-		return m, nil
-
-	case projectpopup.CreateProjectMsg:
-		return m, m.createProjectCmd(msg.Name, msg.Lang, msg.Dir)
-
-	case projectpopup.CreateProjectDoneMsg:
-		var cmd tea.Cmd
-		m.projectPopup, cmd = m.projectPopup.Update(msg)
-		return m, cmd
-
-	case projectpopup.DoneMsg:
-		m.showProjectPopup = false
-		m.setToast("Project created")
-		// Rescan to pick up the new project. Prefer the directory the project
-		// was created in, then the monorepo root, then fall back to CWD.
-		var rescanCmd tea.Cmd
-		if msg.Dir != "" {
-			rescanCmd = m.discoverProjectsFromDir(msg.Dir)
-		} else if rootDir := m.wrangler.RootDir(); rootDir != "" {
-			rescanCmd = m.discoverProjectsFromDir(rootDir)
-		} else {
-			rescanCmd = m.discoverProjectsCmd()
-		}
-		return m, tea.Batch(rescanCmd, toastTick())
-
-	// Remove project popup messages
-	case removeprojectpopup.CloseMsg:
-		m.showRemoveProjectPopup = false
-		return m, nil
-
-	case removeprojectpopup.RemoveProjectMsg:
-		dirPath := msg.DirPath
-		return m, func() tea.Msg {
-			err := os.RemoveAll(dirPath)
-			return removeprojectpopup.RemoveProjectDoneMsg{Err: err}
-		}
-
-	case removeprojectpopup.RemoveProjectDoneMsg:
-		var cmd tea.Cmd
-		m.removeProjectPopup, cmd = m.removeProjectPopup.Update(msg)
-		return m, cmd
-
-	case removeprojectpopup.DoneMsg:
-		m.showRemoveProjectPopup = false
-		m.setToast("Project removed")
-		var rescanCmd tea.Cmd
-		if rootDir := m.wrangler.RootDir(); rootDir != "" {
-			rescanCmd = m.discoverProjectsFromDir(rootDir)
-		} else {
-			rescanCmd = m.discoverProjectsCmd()
-		}
-		return m, tea.Batch(rescanCmd, toastTick())
-
-	// Environment variables view messages
-	case envvars.CloseMsg:
-		if m.envVarsFromResourceList {
-			// Return to the Env Variables project list
-			m.envVarsFromResourceList = false
-			m.viewState = ViewServiceList
-		} else {
-			m.viewState = ViewWrangler
-		}
-		return m, nil
-
-	case envvars.SetVarMsg:
-		return m, m.setVarCmd(msg.ConfigPath, msg.EnvName, msg.VarName, msg.Value)
-
-	case envvars.DeleteVarMsg:
-		return m, m.removeVarCmd(msg.ConfigPath, msg.EnvName, msg.VarName)
-
-	case envvars.SetVarDoneMsg:
-		var cmd tea.Cmd
-		m.envvarsView, cmd = m.envvarsView.Update(msg)
-		return m, cmd
-
-	case envvars.DeleteVarDoneMsg:
-		var cmd tea.Cmd
-		m.envvarsView, cmd = m.envvarsView.Update(msg)
-		return m, cmd
-
-	case envvars.DoneMsg:
-		if msg.ConfigPath != "" {
-			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Variable saved. Deploy to apply."); cfg != nil {
-				// Rebuild the envvars list with fresh data
-				vars := m.buildEnvVarsList(msg.ConfigPath, cfg)
-				m.envvarsView.SetVars(vars)
-			}
-		}
-		return m, toastTick()
-
-	// Cron triggers view messages
-	case uitriggers.CloseMsg:
-		if m.triggersFromResourceList {
-			m.triggersFromResourceList = false
-			m.viewState = ViewServiceList
-		} else {
-			m.viewState = ViewWrangler
-		}
-		return m, nil
-
-	case uitriggers.AddCronMsg:
-		return m, m.addCronCmd(msg.ConfigPath, msg.Cron)
-
-	case uitriggers.DeleteCronMsg:
-		return m, m.removeCronCmd(msg.ConfigPath, msg.Cron)
-
-	case uitriggers.AddCronDoneMsg:
-		var cmd tea.Cmd
-		m.triggersView, cmd = m.triggersView.Update(msg)
-		return m, cmd
-
-	case uitriggers.DeleteCronDoneMsg:
-		var cmd tea.Cmd
-		m.triggersView, cmd = m.triggersView.Update(msg)
-		return m, cmd
-
-	case uitriggers.DoneMsg:
-		if msg.ConfigPath != "" {
-			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Trigger saved. Deploy to apply."); cfg != nil {
-				m.triggersView.SetCrons(cfg.CronTriggers())
-			}
-		}
-		return m, toastTick()
-
-	// Deploy All popup messages
-	case deployallpopup.ProjectDoneMsg:
-		var cmd tea.Cmd
-		m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
-		return m, cmd
-
-	case deployallpopup.CancelMsg:
-		m.cancelDeployAllRunners()
-		return m, nil
-
-	case deployallpopup.DoneMsg:
-		m.deployAllRunners = nil
-		// Trigger refresh after mutation (deployment data + workers list)
-		return m, m.refreshAfterMutation()
-
-	case deployallpopup.CloseMsg:
-		m.showDeployAllPopup = false
-		m.deployAllRunners = nil
 		return m, nil
 
 	// Launcher messages

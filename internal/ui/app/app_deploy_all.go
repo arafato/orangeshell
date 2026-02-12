@@ -146,3 +146,28 @@ func (m *Model) cancelDeployAllRunners() {
 	}
 	m.deployAllRunners = nil
 }
+
+// handleDeployAllMsg handles all deploy-all popup messages.
+func (m *Model) handleDeployAllMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
+	switch msg := msg.(type) {
+	case deployallpopup.ProjectDoneMsg:
+		var cmd tea.Cmd
+		m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
+		return *m, cmd, true
+
+	case deployallpopup.CancelMsg:
+		m.cancelDeployAllRunners()
+		return *m, nil, true
+
+	case deployallpopup.DoneMsg:
+		m.deployAllRunners = nil
+		// Trigger refresh after mutation (deployment data + workers list)
+		return *m, m.refreshAfterMutation(), true
+
+	case deployallpopup.CloseMsg:
+		m.showDeployAllPopup = false
+		m.deployAllRunners = nil
+		return *m, nil, true
+	}
+	return *m, nil, false
+}

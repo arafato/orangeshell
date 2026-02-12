@@ -8,6 +8,7 @@ import (
 
 	cloudflare "github.com/cloudflare/cloudflare-go/v6"
 	"github.com/cloudflare/cloudflare-go/v6/kv"
+	"github.com/cloudflare/cloudflare-go/v6/option"
 )
 
 // KVService implements the Service interface for Cloudflare Workers KV.
@@ -111,6 +112,20 @@ func (s *KVService) Get(id string) (*ResourceDetail, error) {
 	})
 
 	return detail, nil
+}
+
+// Delete removes a KV namespace by ID.
+func (s *KVService) Delete(ctx context.Context, id string) error {
+	_, err := s.client.KV.Namespaces.Delete(ctx, id, kv.NamespaceDeleteParams{
+		AccountID: cloudflare.F(s.accountID),
+	}, option.WithMaxRetries(0))
+	if err != nil {
+		return fmt.Errorf("failed to delete KV namespace %s: %w", id, err)
+	}
+	s.mu.Lock()
+	delete(s.cachedRaw, id)
+	s.mu.Unlock()
+	return nil
 }
 
 // SearchItems returns the cached list of KV namespaces for fuzzy search.

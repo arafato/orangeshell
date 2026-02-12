@@ -7,6 +7,7 @@ import (
 	"time"
 
 	cloudflare "github.com/cloudflare/cloudflare-go/v6"
+	"github.com/cloudflare/cloudflare-go/v6/option"
 	"github.com/cloudflare/cloudflare-go/v6/r2"
 )
 
@@ -134,6 +135,20 @@ func (s *R2Service) Get(id string) (*ResourceDetail, error) {
 	}
 
 	return detail, nil
+}
+
+// Delete removes an R2 bucket by name.
+func (s *R2Service) Delete(ctx context.Context, id string) error {
+	_, err := s.client.R2.Buckets.Delete(ctx, id, r2.BucketDeleteParams{
+		AccountID: cloudflare.F(s.accountID),
+	}, option.WithMaxRetries(0))
+	if err != nil {
+		return fmt.Errorf("failed to delete R2 bucket %s: %w", id, err)
+	}
+	s.mu.Lock()
+	delete(s.cachedRaw, id)
+	s.mu.Unlock()
+	return nil
 }
 
 // SearchItems returns the cached list of R2 buckets for fuzzy search.

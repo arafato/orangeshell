@@ -105,6 +105,13 @@ type (
 	CopyToClipboardMsg struct {
 		Text string
 	}
+
+	// DeleteResourceRequestMsg requests the app to open the delete confirmation popup.
+	DeleteResourceRequestMsg struct {
+		ServiceName  string
+		ResourceID   string
+		ResourceName string
+	}
 )
 
 // Model represents the right-side detail panel.
@@ -620,8 +627,29 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
 			}
 		}
+	case "d":
+		// Delete resource — only for deletable services (not Workers)
+		if isDeletableService(m.service) && len(m.resources) > 0 && m.cursor < len(m.resources) {
+			r := m.resources[m.cursor]
+			return m, func() tea.Msg {
+				return DeleteResourceRequestMsg{
+					ServiceName:  m.service,
+					ResourceID:   r.ID,
+					ResourceName: r.Name,
+				}
+			}
+		}
 	}
 	return m, nil
+}
+
+// isDeletableService returns true for services that support resource deletion from the list view.
+func isDeletableService(name string) bool {
+	switch name {
+	case "KV", "D1", "R2", "Queues":
+		return true
+	}
+	return false
 }
 
 func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
@@ -844,7 +872,11 @@ func (m Model) viewList(maxHeight int) string {
 	}
 	visibleLines := lines[startIdx:endIdx]
 
-	help := theme.DimStyle.Render("  enter detail  |  esc back")
+	helpText := "  enter detail  |  esc back"
+	if isDeletableService(m.service) {
+		helpText = "  enter detail  |  d delete  |  esc back"
+	}
+	help := theme.DimStyle.Render(helpText)
 
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s",
 		title, sep, countLine,

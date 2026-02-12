@@ -25,6 +25,16 @@ type NavigateMsg struct {
 	ResourceID  string // namespace_id, bucket_name, database_id, script_name
 }
 
+// DeleteBindingRequestMsg is sent when the user presses 'd' on a binding inside an env box.
+// The parent (app.go) handles this to show the delete confirmation popup.
+type DeleteBindingRequestMsg struct {
+	ConfigPath  string
+	EnvName     string
+	BindingName string
+	BindingType string
+	WorkerName  string
+}
+
 // ConfigLoadedMsg is sent when a wrangler config has been scanned and parsed.
 type ConfigLoadedMsg struct {
 	Config *wcfg.WranglerConfig
@@ -988,6 +998,23 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return NavigateMsg{
 					ServiceName: bnd.NavService(),
 					ResourceID:  bnd.ResourceID,
+				}
+			}
+		}
+	case "d":
+		// Delete the focused binding
+		bnd := box.SelectedBinding()
+		if bnd != nil {
+			configPath := m.configPath
+			envName := box.EnvName
+			workerName := box.WorkerName
+			return m, func() tea.Msg {
+				return DeleteBindingRequestMsg{
+					ConfigPath:  configPath,
+					EnvName:     envName,
+					BindingName: bnd.Name,
+					BindingType: bnd.Type,
+					WorkerName:  workerName,
 				}
 			}
 		}

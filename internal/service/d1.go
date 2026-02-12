@@ -9,6 +9,7 @@ import (
 
 	cloudflare "github.com/cloudflare/cloudflare-go/v6"
 	"github.com/cloudflare/cloudflare-go/v6/d1"
+	"github.com/cloudflare/cloudflare-go/v6/option"
 )
 
 // D1QueryResult holds the result of executing a SQL query against a D1 database.
@@ -112,6 +113,20 @@ func (s *D1Service) Get(id string) (*ResourceDetail, error) {
 	)
 
 	return detail, nil
+}
+
+// Delete removes a D1 database by UUID.
+func (s *D1Service) Delete(ctx context.Context, id string) error {
+	_, err := s.client.D1.Database.Delete(ctx, id, d1.DatabaseDeleteParams{
+		AccountID: cloudflare.F(s.accountID),
+	}, option.WithMaxRetries(0))
+	if err != nil {
+		return fmt.Errorf("failed to delete D1 database %s: %w", id, err)
+	}
+	s.mu.Lock()
+	delete(s.cachedRaw, id)
+	s.mu.Unlock()
+	return nil
 }
 
 // SearchItems returns the cached list of D1 databases for fuzzy search.

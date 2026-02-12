@@ -1,6 +1,9 @@
 package service
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // CacheTTL is the duration after which cached data is considered stale.
 // Fresh cache (<CacheTTL) is served without re-fetching; stale cache is
@@ -90,6 +93,12 @@ type Service interface {
 	// SearchItems returns all resources that could match in a fuzzy search.
 	// This is typically the same data as List, but preloaded or cached.
 	SearchItems() []Resource
+}
+
+// Deleter is an optional interface for services that support resource deletion.
+// Not all services implement this (e.g. Workers are deleted via wrangler CLI).
+type Deleter interface {
+	Delete(ctx context.Context, id string) error
 }
 
 // CacheEntry holds cached resource list data for a single service.

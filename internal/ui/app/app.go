@@ -20,6 +20,7 @@ import (
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
+	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/header"
@@ -145,6 +146,11 @@ type Model struct {
 	// Add environment popup overlay
 	showEnvPopup bool
 	envPopup     envpopup.Model
+
+	// Delete resource popup overlay
+	showDeletePopup  bool
+	deletePopup      deletepopup.Model
+	pendingDeleteReq *detail.DeleteResourceRequestMsg // stashed while binding index is being built
 
 	// Create project popup overlay
 	showProjectPopup bool
@@ -455,12 +461,108 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Delete resource popup messages (from detail list view)
+	case detail.DeleteResourceRequestMsg:
+		if idx := m.registry.GetBindingIndex(); idx != nil {
+			// Index available — show popup immediately with binding warnings
+			boundWorkers := idx.Lookup(msg.ServiceName, msg.ResourceID)
+			m.showDeletePopup = true
+			m.deletePopup = deletepopup.New(msg.ServiceName, msg.ResourceID, msg.ResourceName, boundWorkers)
+			return m, nil
+		}
+		// Index not yet built — show popup immediately in loading state (spinner)
+		// while we fetch Workers and build the index in the background.
+		req := msg // copy for stashing
+		m.pendingDeleteReq = &req
+		m.showDeletePopup = true
+		m.deletePopup = deletepopup.NewLoading(msg.ServiceName, msg.ResourceID, msg.ResourceName)
+		// Kick off Workers fetch (if needed) + index build
+		fetchCmds := []tea.Cmd{m.deletePopup.SpinnerTick()}
+		if m.registry.GetCache("Workers") == nil {
+			fetchCmds = append(fetchCmds, m.loadServiceResources("Workers"))
+		} else {
+			// Workers cached but index not built yet — just build the index
+			if cmd := m.buildBindingIndexCmd(); cmd != nil {
+				fetchCmds = append(fetchCmds, cmd)
+			}
+		}
+		return m, tea.Batch(fetchCmds...)
+
+	case deletepopup.CloseMsg:
+		m.showDeletePopup = false
+		m.pendingDeleteReq = nil
+		return m, nil
+
+	case deletepopup.DeleteMsg:
+		return m, m.deleteResourceCmd(msg.ServiceName, msg.ResourceID)
+
+	case deletepopup.DeleteDoneMsg:
+		var cmd tea.Cmd
+		m.deletePopup, cmd = m.deletePopup.Update(msg)
+		return m, cmd
+
+	case deletepopup.DeleteBindingMsg:
+		return m, m.removeBindingCmd(msg.ConfigPath, msg.EnvName, msg.BindingName, msg.BindingType)
+
+	case deletepopup.DeleteBindingDoneMsg:
+		var cmd tea.Cmd
+		m.deletePopup, cmd = m.deletePopup.Update(msg)
+		return m, cmd
+
+	case deletepopup.DoneMsg:
+		m.showDeletePopup = false
+		if msg.ConfigPath != "" {
+			// Binding delete — re-parse the config to refresh the UI
+			cfg, err := wcfg.Parse(msg.ConfigPath)
+			if err != nil {
+				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			} else {
+				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
+				m.toastMsg = "Binding removed"
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			}
+			// Invalidate the binding index so the next delete attempt rebuilds
+			// it fresh from the API (the deployed state may have changed if the
+			// user redeployed after removing the binding locally).
+			m.registry.SetBindingIndex(nil)
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+		}
+		// Resource delete — optimistic cache removal + background refresh
+		m.toastMsg = "Resource deleted"
+		m.toastExpiry = time.Now().Add(3 * time.Second)
+		if entry := m.registry.GetCache(msg.ServiceName); entry != nil {
+			filtered := make([]svc.Resource, 0, len(entry.Resources))
+			for _, r := range entry.Resources {
+				if r.ID != msg.ResourceID {
+					filtered = append(filtered, r)
+				}
+			}
+			m.registry.SetCache(msg.ServiceName, filtered)
+			if m.detail.Service() == msg.ServiceName {
+				m.detail.RefreshResources(filtered)
+			}
+		}
+		return m, tea.Batch(
+			m.backgroundRefresh(msg.ServiceName),
+			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
+		)
+
 	case bindingIndexBuiltMsg:
 		// Staleness check: discard if account changed
 		if msg.accountID != m.registry.ActiveAccountID() {
 			return m, nil
 		}
 		m.registry.SetBindingIndex(msg.index)
+		// If there's a pending delete request, transition the popup from loading → confirm.
+		if m.pendingDeleteReq != nil {
+			req := m.pendingDeleteReq
+			m.pendingDeleteReq = nil
+			if m.showDeletePopup && m.deletePopup.IsLoading() {
+				boundWorkers := msg.index.Lookup(req.ServiceName, req.ResourceID)
+				m.deletePopup.SetBindingWarnings(boundWorkers)
+			}
+		}
 		return m, nil
 
 	// Wrangler messages
@@ -630,6 +732,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case uiwrangler.VersionPickerCloseMsg:
 		m.wrangler.CloseVersionPicker()
+		return m, nil
+
+	case uiwrangler.DeleteBindingRequestMsg:
+		m.showDeletePopup = true
+		m.deletePopup = deletepopup.NewBindingDelete(msg.ConfigPath, msg.EnvName, msg.BindingName, msg.BindingType, msg.WorkerName)
 		return m, nil
 
 	case uiwrangler.CmdOutputMsg:
@@ -817,6 +924,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.projectPopup, cmd = m.projectPopup.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+		if m.showDeletePopup && m.deletePopup.NeedsSpinner() {
+			var cmd tea.Cmd
+			m.deletePopup, cmd = m.deletePopup.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
 		}
@@ -873,6 +985,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If env popup is active, route everything there
 	if m.showEnvPopup {
 		return m.updateEnvPopup(msg)
+	}
+
+	// If delete resource popup is active, route everything there
+	if m.showDeletePopup {
+		return m.updateDeletePopup(msg)
 	}
 
 	// If project popup is active, route everything there
@@ -979,6 +1096,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Delete focused environment shortcut (project-level only)
 			if m.viewState == ViewWrangler && !m.wrangler.IsOnProjectList() &&
 				!m.wrangler.IsDirBrowserActive() && !m.wrangler.CmdRunning() &&
+				!m.wrangler.InsideBox() &&
 				m.wrangler.HasConfig() {
 				envName := m.wrangler.FocusedEnvName()
 				if envName != "" && envName != "default" {
@@ -2679,6 +2797,55 @@ func (m Model) deleteEnvCmd(configPath, envName string) tea.Cmd {
 	}
 }
 
+// --- Delete resource popup helpers ---
+
+// updateDeletePopup forwards messages to the delete resource popup when it's active.
+func (m Model) updateDeletePopup(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.deletePopup, cmd = m.deletePopup.Update(msg)
+	return m, cmd
+}
+
+// deleteResourceCmd calls the service's Delete method via the Deleter interface.
+func (m Model) deleteResourceCmd(serviceName, resourceID string) tea.Cmd {
+	s := m.registry.Get(serviceName)
+	if s == nil {
+		return func() tea.Msg {
+			return deletepopup.DeleteDoneMsg{
+				ServiceName: serviceName,
+				Err:         fmt.Errorf("service %s not available", serviceName),
+			}
+		}
+	}
+	deleter, ok := s.(svc.Deleter)
+	if !ok {
+		return func() tea.Msg {
+			return deletepopup.DeleteDoneMsg{
+				ServiceName: serviceName,
+				Err:         fmt.Errorf("service %s does not support deletion", serviceName),
+			}
+		}
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := deleter.Delete(ctx, resourceID)
+		return deletepopup.DeleteDoneMsg{
+			ServiceName: serviceName,
+			Err:         err,
+		}
+	}
+}
+
+// removeBindingCmd removes a binding from the local wrangler config file.
+func (m Model) removeBindingCmd(configPath, envName, bindingName, bindingType string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.RemoveBinding(configPath, envName, bindingName, bindingType)
+		return deletepopup.DeleteBindingDoneMsg{Err: err}
+	}
+}
+
 // --- Create project popup helpers ---
 
 // updateProjectPopup forwards messages to the project popup when it's active.
@@ -2805,6 +2972,11 @@ func (m Model) viewDashboard() string {
 	if m.showEnvPopup {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.envPopup.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
+	if m.showDeletePopup {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.deletePopup.View(m.width, m.height)
 		return overlayCenter(bg, fg, m.width, m.height)
 	}
 	if m.showProjectPopup {
@@ -2934,7 +3106,11 @@ func (m Model) renderHelp() string {
 			}
 			if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
 				entries = append(entries, helpEntry{"t", "tail"})
-				entries = append(entries, helpEntry{"d", "del env"})
+				if m.wrangler.InsideBox() {
+					entries = append(entries, helpEntry{"d", "del binding"})
+				} else {
+					entries = append(entries, helpEntry{"d", "del env"})
+				}
 			}
 			entries = append(entries, helpEntry{"q", "quit"})
 		}
@@ -2945,8 +3121,14 @@ func (m Model) renderHelp() string {
 			{"ctrl+l", "services"},
 			{"ctrl+k", "search"},
 			{"enter", "detail"},
-			{"[/]", "accounts"},
 		}
+		// Show delete shortcut for services that implement the Deleter interface
+		if s := m.registry.Get(m.detail.Service()); s != nil {
+			if _, ok := s.(svc.Deleter); ok {
+				entries = append(entries, helpEntry{"d", "delete"})
+			}
+		}
+		entries = append(entries, helpEntry{"[/]", "accounts"})
 	case ViewServiceDetail:
 		entries = []helpEntry{
 			{"esc", "back"},

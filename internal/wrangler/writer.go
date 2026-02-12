@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/jsonc"
 	"github.com/tidwall/sjson"
 )
@@ -428,6 +429,188 @@ func jsonArrayKey(resourceType string) string {
 	default:
 		return resourceType
 	}
+}
+
+// RemoveBinding removes a binding entry from a wrangler config file.
+// bindingName is the JS variable name (e.g. "MY_KV").
+// bindingType is the normalized type from Binding.Type (e.g. "kv_namespace", "d1", "r2_bucket", "queue_producer").
+// envName is the target environment ("default" or "" for top-level, otherwise the named env).
+func RemoveBinding(configPath, envName, bindingName, bindingType string) error {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+	isTopLevel := envName == "" || envName == "default"
+
+	var result []byte
+	switch ext {
+	case ".toml":
+		result, err = removeBindingTOML(data, envName, isTopLevel, bindingName, bindingType)
+	case ".json", ".jsonc":
+		result, err = removeBindingJSON(data, isTopLevel, envName, bindingName, bindingType)
+	default:
+		return fmt.Errorf("unsupported config format: %s", ext)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(absPath, result, 0644)
+}
+
+// bindingTypeToConfigKey maps a normalized Binding.Type to the TOML/JSON config key.
+func bindingTypeToConfigKey(bindingType string) string {
+	switch bindingType {
+	case "kv_namespace":
+		return "kv_namespaces"
+	case "r2_bucket":
+		return "r2_buckets"
+	case "d1":
+		return "d1_databases"
+	case "service":
+		return "services"
+	case "queue_producer":
+		return "queues.producers"
+	case "queue_consumer":
+		return "queues.consumers"
+	case "durable_object_namespace":
+		return "durable_objects.bindings"
+	case "vectorize":
+		return "vectorize"
+	case "hyperdrive":
+		return "hyperdrive"
+	case "analytics_engine":
+		return "analytics_engine"
+	case "ai":
+		return "ai"
+	default:
+		return bindingType
+	}
+}
+
+// bindingNameField returns the TOML/JSON field name that holds the binding's JS variable name
+// for a given binding type. Most use "binding", but durable objects use "name".
+func bindingNameField(bindingType string) string {
+	if bindingType == "durable_object_namespace" {
+		return "name"
+	}
+	return "binding"
+}
+
+// removeBindingTOML removes a binding entry from TOML config text.
+// It finds the [[section]] block where the binding name matches and removes the entire block.
+func removeBindingTOML(data []byte, envName string, isTopLevel bool, bindingName, bindingType string) ([]byte, error) {
+	content := string(data)
+	configKey := bindingTypeToConfigKey(bindingType)
+	nameField := bindingNameField(bindingType)
+
+	// Build the TOML array-of-tables header pattern
+	var headerPrefix string
+	if isTopLevel {
+		headerPrefix = configKey
+	} else {
+		headerPrefix = fmt.Sprintf("env.%s.%s", envName, configKey)
+	}
+
+	// Pattern to match the array-of-tables header: [[kv_namespaces]] or [[env.staging.kv_namespaces]]
+	headerPattern := fmt.Sprintf(`(?m)^\[\[%s\]\]`, regexp.QuoteMeta(headerPrefix))
+	headerRe := regexp.MustCompile(headerPattern)
+
+	// Pattern to match the binding name field within a block
+	namePattern := fmt.Sprintf(`(?m)^\s*%s\s*=\s*['""]%s['""]`, regexp.QuoteMeta(nameField), regexp.QuoteMeta(bindingName))
+	nameRe := regexp.MustCompile(namePattern)
+
+	// Find all occurrences of the header and check which one contains our binding name
+	matches := headerRe.FindAllStringIndex(content, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no %s bindings found in config", configKey)
+	}
+
+	for _, match := range matches {
+		blockStart := match[0]
+		// Find the end of this block: next [[ or [ header, or EOF
+		blockEnd := len(content)
+		remaining := content[match[1]:]
+		nextHeader := regexp.MustCompile(`(?m)^\[`).FindStringIndex(remaining)
+		if nextHeader != nil {
+			blockEnd = match[1] + nextHeader[0]
+		}
+
+		block := content[blockStart:blockEnd]
+		if nameRe.MatchString(block) {
+			// Found the matching block — remove it
+			// Extend start backwards to consume a preceding blank line
+			removeStart := blockStart
+			if removeStart >= 2 && content[removeStart-1] == '\n' && content[removeStart-2] == '\n' {
+				removeStart--
+			} else if removeStart >= 1 && content[removeStart-1] == '\n' {
+				removeStart--
+			}
+
+			result := content[:removeStart] + content[blockEnd:]
+
+			// Clean up multiple consecutive blank lines
+			multiBlank := regexp.MustCompile(`\n{3,}`)
+			result = multiBlank.ReplaceAllString(result, "\n\n")
+			result = strings.TrimRight(result, "\n\t ") + "\n"
+
+			return []byte(result), nil
+		}
+	}
+
+	return nil, fmt.Errorf("binding %q not found in %s", bindingName, configKey)
+}
+
+// removeBindingJSON removes a binding entry from JSON/JSONC config.
+func removeBindingJSON(data []byte, isTopLevel bool, envName, bindingName, bindingType string) ([]byte, error) {
+	clean := jsonc.ToJSON(data)
+	configKey := bindingTypeToConfigKey(bindingType)
+	nameField := bindingNameField(bindingType)
+
+	var arrayPath string
+	if isTopLevel {
+		arrayPath = configKey
+	} else {
+		arrayPath = "env." + envName + "." + configKey
+	}
+
+	// Find the index of the binding entry in the array
+	arr := gjson.GetBytes(clean, arrayPath)
+	if !arr.Exists() || !arr.IsArray() {
+		return nil, fmt.Errorf("no %s bindings found in config", configKey)
+	}
+
+	deleteIdx := -1
+	arr.ForEach(func(key, value gjson.Result) bool {
+		if value.Get(nameField).String() == bindingName {
+			deleteIdx = int(key.Int())
+			return false // stop iteration
+		}
+		return true
+	})
+
+	if deleteIdx < 0 {
+		return nil, fmt.Errorf("binding %q not found in %s", bindingName, configKey)
+	}
+
+	deletePath := fmt.Sprintf("%s.%d", arrayPath, deleteIdx)
+	result, err := sjson.DeleteBytes(clean, deletePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update JSON config: %w", err)
+	}
+
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, result, "", "  "); err != nil {
+		return result, nil
+	}
+	return append(pretty.Bytes(), '\n'), nil
 }
 
 // buildJSONEntry returns the raw JSON bytes for a binding entry.

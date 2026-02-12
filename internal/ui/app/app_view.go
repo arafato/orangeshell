@@ -24,56 +24,31 @@ func (m Model) View() string {
 }
 
 func (m Model) viewDashboard() string {
-	// If an overlay is active, render the dashboard dimmed with the popup centered on top
-	if m.wrangler.IsVersionPickerActive() {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.wrangler.VersionPickerView(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
+	// overlayEntry pairs an "is-active" flag with the view func that renders it.
+	type overlayEntry struct {
+		active bool
+		view   func() string
 	}
-	if m.showLauncher {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.launcher.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
+
+	w, h := m.width, m.height
+	overlays := []overlayEntry{
+		{m.wrangler.IsVersionPickerActive(), func() string { return m.wrangler.VersionPickerView(w, h) }},
+		{m.showLauncher, func() string { return m.launcher.View(w, h) }},
+		{m.showSearch, func() string { return m.search.View(w, h) }},
+		{m.showBindings, func() string { return m.bindingsPopup.View(w, h) }},
+		{m.showDeployAllPopup, func() string { return m.deployAllPopup.View(w, h) }},
+		{m.showEnvPopup, func() string { return m.envPopup.View(w, h) }},
+		{m.showDeletePopup, func() string { return m.deletePopup.View(w, h) }},
+		{m.showProjectPopup, func() string { return m.projectPopup.View(w, h) }},
+		{m.showRemoveProjectPopup, func() string { return m.removeProjectPopup.View(w, h) }},
+		{m.showActions, func() string { return m.actionsPopup.View(w, h) }},
 	}
-	if m.showSearch {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.search.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
-	}
-	if m.showBindings {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.bindingsPopup.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
-	}
-	if m.showDeployAllPopup {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.deployAllPopup.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
-	}
-	if m.showEnvPopup {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.envPopup.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
-	}
-	if m.showDeletePopup {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.deletePopup.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
-	}
-	if m.showProjectPopup {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.projectPopup.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
-	}
-	if m.showRemoveProjectPopup {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.removeProjectPopup.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
-	}
-	if m.showActions {
-		bg := dimContent(m.renderDashboardContent())
-		fg := m.actionsPopup.View(m.width, m.height)
-		return overlayCenter(bg, fg, m.width, m.height)
+
+	for _, o := range overlays {
+		if o.active {
+			bg := dimContent(m.renderDashboardContent())
+			return overlayCenter(bg, o.view(), w, h)
+		}
 	}
 
 	return m.renderDashboardContent()

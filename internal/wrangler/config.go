@@ -22,6 +22,7 @@ type WranglerConfig struct {
 	Routes       []RouteConfig           // routes (top-level)
 	Bindings     []Binding               // all bindings (top-level)
 	Vars         map[string]string       // environment variables (top-level, names only for display)
+	Crons        []string                // cron triggers (top-level only, e.g. "*/5 * * * *")
 	Environments map[string]*Environment // named environments
 }
 
@@ -155,7 +156,13 @@ type rawConfig struct {
 	Vectorize       []rawVectorize    `toml:"vectorize" json:"vectorize"`
 	Hyperdrive      []rawHyperdrive   `toml:"hyperdrive" json:"hyperdrive"`
 	AnalyticsEngine []rawAnalytics    `toml:"analytics_engine_datasets" json:"analytics_engine_datasets"`
+	Triggers        *rawTriggers      `toml:"triggers" json:"triggers"`
 	Env             map[string]rawEnv `toml:"env" json:"env"`
+}
+
+// rawTriggers represents the [triggers] section in wrangler config (top-level only).
+type rawTriggers struct {
+	Crons []string `toml:"crons" json:"crons"`
 }
 
 type rawEnv struct {
@@ -267,6 +274,11 @@ func parseJSON(data []byte) (*WranglerConfig, error) {
 
 // normalizeRaw converts the raw deserialized config into the clean WranglerConfig.
 func normalizeRaw(raw *rawConfig) *WranglerConfig {
+	var crons []string
+	if raw.Triggers != nil {
+		crons = raw.Triggers.Crons
+	}
+
 	cfg := &WranglerConfig{
 		Name:         raw.Name,
 		Main:         raw.Main,
@@ -275,6 +287,7 @@ func normalizeRaw(raw *rawConfig) *WranglerConfig {
 		Routes:       normalizeRoutes(raw.Route, raw.Routes),
 		Bindings:     extractBindings(raw),
 		Vars:         normalizeVars(raw.Vars),
+		Crons:        crons,
 		Environments: make(map[string]*Environment),
 	}
 
@@ -467,4 +480,9 @@ func (c *WranglerConfig) EnvVars(envName string) map[string]string {
 		return env.Vars
 	}
 	return nil
+}
+
+// CronTriggers returns the cron trigger expressions (top-level only).
+func (c *WranglerConfig) CronTriggers() []string {
+	return c.Crons
 }

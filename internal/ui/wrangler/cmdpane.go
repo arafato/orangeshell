@@ -159,6 +159,12 @@ func (p CmdPane) IsTail() bool {
 	return p.isTail
 }
 
+// IsTailVisible returns whether the tail console should be shown.
+// True when actively tailing, connecting, or displaying a tail error.
+func (p CmdPane) IsTailVisible() bool {
+	return p.isTail && (p.running || p.tailConnecting || p.tailError != "")
+}
+
 // IsRunning returns whether a command is in flight.
 func (p CmdPane) IsRunning() bool {
 	return p.running

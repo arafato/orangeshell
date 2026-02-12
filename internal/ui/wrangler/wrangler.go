@@ -57,6 +57,13 @@ type ShowEnvVarsMsg struct {
 	ProjectName string
 }
 
+// ShowTriggersMsg is sent when the user presses enter on the "Triggers" item
+// inside an env box. The parent (app.go) handles this to open the triggers view.
+type ShowTriggersMsg struct {
+	ConfigPath  string
+	ProjectName string
+}
+
 // ConfigLoadedMsg is sent when a wrangler config has been scanned and parsed.
 type ConfigLoadedMsg struct {
 	Config *wcfg.WranglerConfig
@@ -1060,6 +1067,20 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 				}
 			}
 		}
+		// Triggers item selected — open the triggers view
+		if box.IsTriggersSelected() {
+			configPath := m.configPath
+			projectName := ""
+			if m.config != nil {
+				projectName = m.config.Name
+			}
+			return m, func() tea.Msg {
+				return ShowTriggersMsg{
+					ConfigPath:  configPath,
+					ProjectName: projectName,
+				}
+			}
+		}
 		// Env vars item selected — open the env vars view
 		if box.IsEnvVarsSelected() {
 			configPath := m.configPath
@@ -1208,7 +1229,8 @@ func (m Model) View() string {
 
 	// Calculate layout split:
 	// - When a wrangler command is running: command output pane at ~35%
-	// - Otherwise: always show the Live Logs tail console at ~40%
+	// - When tail is active (tailing, connecting, or error): tail console at ~40%
+	// - Otherwise: env boxes get full height (no bottom pane)
 	cmdPaneHeight := 0
 	tailConsoleHeight := 0
 	envPaneHeight := contentHeight
@@ -1224,8 +1246,8 @@ func (m Model) View() string {
 		if envPaneHeight < 5 {
 			envPaneHeight = 5
 		}
-	} else {
-		// Always-visible tail console
+	} else if m.cmdPane.IsTailVisible() {
+		// Tail console — only shown when actively tailing, connecting, or error
 		tailConsoleHeight = contentHeight * 40 / 100
 		if tailConsoleHeight < 6 {
 			tailConsoleHeight = 6

@@ -32,6 +32,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/setup"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
+	uitriggers "github.com/oarafat/orangeshell/internal/ui/triggers"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 	"github.com/oarafat/orangeshell/version"
@@ -49,6 +50,7 @@ const (
 	ViewServiceList                    // Service resource list (Workers, KV, etc.)
 	ViewServiceDetail                  // Resource detail (Worker detail, D1 console)
 	ViewEnvVars                        // Environment variables view
+	ViewTriggers                       // Cron triggers view
 )
 
 // Phase tracks the top-level application state.
@@ -163,6 +165,9 @@ type Model struct {
 	// Environment variables view
 	envvarsView             envvars.Model
 	envVarsFromResourceList bool // true when env vars view was opened from the Resources launcher
+
+	// Cron triggers view
+	triggersView uitriggers.Model
 
 	// Deploy all popup overlay
 	showDeployAllPopup bool
@@ -790,6 +795,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.envVarsFromResourceList = false
 		return m, m.openEnvVarsView(msg.ConfigPath, msg.EnvName, msg.ProjectName)
 
+	case uiwrangler.ShowTriggersMsg:
+		return m, m.openTriggersView(msg.ConfigPath, msg.ProjectName)
+
 	case uiwrangler.CmdOutputMsg:
 		m.wrangler.AppendCmdOutput(msg.Line)
 		return m, waitForWranglerOutput(m.wranglerRunner)
@@ -998,6 +1006,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
 
+	// Cron triggers view messages
+	case uitriggers.CloseMsg:
+		m.viewState = ViewWrangler
+		return m, nil
+
+	case uitriggers.AddCronMsg:
+		return m, m.addCronCmd(msg.ConfigPath, msg.Cron)
+
+	case uitriggers.DeleteCronMsg:
+		return m, m.removeCronCmd(msg.ConfigPath, msg.Cron)
+
+	case uitriggers.AddCronDoneMsg:
+		var cmd tea.Cmd
+		m.triggersView, cmd = m.triggersView.Update(msg)
+		return m, cmd
+
+	case uitriggers.DeleteCronDoneMsg:
+		var cmd tea.Cmd
+		m.triggersView, cmd = m.triggersView.Update(msg)
+		return m, cmd
+
+	case uitriggers.DoneMsg:
+		// Re-parse config to refresh the wrangler view and triggers list
+		if msg.ConfigPath != "" {
+			cfg, err := wcfg.Parse(msg.ConfigPath)
+			if err != nil {
+				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			} else {
+				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
+				m.triggersView.SetCrons(cfg.CronTriggers())
+				m.toastMsg = "Trigger saved. Deploy to apply."
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			}
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+
 	// Deploy All popup messages
 	case deployallpopup.ProjectDoneMsg:
 		var cmd tea.Cmd
@@ -1155,6 +1200,22 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// If triggers view is active, route key events there (but let global shortcuts through)
+	if m.viewState == ViewTriggers {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "ctrl+h":
+				// Let ctrl+h fall through to the global handler below
+			case "ctrl+l":
+				// Let ctrl+l fall through to the global handler below
+			default:
+				return m.updateTriggers(msg)
+			}
+		} else {
+			return m.updateTriggers(msg)
+		}
+	}
+
 	// If launcher overlay is active, route everything there
 	if m.showLauncher {
 		return m.updateLauncher(msg)
@@ -1287,6 +1348,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// We detect the transition after detail processes the message
 			case ViewEnvVars:
 				// Envvars view handles its own Esc (clear filter first, then close)
+			case ViewTriggers:
+				// Triggers view handles its own Esc
 			case ViewWrangler:
 				// Wrangler handles its own Esc (dir browser, cmd pane, etc.)
 			}
@@ -1307,6 +1370,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case ViewEnvVars:
 		m.envvarsView, cmd = m.envvarsView.Update(msg)
+	case ViewTriggers:
+		m.triggersView, cmd = m.triggersView.Update(msg)
 	}
 
 	return m, cmd
@@ -2541,6 +2606,12 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 	// Configuration section actions (only when config is loaded)
 	if m.wrangler.HasConfig() {
 		items = append(items, actions.Item{
+			Label:       "Triggers",
+			Description: "View and edit cron triggers",
+			Section:     "Configuration",
+			Action:      "show_triggers",
+		})
+		items = append(items, actions.Item{
 			Label:       "Environment Variables",
 			Description: "View and edit environment variables",
 			Section:     "Configuration",
@@ -2672,6 +2743,30 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	if item.Action == "wrangler_load_config" {
 		m.wrangler.ActivateDirBrowser(uiwrangler.DirBrowserModeOpen)
 		return nil
+	}
+
+	// Triggers action
+	if item.Action == "show_triggers" {
+		var configPath string
+		var projectName string
+
+		if m.wrangler.IsOnProjectList() {
+			configPath = m.wrangler.SelectedProjectConfigPath()
+			if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+				projectName = cfg.Name
+			}
+		} else if m.wrangler.HasConfig() {
+			configPath = m.wrangler.ConfigPath()
+			if cfg := m.wrangler.Config(); cfg != nil {
+				projectName = cfg.Name
+			}
+		}
+
+		if configPath == "" {
+			return nil
+		}
+
+		return m.openTriggersView(configPath, projectName)
 	}
 
 	// Environment Variables action
@@ -3196,6 +3291,50 @@ func (m Model) removeVarCmd(configPath, envName, varName string) tea.Cmd {
 	}
 }
 
+// --- Triggers helpers ---
+
+// openTriggersView opens the cron triggers view for a given config file.
+func (m *Model) openTriggersView(configPath, projectName string) tea.Cmd {
+	cfg, err := wcfg.Parse(configPath)
+	if err != nil {
+		m.toastMsg = fmt.Sprintf("Failed to read config: %v", err)
+		m.toastExpiry = time.Now().Add(3 * time.Second)
+		return tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+	}
+
+	m.triggersView = uitriggers.New(configPath, projectName, cfg.CronTriggers())
+	contentHeight := m.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	m.triggersView.SetSize(m.width, contentHeight)
+	m.viewState = ViewTriggers
+	return nil
+}
+
+// updateTriggers forwards messages to the triggers view.
+func (m Model) updateTriggers(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.triggersView, cmd = m.triggersView.Update(msg)
+	return m, cmd
+}
+
+// addCronCmd adds a cron trigger to the wrangler config file.
+func (m Model) addCronCmd(configPath, cron string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.AddCron(configPath, cron)
+		return uitriggers.AddCronDoneMsg{Err: err}
+	}
+}
+
+// removeCronCmd removes a cron trigger from the wrangler config file.
+func (m Model) removeCronCmd(configPath, cron string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.RemoveCron(configPath, cron)
+		return uitriggers.DeleteCronDoneMsg{Err: err}
+	}
+}
+
 // --- Deploy All helpers ---
 
 // startDeployAll builds the deploy items for an environment, creates the popup,
@@ -3500,6 +3639,12 @@ func (m Model) renderDashboardContent() string {
 			contentHeight = 1
 		}
 		content = m.envvarsView.View(m.width, contentHeight)
+	case ViewTriggers:
+		contentHeight := m.height - 2 // header + help bar
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+		content = m.triggersView.View(m.width, contentHeight)
 	}
 
 	helpText := m.renderHelp()
@@ -3623,6 +3768,13 @@ func (m Model) renderHelp() string {
 		entries = []helpEntry{
 			{"esc", "back"},
 			{"enter", "edit"},
+			{"a", "add"},
+			{"d", "delete"},
+			{"ctrl+h", "home"},
+		}
+	case ViewTriggers:
+		entries = []helpEntry{
+			{"esc", "back"},
 			{"a", "add"},
 			{"d", "delete"},
 			{"ctrl+h", "home"},

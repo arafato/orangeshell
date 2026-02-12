@@ -852,6 +852,280 @@ func removeVarJSON(data []byte, isTopLevel bool, envName, varName string) ([]byt
 	return append(pretty.Bytes(), '\n'), nil
 }
 
+// AddCron appends a cron expression to the top-level [triggers].crons array.
+// Triggers are top-level only in wrangler configs (not per-environment).
+func AddCron(configPath, cron string) error {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+
+	var result []byte
+	switch ext {
+	case ".toml":
+		result, err = addCronTOML(data, cron)
+	case ".json", ".jsonc":
+		result, err = addCronJSON(data, cron)
+	default:
+		return fmt.Errorf("unsupported config format: %s", ext)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(absPath, result, 0644)
+}
+
+// addCronTOML adds a cron to the [triggers] section in a TOML config.
+func addCronTOML(data []byte, cron string) ([]byte, error) {
+	content := string(data)
+
+	// Look for existing [triggers] section
+	sectionRe := regexp.MustCompile(`(?m)^\[triggers\]\s*$`)
+	sectionLoc := sectionRe.FindStringIndex(content)
+
+	if sectionLoc != nil {
+		// [triggers] section exists — find the crons = [...] line
+		afterSection := content[sectionLoc[1]:]
+		nextHeaderRe := regexp.MustCompile(`(?m)^\[`)
+		nextLoc := nextHeaderRe.FindStringIndex(afterSection)
+
+		sectionEnd := len(content)
+		if nextLoc != nil {
+			sectionEnd = sectionLoc[1] + nextLoc[0]
+		}
+
+		sectionBody := content[sectionLoc[1]:sectionEnd]
+
+		// Look for crons = [...] in the section
+		cronsRe := regexp.MustCompile(`(?m)^crons\s*=\s*\[([^\]]*)\]`)
+		cronsLoc := cronsRe.FindStringSubmatchIndex(sectionBody)
+
+		if cronsLoc != nil {
+			// crons array exists — append the new cron to it
+			// cronsLoc[2..3] is the capture group (contents inside [...])
+			arrayContents := sectionBody[cronsLoc[2]:cronsLoc[3]]
+			trimmed := strings.TrimSpace(arrayContents)
+
+			var newArrayContents string
+			if trimmed == "" {
+				newArrayContents = fmt.Sprintf("%q", cron)
+			} else {
+				newArrayContents = fmt.Sprintf("%s, %q", trimmed, cron)
+			}
+
+			newLine := fmt.Sprintf("crons = [%s]", newArrayContents)
+			absStart := sectionLoc[1] + cronsLoc[0]
+			absEnd := sectionLoc[1] + cronsLoc[1]
+			result := content[:absStart] + newLine + content[absEnd:]
+			return []byte(result), nil
+		}
+
+		// [triggers] exists but no crons line — append crons = [...]
+		insertIdx := sectionEnd
+		for insertIdx > sectionLoc[1] && (content[insertIdx-1] == '\n' || content[insertIdx-1] == '\r') {
+			insertIdx--
+		}
+		newLine := fmt.Sprintf("\ncrons = [%q]\n", cron)
+		trailingNewlines := content[insertIdx:sectionEnd]
+		result := content[:insertIdx] + newLine + trailingNewlines + content[sectionEnd:]
+		return []byte(result), nil
+	}
+
+	// No [triggers] section — create it
+	newSection := fmt.Sprintf("\n[triggers]\ncrons = [%q]\n", cron)
+	insertIdx := findTopLevelInsertPoint(content)
+	result := content[:insertIdx] + newSection + content[insertIdx:]
+	return []byte(result), nil
+}
+
+// addCronJSON appends a cron to the triggers.crons array in a JSON/JSONC config.
+func addCronJSON(data []byte, cron string) ([]byte, error) {
+	clean := jsonc.ToJSON(data)
+
+	// Get existing crons array
+	existing := gjson.GetBytes(clean, "triggers.crons")
+	var crons []string
+	if existing.Exists() && existing.IsArray() {
+		existing.ForEach(func(_, v gjson.Result) bool {
+			crons = append(crons, v.String())
+			return true
+		})
+	}
+	crons = append(crons, cron)
+
+	result, err := sjson.SetBytes(clean, "triggers.crons", crons)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update JSON config: %w", err)
+	}
+
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, result, "", "  "); err != nil {
+		return result, nil
+	}
+	return append(pretty.Bytes(), '\n'), nil
+}
+
+// RemoveCron removes a cron expression from the top-level [triggers].crons array.
+func RemoveCron(configPath, cron string) error {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+
+	var result []byte
+	switch ext {
+	case ".toml":
+		result, err = removeCronTOML(data, cron)
+	case ".json", ".jsonc":
+		result, err = removeCronJSON(data, cron)
+	default:
+		return fmt.Errorf("unsupported config format: %s", ext)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(absPath, result, 0644)
+}
+
+// removeCronTOML removes a cron from the [triggers] section in a TOML config.
+func removeCronTOML(data []byte, cron string) ([]byte, error) {
+	content := string(data)
+
+	sectionRe := regexp.MustCompile(`(?m)^\[triggers\]\s*$`)
+	sectionLoc := sectionRe.FindStringIndex(content)
+	if sectionLoc == nil {
+		return nil, fmt.Errorf("cron %q not found in config (no [triggers] section)", cron)
+	}
+
+	afterSection := content[sectionLoc[1]:]
+	nextHeaderRe := regexp.MustCompile(`(?m)^\[`)
+	nextLoc := nextHeaderRe.FindStringIndex(afterSection)
+
+	sectionEnd := len(content)
+	if nextLoc != nil {
+		sectionEnd = sectionLoc[1] + nextLoc[0]
+	}
+
+	sectionBody := content[sectionLoc[1]:sectionEnd]
+
+	// Find crons = [...] line
+	cronsRe := regexp.MustCompile(`(?m)^crons\s*=\s*\[([^\]]*)\]`)
+	cronsLoc := cronsRe.FindStringSubmatchIndex(sectionBody)
+	if cronsLoc == nil {
+		return nil, fmt.Errorf("cron %q not found in config (no crons array)", cron)
+	}
+
+	arrayContents := sectionBody[cronsLoc[2]:cronsLoc[3]]
+
+	// Parse the crons from the array contents
+	var newCrons []string
+	found := false
+	// Split by comma and clean up
+	for _, part := range strings.Split(arrayContents, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		// Remove surrounding quotes
+		unquoted := strings.Trim(trimmed, `"'`)
+		if unquoted == cron && !found {
+			found = true
+			continue // skip this one
+		}
+		newCrons = append(newCrons, fmt.Sprintf("%q", unquoted))
+	}
+
+	if !found {
+		return nil, fmt.Errorf("cron %q not found in config", cron)
+	}
+
+	if len(newCrons) == 0 {
+		// Remove the entire [triggers] section if no crons remain
+		// Include leading newline if present
+		removeStart := sectionLoc[0]
+		if removeStart > 0 && content[removeStart-1] == '\n' {
+			removeStart--
+		}
+		result := content[:removeStart] + content[sectionEnd:]
+
+		// Clean up multiple consecutive blank lines
+		multiBlank := regexp.MustCompile(`\n{3,}`)
+		result = multiBlank.ReplaceAllString(result, "\n\n")
+		result = strings.TrimRight(result, "\n\t ") + "\n"
+		return []byte(result), nil
+	}
+
+	newLine := fmt.Sprintf("crons = [%s]", strings.Join(newCrons, ", "))
+	absStart := sectionLoc[1] + cronsLoc[0]
+	absEnd := sectionLoc[1] + cronsLoc[1]
+	result := content[:absStart] + newLine + content[absEnd:]
+	return []byte(result), nil
+}
+
+// removeCronJSON removes a cron from the triggers.crons array in a JSON/JSONC config.
+func removeCronJSON(data []byte, cron string) ([]byte, error) {
+	clean := jsonc.ToJSON(data)
+
+	existing := gjson.GetBytes(clean, "triggers.crons")
+	if !existing.Exists() || !existing.IsArray() {
+		return nil, fmt.Errorf("cron %q not found in config (no triggers.crons array)", cron)
+	}
+
+	// Find the index of the cron to remove
+	idx := -1
+	existing.ForEach(func(key, value gjson.Result) bool {
+		if value.String() == cron {
+			idx = int(key.Int())
+			return false
+		}
+		return true
+	})
+
+	if idx < 0 {
+		return nil, fmt.Errorf("cron %q not found in config", cron)
+	}
+
+	// If this is the last cron, remove the entire triggers object
+	count := 0
+	existing.ForEach(func(_, _ gjson.Result) bool {
+		count++
+		return true
+	})
+
+	var result []byte
+	var err error
+	if count <= 1 {
+		result, err = sjson.DeleteBytes(clean, "triggers")
+	} else {
+		result, err = sjson.DeleteBytes(clean, fmt.Sprintf("triggers.crons.%d", idx))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to update JSON config: %w", err)
+	}
+
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, result, "", "  "); err != nil {
+		return result, nil
+	}
+	return append(pretty.Bytes(), '\n'), nil
+}
+
 // buildJSONEntry returns the raw JSON bytes for a binding entry.
 func buildJSONEntry(b BindingDef) []byte {
 	var m map[string]string

@@ -33,7 +33,9 @@ import (
 	"github.com/oarafat/orangeshell/version"
 )
 
-const refreshInterval = 60 * time.Second
+// Periodic polling removed — data is now refreshed on-demand:
+// (a) when navigating to a view and cache is stale (>CacheTTL), or
+// (b) immediately after a mutating action (deploy, resource creation, etc.).
 
 // ViewState tracks the current content view.
 type ViewState int
@@ -60,9 +62,6 @@ type initDashboardMsg struct {
 type errMsg struct {
 	err error
 }
-
-// tickRefreshMsg fires periodically to trigger background refresh of all services.
-type tickRefreshMsg struct{}
 
 // toastExpireMsg fires after the toast display duration to clear the toast.
 type toastExpireMsg struct{}
@@ -128,6 +127,7 @@ type Model struct {
 	// Wrangler project view
 	wrangler              uiwrangler.Model
 	wranglerRunner        *wcfg.Runner
+	wranglerRunnerAction  string       // action string of the running wrangler command (e.g. "deploy", "versions deploy")
 	wranglerVersionRunner *wcfg.Runner // separate runner for background version fetches
 
 	// Active tail session (nil when no tail is running)
@@ -253,10 +253,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Start on wrangler home — no service to load initially
 		m.viewState = ViewWrangler
 
-		// Start the periodic background refresh ticker
-		tickCmd := m.scheduleRefreshTick()
-
-		cmds := []tea.Cmd{tickCmd}
+		var cmds []tea.Cmd
 
 		// If wrangler config was already discovered (it runs in parallel with auth),
 		// trigger deployment fetching now that the client is available.
@@ -458,27 +455,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tickRefreshMsg:
-		if m.phase != PhaseDashboard || m.client == nil {
-			return m, nil
-		}
-		// Refresh all registered services in background + schedule next tick
-		cmds := []tea.Cmd{m.scheduleRefreshTick()}
-		for _, name := range m.registry.RegisteredNames() {
-			cmds = append(cmds, m.backgroundRefresh(name))
-		}
-		// Also refresh wrangler deployment data in background
-		if m.wrangler.IsMonorepo() {
-			if cmd := m.fetchAllProjectDeployments(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		} else if cfg := m.wrangler.Config(); cfg != nil {
-			if cmd := m.fetchSingleProjectDeployments(cfg); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
-		return m, tea.Batch(cmds...)
-
 	case bindingIndexBuiltMsg:
 		// Staleness check: discard if account changed
 		if msg.accountID != m.registry.ActiveAccountID() {
@@ -668,7 +644,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.wrangler.FinishCommand(msg.Result)
+		action := m.wranglerRunnerAction
 		m.wranglerRunner = nil
+		m.wranglerRunnerAction = ""
+
+		// After mutating commands, immediately refresh stale data
+		if isMutatingAction(action) && msg.Result.ExitCode == 0 {
+			return m, m.refreshAfterMutation()
+		}
 		return m, nil
 
 	// Search messages
@@ -729,6 +712,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
 				m.toastMsg = "Binding added"
 				m.toastExpiry = time.Now().Add(3 * time.Second)
+			}
+		}
+		// If a resource was created, refresh the corresponding service cache
+		if msg.ResourceType != "" {
+			if svcName := resourceTypeToServiceName(msg.ResourceType); svcName != "" {
+				return m, m.backgroundRefresh(svcName)
 			}
 		}
 		return m, nil
@@ -804,6 +793,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.ServiceName == "" {
 			// Go home
 			m.viewState = ViewWrangler
+			if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		}
 		return m, m.navigateToService(msg.ServiceName)
@@ -926,6 +918,10 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail.ClearTail()
 			m.detail.ClearD1()
 			m.viewState = ViewWrangler
+			// Refresh deployment data if stale
+			if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		case "ctrl+l":
 			// Open the service launcher overlay
@@ -942,7 +938,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showSearch = true
 			m.search.SetItems(m.registry.AllSearchItems())
 			m.search.Reset()
-			cmds := m.fetchUncachedForSearch()
+			cmds := m.fetchStaleForSearch()
 			if len(cmds) > 0 {
 				return m, tea.Batch(cmds...)
 			}
@@ -1009,6 +1005,10 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ViewServiceList:
 				// Service list → go home
 				m.viewState = ViewWrangler
+				// Refresh deployment data if stale
+				if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
+					return m, cmd
+				}
 				return m, nil
 			case ViewServiceDetail:
 				// Let detail handle Esc internally (detail→list transition)
@@ -1072,13 +1072,13 @@ func (m *Model) layout() {
 	m.detail.SetYOffset(headerHeight + 1)
 }
 
-// fetchUncachedForSearch triggers background fetches for all registered services
-// that don't have cached data yet. Sets the search fetching counter so the UI
+// fetchStaleForSearch triggers background fetches for all registered services
+// that have no cache or stale cache. Sets the search fetching counter so the UI
 // can show a loading indicator. Returns the commands to run.
-func (m *Model) fetchUncachedForSearch() []tea.Cmd {
+func (m *Model) fetchStaleForSearch() []tea.Cmd {
 	var cmds []tea.Cmd
 	for _, name := range m.registry.RegisteredNames() {
-		if m.registry.GetCache(name) == nil {
+		if m.registry.IsCacheStale(name) {
 			cmds = append(cmds, m.backgroundRefresh(name))
 		}
 	}
@@ -1095,6 +1095,9 @@ func (m *Model) stopWranglerRunner() {
 }
 
 // navigateToService switches to a service list view, using cached data if available.
+// If the cache is fresh (<CacheTTL), it is shown without a background refresh.
+// If the cache is stale, it is shown immediately and a background refresh is triggered.
+// If there is no cache, a loading spinner is shown while data is fetched.
 func (m *Model) navigateToService(name string) tea.Cmd {
 	// Stop any active tail/D1 session when switching services
 	m.stopTail()
@@ -1106,24 +1109,24 @@ func (m *Model) navigateToService(name string) tea.Cmd {
 
 	entry := m.registry.GetCache(name)
 	if entry != nil {
+		if !m.registry.IsCacheStale(name) {
+			// Cache is fresh — show it without a background refresh
+			m.detail.SetServiceFresh(name, entry.Resources)
+			return nil
+		}
+		// Cache is stale — show it and trigger a background refresh
 		cmd := m.detail.SetServiceWithCache(name, entry.Resources)
 		if m.detail.IsLoading() {
 			return tea.Batch(cmd, m.detail.SpinnerInit())
 		}
 		return cmd
 	}
+	// No cache at all — show loading spinner
 	m.detail.SetService(name)
 	return tea.Batch(
 		tea.Cmd(func() tea.Msg { return detail.LoadResourcesMsg{ServiceName: name} }),
 		m.detail.SpinnerInit(),
 	)
-}
-
-// scheduleRefreshTick returns a command that sends a tickRefreshMsg after the refresh interval.
-func (m Model) scheduleRefreshTick() tea.Cmd {
-	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
-		return tickRefreshMsg{}
-	})
 }
 
 // buildBindingIndexCmd returns a command that fetches settings for all Workers and builds
@@ -1275,9 +1278,9 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.restoreDeploymentsFromCache()
 	var deployCmd tea.Cmd
 	if m.wrangler.IsMonorepo() {
-		deployCmd = m.fetchAllProjectDeployments()
+		deployCmd = m.fetchAllProjectDeploymentsForced()
 	} else if cfg := m.wrangler.Config(); cfg != nil {
-		deployCmd = m.fetchSingleProjectDeployments(cfg)
+		deployCmd = m.fetchSingleProjectDeploymentsForced(cfg)
 	}
 
 	// If we're viewing a service, reload it with the new account
@@ -1561,9 +1564,45 @@ func (m Model) discoverProjectsFromDir(dir string) tea.Cmd {
 }
 
 // fetchAllProjectDeployments returns a batch command that fetches deployment data
-// for every project+environment combination in the monorepo. Also fetches the
-// account's workers.dev subdomain once. Results arrive as ProjectDeploymentLoadedMsg.
+// for every project+environment combination in the monorepo whose deployment cache
+// is stale or missing. Fresh entries are skipped to avoid unnecessary API calls.
+// Results arrive as ProjectDeploymentLoadedMsg.
 func (m Model) fetchAllProjectDeployments() tea.Cmd {
+	workersSvc := m.getWorkersService()
+	if workersSvc == nil {
+		return nil
+	}
+
+	accountID := m.registry.ActiveAccountID()
+	projectConfigs := m.wrangler.ProjectConfigs()
+	var cmds []tea.Cmd
+
+	for i, pc := range projectConfigs {
+		if pc.Config == nil {
+			continue
+		}
+		for _, envName := range pc.Config.EnvNames() {
+			scriptName := pc.Config.ResolvedEnvName(envName)
+			if scriptName == "" {
+				continue
+			}
+			if !m.registry.IsDeploymentCacheStale(scriptName) {
+				continue // cache is fresh, skip
+			}
+			cmds = append(cmds, m.fetchProjectDeployment(workersSvc, accountID, i, envName, scriptName))
+		}
+	}
+
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// fetchAllProjectDeploymentsForced is like fetchAllProjectDeployments but ignores
+// cache staleness — every environment is fetched unconditionally. Used after
+// mutating actions (deploy, versions deploy) and account switches.
+func (m Model) fetchAllProjectDeploymentsForced() tea.Cmd {
 	workersSvc := m.getWorkersService()
 	if workersSvc == nil {
 		return nil
@@ -1593,9 +1632,36 @@ func (m Model) fetchAllProjectDeployments() tea.Cmd {
 }
 
 // fetchSingleProjectDeployments returns a batch command that fetches deployment data
-// for every environment in a single-project wrangler config. Results arrive as
-// EnvDeploymentLoadedMsg and get applied to the EnvBox via SetEnvDeployment.
+// for every environment in a single-project wrangler config whose deployment cache
+// is stale or missing. Results arrive as EnvDeploymentLoadedMsg.
 func (m Model) fetchSingleProjectDeployments(cfg *wcfg.WranglerConfig) tea.Cmd {
+	workersSvc := m.getWorkersService()
+	if workersSvc == nil {
+		return nil
+	}
+
+	accountID := m.registry.ActiveAccountID()
+	var cmds []tea.Cmd
+	for _, envName := range cfg.EnvNames() {
+		scriptName := cfg.ResolvedEnvName(envName)
+		if scriptName == "" {
+			continue
+		}
+		if !m.registry.IsDeploymentCacheStale(scriptName) {
+			continue // cache is fresh, skip
+		}
+		cmds = append(cmds, m.fetchEnvDeployment(workersSvc, accountID, envName, scriptName))
+	}
+
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// fetchSingleProjectDeploymentsForced is like fetchSingleProjectDeployments but
+// ignores cache staleness. Used after mutating actions and account switches.
+func (m Model) fetchSingleProjectDeploymentsForced(cfg *wcfg.WranglerConfig) tea.Cmd {
 	workersSvc := m.getWorkersService()
 	if workersSvc == nil {
 		return nil
@@ -1812,6 +1878,7 @@ func (m *Model) startWranglerCmd(action, envName string) tea.Cmd {
 
 	runner := wcfg.NewRunner()
 	m.wranglerRunner = runner
+	m.wranglerRunnerAction = action
 	m.wrangler.StartCommand(action, envName)
 
 	return tea.Batch(
@@ -1875,6 +1942,7 @@ func (m *Model) startWranglerCmdWithArgs(action, envName string, extraArgs []str
 
 	runner := wcfg.NewRunner()
 	m.wranglerRunner = runner
+	m.wranglerRunnerAction = action
 	m.wrangler.StartCommand(action, envName)
 
 	return tea.Batch(
@@ -2636,6 +2704,55 @@ func resourceTypeToServiceName(resourceType string) string {
 	default:
 		return resourceType
 	}
+}
+
+// --- On-demand refresh helpers ---
+
+// isMutatingAction returns true if the wrangler action modifies live deployment state.
+func isMutatingAction(action string) bool {
+	switch action {
+	case "deploy", "versions deploy":
+		return true
+	}
+	return false
+}
+
+// refreshAfterMutation returns commands to refresh deployment data and the Workers
+// service list after a mutating wrangler action (deploy, versions deploy) completes.
+// Uses forced variants that ignore cache staleness since we know data has changed.
+func (m Model) refreshAfterMutation() tea.Cmd {
+	var cmds []tea.Cmd
+	// Refresh deployment data (env boxes / project cards)
+	if m.wrangler.IsMonorepo() {
+		if cmd := m.fetchAllProjectDeploymentsForced(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	} else if cfg := m.wrangler.Config(); cfg != nil {
+		if cmd := m.fetchSingleProjectDeploymentsForced(cfg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	// Refresh the Workers service list (new worker may have appeared)
+	cmds = append(cmds, m.backgroundRefresh("Workers"))
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// refreshDeploymentsIfStale returns commands to refresh deployment data only when
+// the deployment cache has stale entries. Used when navigating to the home screen.
+func (m Model) refreshDeploymentsIfStale() tea.Cmd {
+	if m.client == nil || !m.registry.AnyDeploymentCacheStale() {
+		return nil
+	}
+	if m.wrangler.IsMonorepo() {
+		return m.fetchAllProjectDeployments()
+	}
+	if cfg := m.wrangler.Config(); cfg != nil {
+		return m.fetchSingleProjectDeployments(cfg)
+	}
+	return nil
 }
 
 // View renders the full application.

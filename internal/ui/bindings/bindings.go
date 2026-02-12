@@ -81,7 +81,8 @@ type CloseMsg struct{}
 // DoneMsg signals the binding operation completed (success). The app should
 // re-parse the config to refresh the UI.
 type DoneMsg struct {
-	ConfigPath string
+	ConfigPath   string
+	ResourceType string // "d1", "kv", "r2", "queue" — the type of resource that was created
 }
 
 // --- Mode ---
@@ -500,11 +501,12 @@ func (m Model) handleWriteDone(msg WriteBindingDoneMsg) (Model, tea.Cmd) {
 func (m Model) updateResult(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "enter", "ctrl+n":
-		if !m.resultIsErr && m.configPath != "" {
-			// Success with a config path — signal the app to reload config
-			return m, func() tea.Msg { return DoneMsg{ConfigPath: m.configPath} }
+		if m.resultIsErr {
+			return m, func() tea.Msg { return CloseMsg{} }
 		}
-		return m, func() tea.Msg { return CloseMsg{} }
+		// Success — signal the app with the resource type that was created
+		resType := m.SelectedType()
+		return m, func() tea.Msg { return DoneMsg{ConfigPath: m.configPath, ResourceType: resType} }
 	}
 	return m, nil
 }

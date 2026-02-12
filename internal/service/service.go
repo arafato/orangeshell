@@ -2,6 +2,11 @@ package service
 
 import "time"
 
+// CacheTTL is the duration after which cached data is considered stale.
+// Fresh cache (<CacheTTL) is served without re-fetching; stale cache is
+// served immediately but triggers a background refresh.
+const CacheTTL = 30 * time.Second
+
 // Resource represents a single instance of a Cloudflare service (e.g. one Worker, one KV namespace).
 // Used for listing and search results.
 type Resource struct {
@@ -177,6 +182,15 @@ func (r *Registry) GetCache(serviceName string) *CacheEntry {
 	return r.cache()[serviceName]
 }
 
+// IsCacheStale returns true if the service has no cache or its cache is older than CacheTTL.
+func (r *Registry) IsCacheStale(serviceName string) bool {
+	entry := r.cache()[serviceName]
+	if entry == nil {
+		return true
+	}
+	return time.Since(entry.FetchedAt) >= CacheTTL
+}
+
 // SetCache stores resources in the session cache for a service in the active account.
 func (r *Registry) SetCache(serviceName string, resources []Resource) {
 	r.cache()[serviceName] = &CacheEntry{
@@ -247,6 +261,26 @@ func (r *Registry) deploymentCache() map[string]*DeploymentCacheEntry {
 // GetDeploymentCache returns the cached deployment for a script in the active account, or nil.
 func (r *Registry) GetDeploymentCache(scriptName string) *DeploymentCacheEntry {
 	return r.deploymentCache()[scriptName]
+}
+
+// IsDeploymentCacheStale returns true if the deployment for a script has no cache or is older than CacheTTL.
+func (r *Registry) IsDeploymentCacheStale(scriptName string) bool {
+	entry := r.deploymentCache()[scriptName]
+	if entry == nil {
+		return true
+	}
+	return time.Since(entry.FetchedAt) >= CacheTTL
+}
+
+// AnyDeploymentCacheStale returns true if any deployment cache entry for the active account is stale.
+func (r *Registry) AnyDeploymentCacheStale() bool {
+	for _, entry := range r.deploymentCache() {
+		if time.Since(entry.FetchedAt) >= CacheTTL {
+			return true
+		}
+	}
+	// Also stale if there are no entries at all
+	return len(r.deploymentCache()) == 0
 }
 
 // SetDeploymentCache stores deployment data in the cache for a script in the active account.

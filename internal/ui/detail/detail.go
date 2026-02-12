@@ -293,6 +293,26 @@ func (m *Model) SetServiceWithCache(name string, cached []service.Resource) tea.
 	}
 }
 
+// SetServiceFresh updates which service to display using cached data that is
+// known to be fresh (within CacheTTL). No background refresh is triggered.
+func (m *Model) SetServiceFresh(name string, cached []service.Resource) {
+	if name == m.service {
+		return
+	}
+	m.service = name
+	m.mode = viewList
+	m.detail = nil
+	m.detailErr = nil
+	m.detailID = ""
+	m.scrollOffset = 0
+	m.notIntegrated = false
+	m.err = nil
+	m.resources = cached
+	m.cursor = 0
+	m.loading = false
+	m.refreshing = false
+}
+
 // SetResources is called when resources have been loaded.
 func (m *Model) SetResources(resources []service.Resource, err error, notIntegrated bool) {
 	m.loading = false

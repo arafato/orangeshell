@@ -304,6 +304,8 @@ func (m *Model) SetProjects(projects []wcfg.ProjectInfo, rootName, rootDir strin
 }
 
 // SetProjectDeployment updates deployment data for a specific project and environment.
+// If the user is currently drilled into this project, the live envBoxes are also updated
+// so the UI reflects the change immediately.
 func (m *Model) SetProjectDeployment(projectIndex int, envName string, dep *DeploymentDisplay, subdomain string) {
 	if projectIndex < 0 || projectIndex >= len(m.projects) {
 		return
@@ -315,6 +317,20 @@ func (m *Model) SetProjectDeployment(projectIndex int, envName string, dep *Depl
 	m.projects[projectIndex].box.DeploymentFetched[envName] = true
 	if subdomain != "" {
 		m.projects[projectIndex].box.Subdomain = subdomain
+	}
+
+	// Sync to live envBoxes when drilled into this project
+	if m.activeProject == projectIndex {
+		for i := range m.envBoxes {
+			if m.envBoxes[i].EnvName == envName {
+				m.envBoxes[i].Deployment = dep
+				m.envBoxes[i].DeploymentFetched = true
+				if subdomain != "" {
+					m.envBoxes[i].Subdomain = subdomain
+				}
+				break
+			}
+		}
 	}
 }
 

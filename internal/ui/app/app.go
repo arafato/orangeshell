@@ -29,6 +29,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
+	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/setup"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
@@ -161,6 +162,10 @@ type Model struct {
 	// Create project popup overlay
 	showProjectPopup bool
 	projectPopup     projectpopup.Model
+
+	// Remove project popup overlay
+	showRemoveProjectPopup bool
+	removeProjectPopup     removeprojectpopup.Model
 
 	// Environment variables view
 	envvarsView             envvars.Model
@@ -978,6 +983,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
 		)
 
+	// Remove project popup messages
+	case removeprojectpopup.CloseMsg:
+		m.showRemoveProjectPopup = false
+		return m, nil
+
+	case removeprojectpopup.RemoveProjectMsg:
+		dirPath := msg.DirPath
+		return m, func() tea.Msg {
+			err := os.RemoveAll(dirPath)
+			return removeprojectpopup.RemoveProjectDoneMsg{Err: err}
+		}
+
+	case removeprojectpopup.RemoveProjectDoneMsg:
+		var cmd tea.Cmd
+		m.removeProjectPopup, cmd = m.removeProjectPopup.Update(msg)
+		return m, cmd
+
+	case removeprojectpopup.DoneMsg:
+		m.showRemoveProjectPopup = false
+		m.toastMsg = "Project removed"
+		m.toastExpiry = time.Now().Add(3 * time.Second)
+		var rescanCmd tea.Cmd
+		if rootDir := m.wrangler.RootDir(); rootDir != "" {
+			rescanCmd = m.discoverProjectsFromDir(rootDir)
+		} else {
+			rescanCmd = m.discoverProjectsCmd()
+		}
+		return m, tea.Batch(
+			rescanCmd,
+			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
+		)
+
 	// Environment variables view messages
 	case envvars.CloseMsg:
 		if m.envVarsFromResourceList {
@@ -1126,6 +1163,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.deletePopup, cmd = m.deletePopup.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+		if m.showRemoveProjectPopup && m.removeProjectPopup.NeedsSpinner() {
+			var cmd tea.Cmd
+			m.removeProjectPopup, cmd = m.removeProjectPopup.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		if m.showDeployAllPopup && m.deployAllPopup.IsDeploying() {
 			var cmd tea.Cmd
 			m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
@@ -1202,6 +1244,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If project popup is active, route everything there
 	if m.showProjectPopup {
 		return m.updateProjectPopup(msg)
+	}
+
+	// If remove project popup is active, route everything there
+	if m.showRemoveProjectPopup {
+		return m.updateRemoveProjectPopup(msg)
 	}
 
 	// If action popup is active, route everything there
@@ -2421,6 +2468,16 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		Action:      "create_project",
 	})
 
+	// Remove project action (only when a project is selected)
+	if m.wrangler.SelectedProjectConfig() != nil {
+		items = append(items, actions.Item{
+			Label:       "Remove Project",
+			Description: "Delete project directory from disk",
+			Section:     "Configuration",
+			Action:      "remove_project",
+		})
+	}
+
 	// Configuration actions (if the selected project has a config)
 	if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
 		items = append(items, actions.Item{
@@ -2825,6 +2882,20 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	if item.Action == "create_project" {
 		m.showProjectPopup = true
 		m.projectPopup = projectpopup.New(m.wrangler.ProjectDirNames(), m.wrangler.RootDir())
+		return nil
+	}
+
+	// Remove project action
+	if item.Action == "remove_project" {
+		cfg := m.wrangler.SelectedProjectConfig()
+		if cfg == nil {
+			return nil
+		}
+		projectName := cfg.Name
+		relPath := m.wrangler.SelectedProjectRelPath()
+		dirPath := filepath.Dir(m.wrangler.SelectedProjectConfigPath())
+		m.showRemoveProjectPopup = true
+		m.removeProjectPopup = removeprojectpopup.New(projectName, relPath, dirPath)
 		return nil
 	}
 
@@ -3540,6 +3611,12 @@ func (m Model) updateProjectPopup(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateRemoveProjectPopup(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.removeProjectPopup, cmd = m.removeProjectPopup.Update(msg)
+	return m, cmd
+}
+
 // createProjectCmd runs C3 to scaffold a new Worker project.
 func (m Model) createProjectCmd(name, lang, dir string) tea.Cmd {
 	return func() tea.Msg {
@@ -3672,6 +3749,11 @@ func (m Model) viewDashboard() string {
 	if m.showProjectPopup {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.projectPopup.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
+	if m.showRemoveProjectPopup {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.removeProjectPopup.View(m.width, m.height)
 		return overlayCenter(bg, fg, m.width, m.height)
 	}
 	if m.showActions {

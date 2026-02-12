@@ -296,6 +296,18 @@ func (m Model) SelectedProjectConfig() *wcfg.WranglerConfig {
 	return nil
 }
 
+// SelectedProjectRelPath returns the relative path of the currently selected
+// project on the monorepo project list. Returns "" if not applicable.
+func (m Model) SelectedProjectRelPath() string {
+	if !m.IsOnProjectList() {
+		return ""
+	}
+	if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
+		return m.projects[m.projectCursor].box.RelPath
+	}
+	return ""
+}
+
 // RootName returns the monorepo root name (CWD basename).
 func (m Model) RootName() string {
 	return m.rootName

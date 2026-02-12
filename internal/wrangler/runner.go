@@ -18,6 +18,7 @@ type Command struct {
 	EnvName    string   // --env <name> (empty for default)
 	ExtraArgs  []string // additional positional/flag args appended after --env (e.g. version specs, "-y")
 	AccountID  string   // if set, passed as CLOUDFLARE_ACCOUNT_ID env var to the process
+	APIToken   string   // if set, passed as CLOUDFLARE_API_TOKEN env var (avoids OAuth token refresh races in parallel deploys)
 }
 
 // OutputLine is a single line of output from a wrangler command.
@@ -108,6 +109,9 @@ func (r *Runner) Start(ctx context.Context, wcmd Command) error {
 	r.cmd.Env = append(os.Environ(), "CI=true")
 	if wcmd.AccountID != "" {
 		r.cmd.Env = append(r.cmd.Env, "CLOUDFLARE_ACCOUNT_ID="+wcmd.AccountID)
+	}
+	if wcmd.APIToken != "" {
+		r.cmd.Env = append(r.cmd.Env, "CLOUDFLARE_API_TOKEN="+wcmd.APIToken)
 	}
 
 	stdout, err := r.cmd.StdoutPipe()

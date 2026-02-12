@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
+	"github.com/oarafat/orangeshell/internal/ui/deployallpopup"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/envvars"
@@ -161,6 +163,11 @@ type Model struct {
 	// Environment variables view
 	envvarsView             envvars.Model
 	envVarsFromResourceList bool // true when env vars view was opened from the Resources launcher
+
+	// Deploy all popup overlay
+	showDeployAllPopup bool
+	deployAllPopup     deployallpopup.Model
+	deployAllRunners   []*wcfg.Runner // one per project, kept for cancellation
 
 	// Toast notification
 	toastMsg    string
@@ -991,6 +998,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
 
+	// Deploy All popup messages
+	case deployallpopup.ProjectDoneMsg:
+		var cmd tea.Cmd
+		m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
+		return m, cmd
+
+	case deployallpopup.CancelMsg:
+		m.cancelDeployAllRunners()
+		return m, nil
+
+	case deployallpopup.DoneMsg:
+		m.deployAllRunners = nil
+		// Trigger refresh after mutation (deployment data + workers list)
+		return m, m.refreshAfterMutation()
+
+	case deployallpopup.CloseMsg:
+		m.showDeployAllPopup = false
+		m.deployAllRunners = nil
+		return m, nil
+
 	// Launcher messages
 	case launcher.LaunchServiceMsg:
 		m.showLauncher = false
@@ -1027,6 +1054,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showDeletePopup && m.deletePopup.NeedsSpinner() {
 			var cmd tea.Cmd
 			m.deletePopup, cmd = m.deletePopup.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+		if m.showDeployAllPopup && m.deployAllPopup.IsDeploying() {
+			var cmd tea.Cmd
+			m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 		if len(cmds) > 0 {
@@ -1080,6 +1112,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If bindings popup is active, route everything there
 	if m.showBindings {
 		return m.updateBindings(msg)
+	}
+
+	// If deploy all popup is active, route everything there
+	if m.showDeployAllPopup {
+		return m.updateDeployAllPopup(msg)
 	}
 
 	// If env popup is active, route everything there
@@ -2275,6 +2312,16 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		}
 	}
 
+	// Commands section: Deploy All
+	if len(envNames) > 0 && m.client != nil && !m.showDeployAllPopup {
+		items = append(items, actions.Item{
+			Label:       "Deploy All...",
+			Description: "Deploy all projects for an environment",
+			Section:     "Commands",
+			Action:      "deploy_all",
+		})
+	}
+
 	// Create project action
 	items = append(items, actions.Item{
 		Label:       "Create Project",
@@ -2340,6 +2387,31 @@ func (m Model) buildParallelTailEnvPopup() actions.Model {
 			Description: fmt.Sprintf("%d workers", count),
 			Section:     "Environments",
 			Action:      "parallel_tail_env_" + envName,
+		})
+	}
+	return actions.New(title, items)
+}
+
+// buildDeployAllEnvPopup creates a sub-popup listing environments for Deploy All.
+func (m Model) buildDeployAllEnvPopup() actions.Model {
+	title := "Deploy All — Select Environment"
+	var items []actions.Item
+	for _, envName := range m.wrangler.AllEnvNames() {
+		count := 0
+		for _, pc := range m.wrangler.ProjectConfigs() {
+			if pc.Config == nil {
+				continue
+			}
+			if !pc.Config.HasEnv(envName) {
+				continue
+			}
+			count++
+		}
+		items = append(items, actions.Item{
+			Label:       envName,
+			Description: fmt.Sprintf("%d projects", count),
+			Section:     "Environments",
+			Action:      "deploy_all_env_" + envName,
 		})
 	}
 	return actions.New(title, items)
@@ -2746,6 +2818,19 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		}
 	}
 
+	// Deploy All: open environment sub-popup
+	if item.Action == "deploy_all" {
+		m.showActions = true
+		m.actionsPopup = m.buildDeployAllEnvPopup()
+		return nil
+	}
+
+	// Deploy All: start deploying for selected environment
+	if strings.HasPrefix(item.Action, "deploy_all_env_") {
+		envName := strings.TrimPrefix(item.Action, "deploy_all_env_")
+		return m.startDeployAll(envName)
+	}
+
 	// Wrangler version picker actions (must be checked before generic wrangler_ prefix)
 	if item.Action == "wrangler_deploy_version" {
 		envName := m.wrangler.FocusedEnvName()
@@ -2942,6 +3027,13 @@ func (m Model) deleteEnvCmd(configPath, envName string) tea.Cmd {
 
 // --- Delete resource popup helpers ---
 
+// updateDeployAllPopup forwards messages to the deploy all popup when it's active.
+func (m Model) updateDeployAllPopup(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
+	return m, cmd
+}
+
 // updateDeletePopup forwards messages to the delete resource popup when it's active.
 func (m Model) updateDeletePopup(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -3104,6 +3196,142 @@ func (m Model) removeVarCmd(configPath, envName, varName string) tea.Cmd {
 	}
 }
 
+// --- Deploy All helpers ---
+
+// startDeployAll builds the deploy items for an environment, creates the popup,
+// and spawns parallel deploy commands for all matching projects.
+func (m *Model) startDeployAll(envName string) tea.Cmd {
+	var items []deployallpopup.DeployItem
+	for _, pc := range m.wrangler.ProjectConfigs() {
+		if pc.Config == nil {
+			continue
+		}
+		if !pc.Config.HasEnv(envName) {
+			continue
+		}
+		items = append(items, deployallpopup.DeployItem{
+			ProjectName: pc.Config.Name,
+			ConfigPath:  pc.ConfigPath,
+			EnvName:     envName,
+			Status:      deployallpopup.StatusDeploying,
+		})
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+
+	m.deployAllPopup = deployallpopup.New(envName, items)
+	m.showDeployAllPopup = true
+
+	// Resolve the API token once so all parallel runners share the same valid token.
+	// This avoids OAuth refresh token race conditions when multiple wrangler processes
+	// try to refresh the same token concurrently.
+	accountID := m.registry.ActiveAccountID()
+	apiToken := ""
+	if m.cfg != nil {
+		switch m.cfg.AuthMethod {
+		case config.AuthMethodAPIToken:
+			apiToken = m.cfg.APIToken
+		case config.AuthMethodOAuth:
+			apiToken = m.cfg.OAuthAccessToken
+		}
+	}
+
+	// Create a runner per project and store them for cancellation
+	runners := make([]*wcfg.Runner, len(items))
+	var cmds []tea.Cmd
+	for i, item := range items {
+		runner := wcfg.NewRunner()
+		runners[i] = runner
+		cmds = append(cmds, m.deployProjectCmd(i, runner, item.ConfigPath, item.EnvName, accountID, apiToken))
+	}
+	m.deployAllRunners = runners
+
+	cmds = append(cmds, m.deployAllPopup.SpinnerInit())
+	return tea.Batch(cmds...)
+}
+
+// deployProjectCmd spawns a single wrangler deploy for one project in a goroutine.
+// Output is captured into a buffer; only the final result is sent back as a message.
+func (m Model) deployProjectCmd(idx int, runner *wcfg.Runner, configPath, envName, accountID, apiToken string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := wcfg.Command{
+			Action:     "deploy",
+			ConfigPath: configPath,
+			EnvName:    envName,
+			AccountID:  accountID,
+			APIToken:   apiToken,
+		}
+
+		ctx := context.Background()
+		if err := runner.Start(ctx, cmd); err != nil {
+			logPath := writeDeployLog(filepath.Base(filepath.Dir(configPath)), envName, []byte(err.Error()))
+			return deployallpopup.ProjectDoneMsg{
+				Index:   idx,
+				Err:     err,
+				LogPath: logPath,
+			}
+		}
+
+		// Drain all output into a buffer
+		var buf []byte
+		for line := range runner.LinesCh() {
+			buf = append(buf, []byte(line.Text+"\n")...)
+		}
+
+		result, ok := <-runner.DoneCh()
+		if !ok {
+			return deployallpopup.ProjectDoneMsg{Index: idx}
+		}
+
+		if result.Err != nil || result.ExitCode != 0 {
+			err := result.Err
+			if err == nil {
+				err = fmt.Errorf("exit code %d", result.ExitCode)
+			}
+			logPath := writeDeployLog(filepath.Base(filepath.Dir(configPath)), envName, buf)
+			return deployallpopup.ProjectDoneMsg{
+				Index:   idx,
+				Err:     err,
+				LogPath: logPath,
+			}
+		}
+
+		return deployallpopup.ProjectDoneMsg{Index: idx}
+	}
+}
+
+// writeDeployLog writes deploy output to ~/.orangeshell/logs/ and returns the path.
+// Returns empty string if writing fails (non-fatal).
+func writeDeployLog(projectName, envName string, output []byte) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	logsDir := filepath.Join(home, ".orangeshell", "logs")
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
+		return ""
+	}
+	ts := time.Now().Format("20060102T150405")
+	filename := fmt.Sprintf("deploy-%s-%s-%s.log", projectName, envName, ts)
+	logPath := filepath.Join(logsDir, filename)
+	if err := os.WriteFile(logPath, output, 0644); err != nil {
+		return ""
+	}
+	return logPath
+}
+
+// cancelDeployAllRunners stops all in-flight deploy runners.
+func (m *Model) cancelDeployAllRunners() {
+	for _, runner := range m.deployAllRunners {
+		if runner != nil && runner.IsRunning() {
+			runner.Stop()
+		}
+	}
+	m.deployAllRunners = nil
+}
+
 // --- Create project popup helpers ---
 
 // updateProjectPopup forwards messages to the project popup when it's active.
@@ -3225,6 +3453,11 @@ func (m Model) viewDashboard() string {
 	if m.showBindings {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.bindingsPopup.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
+	if m.showDeployAllPopup {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.deployAllPopup.View(m.width, m.height)
 		return overlayCenter(bg, fg, m.width, m.height)
 	}
 	if m.showEnvPopup {

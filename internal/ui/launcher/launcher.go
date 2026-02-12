@@ -31,6 +31,7 @@ var defaultServices = []serviceEntry{
 	{Name: "Pages", Icon: "P"},
 	{Name: "Queues", Icon: "Q"},
 	{Name: "Hyperdrive", Icon: "H"},
+	{Name: "Env Variables", Icon: "E"},
 }
 
 // Model represents the service launcher overlay.
@@ -137,7 +138,7 @@ func (m Model) View(termWidth, termHeight int) string {
 		popupWidth = 50
 	}
 
-	title := theme.TitleStyle.Render("  Services")
+	title := theme.TitleStyle.Render("  Resources")
 	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
 		strings.Repeat("─", popupWidth-4))
 

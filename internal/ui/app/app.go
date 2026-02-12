@@ -159,7 +159,8 @@ type Model struct {
 	projectPopup     projectpopup.Model
 
 	// Environment variables view
-	envvarsView envvars.Model
+	envvarsView             envvars.Model
+	envVarsFromResourceList bool // true when env vars view was opened from the Resources launcher
 
 	// Toast notification
 	toastMsg    string
@@ -335,6 +336,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadServiceResources(msg.ServiceName)
 
 	case detail.LoadDetailMsg:
+		if msg.ServiceName == "Env Variables" {
+			// ResourceID is the config path; look up project name
+			configPath := msg.ResourceID
+			projectName := ""
+			for _, p := range m.wrangler.ProjectConfigs() {
+				if p.ConfigPath == configPath {
+					if p.Config != nil {
+						projectName = p.Config.Name
+					}
+					break
+				}
+			}
+			// Reset detail model back to list mode so it's not stuck
+			// in "Loading details..." when we return via esc.
+			m.detail.BackToList()
+			m.envVarsFromResourceList = true
+			return m, m.openEnvVarsView(configPath, "", projectName)
+		}
 		m.viewState = ViewServiceDetail
 		return m, tea.Batch(m.loadResourceDetail(msg.ServiceName, msg.ResourceID), m.detail.SpinnerInit())
 
@@ -761,6 +780,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.ShowEnvVarsMsg:
+		m.envVarsFromResourceList = false
 		return m, m.openEnvVarsView(msg.ConfigPath, msg.EnvName, msg.ProjectName)
 
 	case uiwrangler.CmdOutputMsg:
@@ -928,7 +948,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Environment variables view messages
 	case envvars.CloseMsg:
-		m.viewState = ViewWrangler
+		if m.envVarsFromResourceList {
+			// Return to the Env Variables project list
+			m.envVarsFromResourceList = false
+			m.viewState = ViewServiceList
+		} else {
+			m.viewState = ViewWrangler
+		}
 		return m, nil
 
 	case envvars.SetVarMsg:
@@ -975,6 +1001,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			return m, nil
+		}
+		if msg.ServiceName == "Env Variables" {
+			return m, m.navigateToEnvVarsList()
 		}
 		return m, m.navigateToService(msg.ServiceName)
 
@@ -1121,6 +1150,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopTail()
 			m.detail.ClearTail()
 			m.detail.ClearD1()
+			m.envVarsFromResourceList = false
 			m.viewState = ViewWrangler
 			// Refresh deployment data if stale
 			if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
@@ -2593,6 +2623,7 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 			return nil
 		}
 
+		m.envVarsFromResourceList = false
 		return m.openEnvVarsView(configPath, "", projectName)
 	}
 
@@ -2967,6 +2998,50 @@ func (m Model) updateEnvVars(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// navigateToEnvVarsList builds a project list for the "Env Variables" resource type
+// and shows it in the standard detail list view. Each project is a list item;
+// pressing enter on one opens the envvars detail view for that project.
+func (m *Model) navigateToEnvVarsList() tea.Cmd {
+	m.stopTail()
+	m.detail.ClearTail()
+	m.detail.ClearD1()
+
+	projects := m.wrangler.ProjectConfigs()
+	resources := make([]svc.Resource, 0, len(projects))
+	for _, p := range projects {
+		if p.Config == nil {
+			continue
+		}
+		// Count total vars across all environments
+		totalVars := 0
+		envCount := 0
+		for _, envName := range p.Config.EnvNames() {
+			vars := p.Config.EnvVars(envName)
+			if len(vars) > 0 {
+				envCount++
+			}
+			totalVars += len(vars)
+		}
+
+		summary := "no variables defined"
+		if totalVars > 0 {
+			summary = fmt.Sprintf("%d variable(s) across %d environment(s)", totalVars, envCount)
+		}
+
+		resources = append(resources, svc.Resource{
+			ID:          p.ConfigPath,
+			Name:        p.Config.Name,
+			ServiceType: "Env Variables",
+			Summary:     summary,
+		})
+	}
+
+	m.viewState = ViewServiceList
+	m.detail.SetFocused(true)
+	m.detail.SetServiceFresh("Env Variables", resources)
+	return nil
+}
+
 // openEnvVarsView collects env vars from the config and opens the envvars view.
 // If envName is empty or "default", shows all envs. Otherwise shows only the specified env.
 func (m *Model) openEnvVarsView(configPath, envName, projectName string) tea.Cmd {
@@ -3289,13 +3364,13 @@ func (m Model) renderHelp() string {
 			entries = []helpEntry{
 				{"j/k", "navigate"},
 				{"enter", "select"},
-				{"ctrl+l", "services"},
+				{"ctrl+l", "resources"},
 				{"[/]", "accounts"},
 				{"q", "quit"},
 			}
 		} else {
 			entries = []helpEntry{
-				{"ctrl+l", "services"},
+				{"ctrl+l", "resources"},
 				{"ctrl+k", "search"},
 				{"ctrl+p", "actions"},
 				{"ctrl+n", "bindings"},
@@ -3323,7 +3398,7 @@ func (m Model) renderHelp() string {
 		entries = []helpEntry{
 			{"esc", "back"},
 			{"ctrl+h", "home"},
-			{"ctrl+l", "services"},
+			{"ctrl+l", "resources"},
 			{"ctrl+k", "search"},
 			{"enter", "detail"},
 		}

@@ -449,6 +449,18 @@ func (m Model) InDetailView() bool {
 	return m.mode == viewDetail && m.detail != nil
 }
 
+// BackToList resets the detail panel from detail view back to list view.
+// Used when the app intercepts a detail navigation (e.g. Env Variables)
+// and needs the detail model to remain in list mode.
+func (m *Model) BackToList() {
+	m.mode = viewList
+	m.detail = nil
+	m.detailErr = nil
+	m.detailID = ""
+	m.detailLoading = false
+	m.scrollOffset = 0
+}
+
 // --- D1 SQL Console helpers ---
 
 // InitD1Console initializes the D1 SQL console for a database.

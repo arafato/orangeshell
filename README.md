@@ -1,13 +1,27 @@
-# orangeshell
+# 🍊 Orangeshell
 
-A terminal UI for managing your Cloudflare Workers — built around the wrangler workflow with first-class monorepo support.
+A terminal UI for managing your Cloudflare Worker Projects — built around the wrangler workflow with first-class monorepo support.
 
 ![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go&logoColor=white)
 ![Cloudflare](https://img.shields.io/badge/Cloudflare-Developer%20Platform-F38020?style=flat&logo=cloudflare&logoColor=white)
 
 ## Overview
 
-orangeshell is a TUI that puts your wrangler project at the center. Point it at a directory with a `wrangler.jsonc` (or `.json` / `.toml`) and it shows you everything: environments, bindings, deployments, version splits, and live logs — all without leaving your terminal.
+Orangeshell is a local-first project orchestrator that bridges the gap between your workspace organization and Cloudflare’s application developer platform.
+
+Unlike rigid IaC tools that force local and remote states to be identical, Orangeshell treats your local configuration as the "Source of Truth" for your management workflow. It provides a unified cockpit to organize, deploy, and maintain your Cloudflare resources without the fear of unintended side effects.
+
+### How it Works
+
+* Orchestrated Deployment: While Orangeshell excels at organizing local projects, its primary purpose is action. It streamlines the use of wrangler to deploy your code to Cloudflare with high-level efficiency.
+
+* Local-First State: Removing a project from your Orangeshell view simply means "I no longer want to manage this project here." It decouples your organizational structure from the existence of the remote resource.
+
+* Safety-Locked Destruction: Orangeshell respects your production environment. Infrastructure is only modified or destroyed through explicit, intentional consent, ensuring that local cleanup never turns into a remote outage by accident.
+
+In short: Orangeshell is the control plane for your Cloudflare monorepo. It gives you the power to deploy at scale and the safety to organize your local workspace freely, ensuring that remote changes only happen when you mean them.
+
+Point it at a directory with a `wrangler.jsonc` (or `.json` / `.toml`) and it shows you everything: environments, bindings, deployments, version splits, and live logs — all without leaving your terminal.
 
 Drop it into a monorepo with multiple Workers and it discovers every project automatically, giving you a unified view across all of them.
 

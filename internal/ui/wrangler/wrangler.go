@@ -49,6 +49,14 @@ type DeleteBindingRequestMsg struct {
 	WorkerName  string
 }
 
+// ShowEnvVarsMsg is sent when the user presses enter on the "Environment Variables" item
+// inside an env box. The parent (app.go) handles this to open the envvars view.
+type ShowEnvVarsMsg struct {
+	ConfigPath  string
+	EnvName     string
+	ProjectName string
+}
+
 // ConfigLoadedMsg is sent when a wrangler config has been scanned and parsed.
 type ConfigLoadedMsg struct {
 	Config *wcfg.WranglerConfig
@@ -1049,6 +1057,22 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return NavigateMsg{
 					ServiceName: "Workers",
 					ResourceID:  workerName,
+				}
+			}
+		}
+		// Env vars item selected — open the env vars view
+		if box.IsEnvVarsSelected() {
+			configPath := m.configPath
+			envName := box.EnvName
+			projectName := ""
+			if m.config != nil {
+				projectName = m.config.Name
+			}
+			return m, func() tea.Msg {
+				return ShowEnvVarsMsg{
+					ConfigPath:  configPath,
+					EnvName:     envName,
+					ProjectName: projectName,
 				}
 			}
 		}

@@ -23,6 +23,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
+	"github.com/oarafat/orangeshell/internal/ui/envvars"
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
@@ -45,6 +46,7 @@ const (
 	ViewWrangler      ViewState = iota // Wrangler home screen (default)
 	ViewServiceList                    // Service resource list (Workers, KV, etc.)
 	ViewServiceDetail                  // Resource detail (Worker detail, D1 console)
+	ViewEnvVars                        // Environment variables view
 )
 
 // Phase tracks the top-level application state.
@@ -155,6 +157,9 @@ type Model struct {
 	// Create project popup overlay
 	showProjectPopup bool
 	projectPopup     projectpopup.Model
+
+	// Environment variables view
+	envvarsView envvars.Model
 
 	// Toast notification
 	toastMsg    string
@@ -755,6 +760,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deletePopup = deletepopup.NewBindingDelete(msg.ConfigPath, msg.EnvName, msg.BindingName, msg.BindingType, msg.WorkerName)
 		return m, nil
 
+	case uiwrangler.ShowEnvVarsMsg:
+		return m, m.openEnvVarsView(msg.ConfigPath, msg.EnvName, msg.ProjectName)
+
 	case uiwrangler.CmdOutputMsg:
 		m.wrangler.AppendCmdOutput(msg.Line)
 		return m, waitForWranglerOutput(m.wranglerRunner)
@@ -918,6 +926,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} }),
 		)
 
+	// Environment variables view messages
+	case envvars.CloseMsg:
+		m.viewState = ViewWrangler
+		return m, nil
+
+	case envvars.SetVarMsg:
+		return m, m.setVarCmd(msg.ConfigPath, msg.EnvName, msg.VarName, msg.Value)
+
+	case envvars.DeleteVarMsg:
+		return m, m.removeVarCmd(msg.ConfigPath, msg.EnvName, msg.VarName)
+
+	case envvars.SetVarDoneMsg:
+		var cmd tea.Cmd
+		m.envvarsView, cmd = m.envvarsView.Update(msg)
+		return m, cmd
+
+	case envvars.DeleteVarDoneMsg:
+		var cmd tea.Cmd
+		m.envvarsView, cmd = m.envvarsView.Update(msg)
+		return m, cmd
+
+	case envvars.DoneMsg:
+		// Re-parse config to refresh the wrangler view and envvars list
+		if msg.ConfigPath != "" {
+			cfg, err := wcfg.Parse(msg.ConfigPath)
+			if err != nil {
+				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			} else {
+				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
+				// Rebuild the envvars list with fresh data
+				vars := m.buildEnvVarsList(msg.ConfigPath, cfg)
+				m.envvarsView.SetVars(vars)
+				m.toastMsg = "Variable saved. Deploy to apply."
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			}
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+
 	// Launcher messages
 	case launcher.LaunchServiceMsg:
 		m.showLauncher = false
@@ -1024,6 +1071,22 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If action popup is active, route everything there
 	if m.showActions {
 		return m.updateActions(msg)
+	}
+
+	// If envvars view is active, route key events there (but let global shortcuts through)
+	if m.viewState == ViewEnvVars {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "ctrl+h":
+				// Let ctrl+h fall through to the global handler below
+			case "ctrl+l":
+				// Let ctrl+l fall through to the global handler below
+			default:
+				return m.updateEnvVars(msg)
+			}
+		} else {
+			return m.updateEnvVars(msg)
+		}
 	}
 
 	// If launcher overlay is active, route everything there
@@ -1155,6 +1218,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ViewServiceDetail:
 				// Let detail handle Esc internally (detail→list transition)
 				// We detect the transition after detail processes the message
+			case ViewEnvVars:
+				// Envvars view handles its own Esc (clear filter first, then close)
 			case ViewWrangler:
 				// Wrangler handles its own Esc (dir browser, cmd pane, etc.)
 			}
@@ -1173,6 +1238,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if wasDetail && !m.detail.InDetailView() {
 			m.viewState = ViewServiceList
 		}
+	case ViewEnvVars:
+		m.envvarsView, cmd = m.envvarsView.Update(msg)
 	}
 
 	return m, cmd
@@ -2186,8 +2253,14 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		Action:      "create_project",
 	})
 
-	// Add/Delete environment actions (if the selected project has a config)
+	// Configuration actions (if the selected project has a config)
 	if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+		items = append(items, actions.Item{
+			Label:       "Environment Variables",
+			Description: "View and edit environment variables",
+			Section:     "Configuration",
+			Action:      "show_env_vars",
+		})
 		items = append(items, actions.Item{
 			Label:       "Add Environment",
 			Description: "Add a new environment to the selected project",
@@ -2363,8 +2436,14 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 		}
 	}
 
-	// Add/Delete environment actions (only when config is loaded)
+	// Configuration section actions (only when config is loaded)
 	if m.wrangler.HasConfig() {
+		items = append(items, actions.Item{
+			Label:       "Environment Variables",
+			Description: "View and edit environment variables",
+			Section:     "Configuration",
+			Action:      "show_env_vars",
+		})
 		items = append(items, actions.Item{
 			Label:       "Add Environment",
 			Description: "Add a new environment to the config",
@@ -2493,7 +2572,30 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		return nil
 	}
 
-	// Add environment action
+	// Environment Variables action
+	if item.Action == "show_env_vars" {
+		var configPath string
+		var projectName string
+
+		if m.wrangler.IsOnProjectList() {
+			configPath = m.wrangler.SelectedProjectConfigPath()
+			if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+				projectName = cfg.Name
+			}
+		} else if m.wrangler.HasConfig() {
+			configPath = m.wrangler.ConfigPath()
+			if cfg := m.wrangler.Config(); cfg != nil {
+				projectName = cfg.Name
+			}
+		}
+
+		if configPath == "" {
+			return nil
+		}
+
+		return m.openEnvVarsView(configPath, "", projectName)
+	}
+
 	// Create project action
 	if item.Action == "create_project" {
 		m.showProjectPopup = true
@@ -2856,6 +2958,77 @@ func (m Model) removeBindingCmd(configPath, envName, bindingName, bindingType st
 	}
 }
 
+// --- Environment variables view helpers ---
+
+// updateEnvVars forwards messages to the envvars view when it's active.
+func (m Model) updateEnvVars(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.envvarsView, cmd = m.envvarsView.Update(msg)
+	return m, cmd
+}
+
+// openEnvVarsView collects env vars from the config and opens the envvars view.
+// If envName is empty or "default", shows all envs. Otherwise shows only the specified env.
+func (m *Model) openEnvVarsView(configPath, envName, projectName string) tea.Cmd {
+	cfg, err := wcfg.Parse(configPath)
+	if err != nil {
+		m.toastMsg = fmt.Sprintf("Failed to read config: %v", err)
+		m.toastExpiry = time.Now().Add(3 * time.Second)
+		return tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return toastExpireMsg{} })
+	}
+
+	vars := m.buildEnvVarsList(configPath, cfg)
+	m.envvarsView = envvars.New(configPath, projectName, envName, vars)
+	contentHeight := m.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	m.envvarsView.SetSize(m.width, contentHeight)
+	m.viewState = ViewEnvVars
+	return nil
+}
+
+// buildEnvVarsList collects all env vars from a wrangler config into a flat list.
+func (m Model) buildEnvVarsList(configPath string, cfg *wcfg.WranglerConfig) []envvars.EnvVar {
+	if cfg == nil {
+		return nil
+	}
+
+	projectName := cfg.Name
+	var result []envvars.EnvVar
+
+	for _, envName := range cfg.EnvNames() {
+		vars := cfg.EnvVars(envName)
+		for name, value := range vars {
+			result = append(result, envvars.EnvVar{
+				EnvName:     envName,
+				Name:        name,
+				Value:       value,
+				ConfigPath:  configPath,
+				ProjectName: projectName,
+			})
+		}
+	}
+
+	return result
+}
+
+// setVarCmd writes an env var into the wrangler config file.
+func (m Model) setVarCmd(configPath, envName, varName, value string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.SetVar(configPath, envName, varName, value)
+		return envvars.SetVarDoneMsg{Err: err}
+	}
+}
+
+// removeVarCmd removes an env var from the wrangler config file.
+func (m Model) removeVarCmd(configPath, envName, varName string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.RemoveVar(configPath, envName, varName)
+		return envvars.DeleteVarDoneMsg{Err: err}
+	}
+}
+
 // --- Create project popup helpers ---
 
 // updateProjectPopup forwards messages to the project popup when it's active.
@@ -3013,6 +3186,12 @@ func (m Model) renderDashboardContent() string {
 		content = m.wrangler.View()
 	case ViewServiceList, ViewServiceDetail:
 		content = m.detail.View()
+	case ViewEnvVars:
+		contentHeight := m.height - 2 // header + help bar
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+		content = m.envvarsView.View(m.width, contentHeight)
 	}
 
 	helpText := m.renderHelp()
@@ -3131,6 +3310,14 @@ func (m Model) renderHelp() string {
 				}
 			}
 			entries = append(entries, helpEntry{"q", "quit"})
+		}
+	case ViewEnvVars:
+		entries = []helpEntry{
+			{"esc", "back"},
+			{"enter", "edit"},
+			{"a", "add"},
+			{"d", "delete"},
+			{"ctrl+h", "home"},
 		}
 	case ViewServiceList:
 		entries = []helpEntry{

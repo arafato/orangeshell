@@ -613,6 +613,245 @@ func removeBindingJSON(data []byte, isTopLevel bool, envName, bindingName, bindi
 	return append(pretty.Bytes(), '\n'), nil
 }
 
+// SetVar adds or updates an environment variable in a wrangler config file.
+// envName is the target environment ("default" or "" for top-level, otherwise the named env).
+func SetVar(configPath, envName, varName, value string) error {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+	isTopLevel := envName == "" || envName == "default"
+
+	var result []byte
+	switch ext {
+	case ".toml":
+		result, err = setVarTOML(data, envName, isTopLevel, varName, value)
+	case ".json", ".jsonc":
+		result, err = setVarJSON(data, isTopLevel, envName, varName, value)
+	default:
+		return fmt.Errorf("unsupported config format: %s", ext)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(absPath, result, 0644)
+}
+
+// setVarTOML adds or updates a var in a TOML config.
+func setVarTOML(data []byte, envName string, isTopLevel bool, varName, value string) ([]byte, error) {
+	content := string(data)
+
+	// Determine the section header we're looking for
+	var sectionHeader string
+	if isTopLevel {
+		sectionHeader = "[vars]"
+	} else {
+		sectionHeader = fmt.Sprintf("[env.%s.vars]", envName)
+	}
+
+	// Try to find the existing [vars] section
+	sectionPattern := fmt.Sprintf(`(?m)^%s\s*$`, regexp.QuoteMeta(sectionHeader))
+	sectionRe := regexp.MustCompile(sectionPattern)
+	sectionLoc := sectionRe.FindStringIndex(content)
+
+	if sectionLoc != nil {
+		// Section exists — find the end of it (next [ header or EOF)
+		afterSection := content[sectionLoc[1]:]
+		nextHeaderRe := regexp.MustCompile(`(?m)^\[`)
+		nextLoc := nextHeaderRe.FindStringIndex(afterSection)
+
+		sectionEnd := len(content)
+		if nextLoc != nil {
+			sectionEnd = sectionLoc[1] + nextLoc[0]
+		}
+
+		sectionBody := content[sectionLoc[1]:sectionEnd]
+
+		// Check if the var already exists in this section
+		varPattern := fmt.Sprintf(`(?m)^%s\s*=\s*.*$`, regexp.QuoteMeta(varName))
+		varRe := regexp.MustCompile(varPattern)
+		varLoc := varRe.FindStringIndex(sectionBody)
+
+		if varLoc != nil {
+			// Replace existing value
+			absStart := sectionLoc[1] + varLoc[0]
+			absEnd := sectionLoc[1] + varLoc[1]
+			newLine := fmt.Sprintf("%s = %q", varName, value)
+			result := content[:absStart] + newLine + content[absEnd:]
+			return []byte(result), nil
+		}
+
+		// Var doesn't exist — append it at the end of the section
+		insertIdx := sectionEnd
+		// Walk backwards past trailing blank lines to insert right after the last var
+		for insertIdx > sectionLoc[1] && (content[insertIdx-1] == '\n' || content[insertIdx-1] == '\r') {
+			insertIdx--
+		}
+		newLine := fmt.Sprintf("\n%s = %q\n", varName, value)
+		// Add back the newlines we consumed
+		trailingNewlines := content[insertIdx:sectionEnd]
+		result := content[:insertIdx] + newLine + trailingNewlines + content[sectionEnd:]
+		return []byte(result), nil
+	}
+
+	// Section doesn't exist — create it
+	newSection := fmt.Sprintf("\n%s\n%s = %q\n", sectionHeader, varName, value)
+
+	if isTopLevel {
+		// Insert before [env.*] sections, or at EOF
+		insertIdx := findTopLevelInsertPoint(content)
+		result := content[:insertIdx] + newSection + content[insertIdx:]
+		return []byte(result), nil
+	}
+
+	// For env-specific vars, insert into the env section
+	result, err := insertIntoEnvSection(content, envName, newSection)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(result), nil
+}
+
+// setVarJSON adds or updates a var in a JSON/JSONC config.
+func setVarJSON(data []byte, isTopLevel bool, envName, varName, value string) ([]byte, error) {
+	clean := jsonc.ToJSON(data)
+
+	var path string
+	if isTopLevel {
+		path = "vars." + varName
+	} else {
+		path = "env." + envName + ".vars." + varName
+	}
+
+	result, err := sjson.SetBytes(clean, path, value)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update JSON config: %w", err)
+	}
+
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, result, "", "  "); err != nil {
+		return result, nil
+	}
+	return append(pretty.Bytes(), '\n'), nil
+}
+
+// RemoveVar removes an environment variable from a wrangler config file.
+// envName is the target environment ("default" or "" for top-level, otherwise the named env).
+func RemoveVar(configPath, envName, varName string) error {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+	isTopLevel := envName == "" || envName == "default"
+
+	var result []byte
+	switch ext {
+	case ".toml":
+		result, err = removeVarTOML(data, envName, isTopLevel, varName)
+	case ".json", ".jsonc":
+		result, err = removeVarJSON(data, isTopLevel, envName, varName)
+	default:
+		return fmt.Errorf("unsupported config format: %s", ext)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(absPath, result, 0644)
+}
+
+// removeVarTOML removes a var line from a TOML config.
+func removeVarTOML(data []byte, envName string, isTopLevel bool, varName string) ([]byte, error) {
+	content := string(data)
+
+	// Determine the section header
+	var sectionHeader string
+	if isTopLevel {
+		sectionHeader = "[vars]"
+	} else {
+		sectionHeader = fmt.Sprintf("[env.%s.vars]", envName)
+	}
+
+	sectionPattern := fmt.Sprintf(`(?m)^%s\s*$`, regexp.QuoteMeta(sectionHeader))
+	sectionRe := regexp.MustCompile(sectionPattern)
+	sectionLoc := sectionRe.FindStringIndex(content)
+
+	if sectionLoc == nil {
+		return nil, fmt.Errorf("variable %q not found in config", varName)
+	}
+
+	// Find section end
+	afterSection := content[sectionLoc[1]:]
+	nextHeaderRe := regexp.MustCompile(`(?m)^\[`)
+	nextLoc := nextHeaderRe.FindStringIndex(afterSection)
+
+	sectionEnd := len(content)
+	if nextLoc != nil {
+		sectionEnd = sectionLoc[1] + nextLoc[0]
+	}
+
+	sectionBody := content[sectionLoc[1]:sectionEnd]
+
+	// Find the var line
+	varPattern := fmt.Sprintf(`(?m)^%s\s*=\s*.*\n?`, regexp.QuoteMeta(varName))
+	varRe := regexp.MustCompile(varPattern)
+	varLoc := varRe.FindStringIndex(sectionBody)
+
+	if varLoc == nil {
+		return nil, fmt.Errorf("variable %q not found in config", varName)
+	}
+
+	absStart := sectionLoc[1] + varLoc[0]
+	absEnd := sectionLoc[1] + varLoc[1]
+
+	result := content[:absStart] + content[absEnd:]
+
+	// Clean up multiple consecutive blank lines
+	multiBlank := regexp.MustCompile(`\n{3,}`)
+	result = multiBlank.ReplaceAllString(result, "\n\n")
+	result = strings.TrimRight(result, "\n\t ") + "\n"
+
+	return []byte(result), nil
+}
+
+// removeVarJSON removes a var from a JSON/JSONC config.
+func removeVarJSON(data []byte, isTopLevel bool, envName, varName string) ([]byte, error) {
+	clean := jsonc.ToJSON(data)
+
+	var path string
+	if isTopLevel {
+		path = "vars." + varName
+	} else {
+		path = "env." + envName + ".vars." + varName
+	}
+
+	result, err := sjson.DeleteBytes(clean, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update JSON config: %w", err)
+	}
+
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, result, "", "  "); err != nil {
+		return result, nil
+	}
+	return append(pretty.Bytes(), '\n'), nil
+}
+
 // buildJSONEntry returns the raw JSON bytes for a binding entry.
 func buildJSONEntry(b BindingDef) []byte {
 	var m map[string]string

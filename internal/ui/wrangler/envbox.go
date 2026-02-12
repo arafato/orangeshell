@@ -54,13 +54,14 @@ func (b EnvBox) BindingCount() int {
 	return len(b.Bindings)
 }
 
-// ItemCount returns the total number of navigable items (worker name + bindings).
+// ItemCount returns the total number of navigable items (worker name + bindings + env vars item).
 func (b EnvBox) ItemCount() int {
 	count := 0
 	if b.WorkerName != "" {
 		count++ // worker name at position 0
 	}
 	count += len(b.Bindings)
+	count++ // env vars item is always present (to allow adding vars even when none exist)
 	return count
 }
 
@@ -112,13 +113,19 @@ func (b *EnvBox) CursorDown() {
 }
 
 // SelectedBinding returns the binding at the current cursor, or nil if the cursor
-// is on the worker name or out of range.
+// is on the worker name, env vars item, or out of range.
 func (b EnvBox) SelectedBinding() *wcfg.Binding {
 	bindingIdx := b.cursor - b.workerOffset()
 	if bindingIdx < 0 || bindingIdx >= len(b.Bindings) {
 		return nil
 	}
 	return &b.Bindings[bindingIdx]
+}
+
+// IsEnvVarsSelected returns true if the cursor is on the "Environment Variables" item.
+// The env vars item is always the last navigable item.
+func (b EnvBox) IsEnvVarsSelected() bool {
+	return b.cursor == b.ItemCount()-1
 }
 
 // View renders the environment box.
@@ -232,13 +239,23 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 		}
 	}
 
-	// Vars (names only)
+	// Environment Variables (navigable item)
+	envVarsIdx := b.ItemCount() - 1 // always the last item
 	var varLines []string
-	if len(b.Vars) > 0 {
+	{
 		varLines = append(varLines, theme.LabelStyle.Render("Vars"))
-		names := sortedKeys(b.Vars)
-		line := "  " + theme.DimStyle.Render(strings.Join(names, ", "))
-		varLines = append(varLines, line)
+
+		cursor := "  "
+		nameStyle := theme.NormalItemStyle
+		if inside && envVarsIdx == b.cursor {
+			cursor = theme.SelectedItemStyle.Render("> ")
+			nameStyle = theme.SelectedItemStyle
+		}
+
+		varCount := len(b.Vars)
+		label := nameStyle.Render(fmt.Sprintf("Environment Variables (%d)", varCount))
+		navArrow := " " + theme.ActionNavArrowStyle.Render("\u2192") // →
+		varLines = append(varLines, fmt.Sprintf("%s%s%s", cursor, label, navArrow))
 	}
 
 	// Assemble box content
@@ -281,19 +298,4 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 	}
 
 	return boxStyle.Render(content)
-}
-
-// sortedKeys returns map keys in sorted order.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	// Simple insertion sort (maps are small)
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
-	return keys
 }

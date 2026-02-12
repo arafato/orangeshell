@@ -21,6 +21,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
+	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
 	"github.com/oarafat/orangeshell/internal/ui/search"
@@ -31,7 +32,7 @@ import (
 	"github.com/oarafat/orangeshell/version"
 )
 
-const refreshInterval = 30 * time.Second
+const refreshInterval = 60 * time.Second
 
 // ViewState tracks the current content view.
 type ViewState int
@@ -139,6 +140,10 @@ type Model struct {
 	// Binding popup overlay
 	showBindings  bool
 	bindingsPopup bindings.Model
+
+	// Add environment popup overlay
+	showEnvPopup bool
+	envPopup     envpopup.Model
 
 	// Toast notification
 	toastMsg    string
@@ -723,6 +728,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Add environment popup messages
+	case envpopup.CloseMsg:
+		m.showEnvPopup = false
+		return m, nil
+
+	case envpopup.CreateEnvMsg:
+		return m, m.createEnvCmd(msg.ConfigPath, msg.EnvName)
+
+	case envpopup.CreateEnvDoneMsg:
+		var cmd tea.Cmd
+		m.envPopup, cmd = m.envPopup.Update(msg)
+		return m, cmd
+
+	case envpopup.DeleteEnvMsg:
+		return m, m.deleteEnvCmd(msg.ConfigPath, msg.EnvName)
+
+	case envpopup.DeleteEnvDoneMsg:
+		var cmd tea.Cmd
+		m.envPopup, cmd = m.envPopup.Update(msg)
+		return m, cmd
+
+	case envpopup.DoneMsg:
+		m.showEnvPopup = false
+		// Re-parse the config to refresh the environment display
+		if msg.ConfigPath != "" {
+			cfg, err := wcfg.Parse(msg.ConfigPath)
+			if err != nil {
+				m.toastMsg = fmt.Sprintf("Config reload error: %v", err)
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			} else {
+				m.wrangler.ReloadConfig(msg.ConfigPath, cfg)
+				if m.envPopup.IsDeleteMode() {
+					m.toastMsg = "Environment deleted"
+				} else {
+					m.toastMsg = "Environment added"
+				}
+				m.toastExpiry = time.Now().Add(3 * time.Second)
+			}
+		}
+		return m, nil
+
 	// Launcher messages
 	case launcher.LaunchServiceMsg:
 		m.showLauncher = false
@@ -796,6 +842,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If bindings popup is active, route everything there
 	if m.showBindings {
 		return m.updateBindings(msg)
+	}
+
+	// If env popup is active, route everything there
+	if m.showEnvPopup {
+		return m.updateEnvPopup(msg)
 	}
 
 	// If action popup is active, route everything there
@@ -888,6 +939,20 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showActions = true
 				m.actionsPopup = m.buildActionsPopup()
 				return m, nil
+			}
+		case "d":
+			// Delete focused environment shortcut (project-level only)
+			if m.viewState == ViewWrangler && !m.wrangler.IsOnProjectList() &&
+				!m.wrangler.IsDirBrowserActive() && !m.wrangler.CmdRunning() &&
+				m.wrangler.HasConfig() {
+				envName := m.wrangler.FocusedEnvName()
+				if envName != "" && envName != "default" {
+					configPath := m.wrangler.ConfigPath()
+					workerName := m.wrangler.Config().Name
+					m.showEnvPopup = true
+					m.envPopup = envpopup.NewDeleteConfirm(configPath, workerName, envName)
+					return m, nil
+				}
 			}
 		case "]":
 			if m.header.NextAccount() {
@@ -1878,6 +1943,25 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		}
 	}
 
+	// Add/Delete environment actions (if the selected project has a config)
+	if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+		items = append(items, actions.Item{
+			Label:       "Add Environment",
+			Description: "Add a new environment to the selected project",
+			Section:     "Configuration",
+			Action:      "add_environment",
+		})
+		// Only show delete if there are named environments (not just "default")
+		if len(cfg.EnvNames()) > 1 {
+			items = append(items, actions.Item{
+				Label:       "Delete Environment",
+				Description: "Remove an environment from the selected project",
+				Section:     "Configuration",
+				Action:      "delete_environment",
+			})
+		}
+	}
+
 	items = append(items, actions.Item{
 		Label:       "Load Wrangler Configuration...",
 		Description: "Browse for a wrangler project directory",
@@ -2027,6 +2111,25 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 		}
 	}
 
+	// Add/Delete environment actions (only when config is loaded)
+	if m.wrangler.HasConfig() {
+		items = append(items, actions.Item{
+			Label:       "Add Environment",
+			Description: "Add a new environment to the config",
+			Section:     "Configuration",
+			Action:      "add_environment",
+		})
+		// Only show delete if there are named environments (not just "default")
+		if cfg := m.wrangler.Config(); cfg != nil && len(cfg.EnvNames()) > 1 {
+			items = append(items, actions.Item{
+				Label:       "Delete Environment",
+				Description: "Remove an environment from the config",
+				Section:     "Configuration",
+				Action:      "delete_environment",
+			})
+		}
+	}
+
 	// Always include the load/switch configuration action
 	items = append(items, actions.Item{
 		Label:       "Load Wrangler Configuration...",
@@ -2135,6 +2238,72 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	// Wrangler load config action
 	if item.Action == "wrangler_load_config" {
 		m.wrangler.ActivateDirBrowser()
+		return nil
+	}
+
+	// Add environment action
+	if item.Action == "add_environment" {
+		var configPath string
+		var workerName string
+		var existingEnvs []string
+
+		if m.wrangler.IsOnProjectList() {
+			// Monorepo project list: use the selected project
+			configPath = m.wrangler.SelectedProjectConfigPath()
+			if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+				workerName = cfg.Name
+				existingEnvs = cfg.EnvNames()
+			}
+		} else if m.wrangler.HasConfig() {
+			// Drilled into a project or single-project mode
+			configPath = m.wrangler.ConfigPath()
+			cfg := m.wrangler.Config()
+			workerName = cfg.Name
+			existingEnvs = cfg.EnvNames()
+		}
+
+		if configPath == "" {
+			return nil
+		}
+
+		m.showEnvPopup = true
+		m.envPopup = envpopup.New(configPath, workerName, existingEnvs)
+		return nil
+	}
+
+	// Delete environment action
+	if item.Action == "delete_environment" {
+		var configPath string
+		var workerName string
+		var namedEnvs []string
+
+		if m.wrangler.IsOnProjectList() {
+			configPath = m.wrangler.SelectedProjectConfigPath()
+			if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+				workerName = cfg.Name
+				for _, e := range cfg.EnvNames() {
+					if e != "default" {
+						namedEnvs = append(namedEnvs, e)
+					}
+				}
+			}
+		} else if m.wrangler.HasConfig() {
+			configPath = m.wrangler.ConfigPath()
+			cfg := m.wrangler.Config()
+			workerName = cfg.Name
+			for _, e := range cfg.EnvNames() {
+				if e != "default" {
+					namedEnvs = append(namedEnvs, e)
+				}
+			}
+		}
+
+		if configPath == "" || len(namedEnvs) == 0 {
+			return nil
+		}
+
+		m.showEnvPopup = true
+		m.envPopup = envpopup.NewDelete(configPath, workerName, namedEnvs)
 		return nil
 	}
 
@@ -2343,6 +2512,37 @@ func (m Model) writeBindingCmd(configPath, envName string, binding wcfg.BindingD
 	}
 }
 
+// --- Add environment popup helpers ---
+
+// updateEnvPopup forwards messages to the env popup when it's active.
+func (m Model) updateEnvPopup(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.envPopup, cmd = m.envPopup.Update(msg)
+	return m, cmd
+}
+
+// createEnvCmd writes a new empty environment section into the wrangler config file.
+func (m Model) createEnvCmd(configPath, envName string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.AddEnvironment(configPath, envName)
+		return envpopup.CreateEnvDoneMsg{
+			EnvName: envName,
+			Err:     err,
+		}
+	}
+}
+
+// deleteEnvCmd removes an environment section from the wrangler config file.
+func (m Model) deleteEnvCmd(configPath, envName string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.DeleteEnvironment(configPath, envName)
+		return envpopup.DeleteEnvDoneMsg{
+			EnvName: envName,
+			Err:     err,
+		}
+	}
+}
+
 // resourceTypeToServiceName maps a binding resource type to its service name in the registry.
 func resourceTypeToServiceName(resourceType string) string {
 	switch resourceType {
@@ -2390,6 +2590,11 @@ func (m Model) viewDashboard() string {
 	if m.showBindings {
 		bg := dimContent(m.renderDashboardContent())
 		fg := m.bindingsPopup.View(m.width, m.height)
+		return overlayCenter(bg, fg, m.width, m.height)
+	}
+	if m.showEnvPopup {
+		bg := dimContent(m.renderDashboardContent())
+		fg := m.envPopup.View(m.width, m.height)
 		return overlayCenter(bg, fg, m.width, m.height)
 	}
 	if m.showActions {
@@ -2514,6 +2719,7 @@ func (m Model) renderHelp() string {
 			}
 			if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
 				entries = append(entries, helpEntry{"t", "tail"})
+				entries = append(entries, helpEntry{"d", "del env"})
 			}
 			entries = append(entries, helpEntry{"q", "quit"})
 		}

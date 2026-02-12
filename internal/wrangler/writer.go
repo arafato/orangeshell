@@ -13,6 +13,165 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// AddEnvironment writes a new empty environment section into a wrangler config file.
+// configPath is the absolute path to the config file.
+// envName is the name for the new environment (e.g. "staging").
+// Returns an error if the environment already exists or the file cannot be written.
+func AddEnvironment(configPath, envName string) error {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+
+	var result []byte
+	switch ext {
+	case ".toml":
+		result, err = addEnvironmentTOML(data, envName)
+	case ".json", ".jsonc":
+		result, err = addEnvironmentJSON(data, envName)
+	default:
+		return fmt.Errorf("unsupported config format: %s", ext)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(absPath, result, 0644)
+}
+
+// addEnvironmentTOML appends a new [env.<name>] section to TOML config text.
+func addEnvironmentTOML(data []byte, envName string) ([]byte, error) {
+	content := string(data)
+
+	// Check if the env section already exists
+	sectionPattern := fmt.Sprintf(`(?m)^\[env\.%s\]`, regexp.QuoteMeta(envName))
+	if regexp.MustCompile(sectionPattern).MatchString(content) {
+		return nil, fmt.Errorf("environment %q already exists", envName)
+	}
+
+	// Append the new env section at the end of the file
+	result := strings.TrimRight(content, "\n") + "\n\n[env." + envName + "]\n"
+	return []byte(result), nil
+}
+
+// addEnvironmentJSON inserts a new empty env object into a JSON/JSONC config.
+// Note: JSONC comments are stripped by this operation.
+func addEnvironmentJSON(data []byte, envName string) ([]byte, error) {
+	clean := jsonc.ToJSON(data)
+
+	path := "env." + envName
+	result, err := sjson.SetRawBytes(clean, path, []byte("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to update JSON config: %w", err)
+	}
+
+	// Pretty-print the result
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, result, "", "  "); err != nil {
+		return result, nil
+	}
+	return append(pretty.Bytes(), '\n'), nil
+}
+
+// DeleteEnvironment removes an environment section and all its associated bindings
+// from a wrangler config file. The "default" environment cannot be deleted.
+func DeleteEnvironment(configPath, envName string) error {
+	if envName == "" || envName == "default" {
+		return fmt.Errorf("cannot delete the default environment")
+	}
+
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("invalid config path: %w", err)
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(absPath))
+
+	var result []byte
+	switch ext {
+	case ".toml":
+		result, err = deleteEnvironmentTOML(data, envName)
+	case ".json", ".jsonc":
+		result, err = deleteEnvironmentJSON(data, envName)
+	default:
+		return fmt.Errorf("unsupported config format: %s", ext)
+	}
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(absPath, result, 0644)
+}
+
+// deleteEnvironmentTOML removes the [env.<name>] section and all its sub-sections
+// (e.g. [[env.<name>.d1_databases]]) from TOML content.
+func deleteEnvironmentTOML(data []byte, envName string) ([]byte, error) {
+	content := string(data)
+
+	// Find the start of [env.<name>] — the main section header
+	sectionPattern := fmt.Sprintf(`(?m)^\[env\.%s\]`, regexp.QuoteMeta(envName))
+	re := regexp.MustCompile(sectionPattern)
+	loc := re.FindStringIndex(content)
+
+	if loc == nil {
+		return nil, fmt.Errorf("environment %q not found in config", envName)
+	}
+
+	// Extend start backwards to consume at most one preceding blank line.
+	// We keep the newline that terminates the previous content line.
+	startIdx := loc[0]
+	if startIdx >= 2 && content[startIdx-1] == '\n' && content[startIdx-2] == '\n' {
+		// There's a blank line before the section — consume it
+		startIdx--
+	}
+
+	// Find the end of this env section
+	endIdx := findEnvSectionEnd(content, loc[1], envName)
+
+	// Remove the section
+	result := content[:startIdx] + content[endIdx:]
+
+	// Clean up multiple consecutive blank lines (replace 3+ newlines with 2)
+	multiBlank := regexp.MustCompile(`\n{3,}`)
+	result = multiBlank.ReplaceAllString(result, "\n\n")
+
+	// Trim trailing whitespace
+	result = strings.TrimRight(result, "\n\t ") + "\n"
+
+	return []byte(result), nil
+}
+
+// deleteEnvironmentJSON removes the env.<name> key from a JSON/JSONC config.
+// Note: JSONC comments are stripped by this operation.
+func deleteEnvironmentJSON(data []byte, envName string) ([]byte, error) {
+	clean := jsonc.ToJSON(data)
+
+	path := "env." + envName
+	result, err := sjson.DeleteBytes(clean, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update JSON config: %w", err)
+	}
+
+	// Pretty-print the result
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, result, "", "  "); err != nil {
+		return result, nil
+	}
+	return append(pretty.Bytes(), '\n'), nil
+}
+
 // BindingDef describes a binding to be written into a wrangler config file.
 type BindingDef struct {
 	// Type is one of: "d1", "kv", "r2", "queue"
@@ -153,6 +312,55 @@ func findTopLevelInsertPoint(content string) int {
 	return len(content)
 }
 
+// findEnvSectionEnd finds the byte index in content where the env section ends.
+// It scans from afterStart (the position right after the [env.<name>] header match)
+// and finds the first TOML section header that does NOT belong to the given env.
+// Sub-sections like [[env.<name>.d1_databases]] are considered part of the env.
+// Returns the byte index of the next unrelated section, or len(content) if none.
+func findEnvSectionEnd(content string, afterStart int, envName string) int {
+	// Pattern matching any TOML section header at the start of a line
+	anySectionRe := regexp.MustCompile(`(?m)^\[`)
+	// Pattern matching headers that belong to this env: [env.<name>] or [[env.<name>.xxx]]
+	envOwnedPrefix := fmt.Sprintf("env.%s.", envName)
+	envOwnedExact := fmt.Sprintf("env.%s]", envName)
+
+	afterSection := content[afterStart:]
+	offset := 0
+
+	for {
+		candidate := anySectionRe.FindStringIndex(afterSection[offset:])
+		if candidate == nil {
+			break // no more sections — env extends to EOF
+		}
+
+		absPos := afterStart + offset + candidate[0]
+		// Extract the header text from '[' to end of line
+		lineEnd := strings.IndexByte(content[absPos:], '\n')
+		var headerLine string
+		if lineEnd >= 0 {
+			headerLine = content[absPos : absPos+lineEnd]
+		} else {
+			headerLine = content[absPos:]
+		}
+
+		// Strip leading brackets to get the key path
+		inner := strings.TrimLeft(headerLine, "[")
+		inner = strings.TrimSpace(inner)
+
+		// Check if this header belongs to the current env
+		if strings.HasPrefix(inner, envOwnedPrefix) || strings.HasPrefix(inner, envOwnedExact) {
+			// This is a sub-section of our env — skip it and keep looking
+			offset += candidate[1]
+			continue
+		}
+
+		// This section does NOT belong to our env — this is the boundary
+		return absPos
+	}
+
+	return len(content)
+}
+
 // insertIntoEnvSection inserts a binding block into the [env.<name>] section of TOML content.
 // The block parameter should already be formatted with the env-prefixed syntax
 // (e.g. [[env.staging.d1_databases]]).
@@ -167,20 +375,8 @@ func insertIntoEnvSection(content, envName, block string) (string, error) {
 		return content + "\n[env." + envName + "]\n" + block + "\n", nil
 	}
 
-	// Find the end of this env section — it ends at the next [env.<other>] or top-level section.
-	// We skip [[env.<same-name>.*]] entries since those are part of the current env section.
-	afterSection := content[loc[1]:]
-	// Match a new [section] or [env.<different-name>] (not [[env.<same-name>.bindings]])
-	nextSectionPattern := fmt.Sprintf(`(?m)^\[(?!\[?env\.%s\.)([a-zA-Z])`, regexp.QuoteMeta(envName))
-	nextSectionRe := regexp.MustCompile(nextSectionPattern)
-	nextLoc := nextSectionRe.FindStringIndex(afterSection)
-
-	var insertIdx int
-	if nextLoc != nil {
-		insertIdx = loc[1] + nextLoc[0]
-	} else {
-		insertIdx = len(content)
-	}
+	// Find the end of this env section
+	insertIdx := findEnvSectionEnd(content, loc[1], envName)
 
 	result := content[:insertIdx] + block + content[insertIdx:]
 	return result, nil

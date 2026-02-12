@@ -221,6 +221,31 @@ func (m Model) IsOnProjectList() bool {
 	return m.IsMonorepo() && m.activeProject == -1
 }
 
+// SelectedProjectConfigPath returns the config path of the currently selected
+// project on the monorepo project list. Returns "" if not on the project list
+// or if the selected project has no config.
+func (m Model) SelectedProjectConfigPath() string {
+	if !m.IsOnProjectList() {
+		return ""
+	}
+	if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
+		return m.projects[m.projectCursor].configPath
+	}
+	return ""
+}
+
+// SelectedProjectConfig returns the parsed config of the currently selected
+// project on the monorepo project list. Returns nil if not applicable.
+func (m Model) SelectedProjectConfig() *wcfg.WranglerConfig {
+	if !m.IsOnProjectList() {
+		return nil
+	}
+	if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
+		return m.projects[m.projectCursor].config
+	}
+	return nil
+}
+
 // RootName returns the monorepo root name (CWD basename).
 func (m Model) RootName() string {
 	return m.rootName

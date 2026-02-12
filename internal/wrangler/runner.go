@@ -102,10 +102,12 @@ func (r *Runner) Start(ctx context.Context, wcmd Command) error {
 	args := buildArgs(wcmd)
 	r.cmd = exec.CommandContext(runCtx, "npx", args...)
 
-	// Pass account ID via environment variable so wrangler doesn't prompt
-	// for account selection in non-interactive mode.
+	// Set CI=true so wrangler skips all interactive prompts (we have no stdin pipe).
+	// Also pass account ID via environment variable so wrangler doesn't prompt
+	// for account selection.
+	r.cmd.Env = append(os.Environ(), "CI=true")
 	if wcmd.AccountID != "" {
-		r.cmd.Env = append(os.Environ(), "CLOUDFLARE_ACCOUNT_ID="+wcmd.AccountID)
+		r.cmd.Env = append(r.cmd.Env, "CLOUDFLARE_ACCOUNT_ID="+wcmd.AccountID)
 	}
 
 	stdout, err := r.cmd.StdoutPipe()
@@ -258,6 +260,8 @@ func CommandLabel(action string) string {
 		return "Dev (Local)"
 	case "dev --remote":
 		return "Dev (Remote)"
+	case "delete":
+		return "Delete"
 	default:
 		return action
 	}
@@ -278,6 +282,8 @@ func CommandDescription(action string) string {
 		return "Start local dev server (Miniflare)"
 	case "dev --remote":
 		return "Start remote dev server on Cloudflare"
+	case "delete":
+		return "Delete the deployed worker from Cloudflare"
 	default:
 		return ""
 	}

@@ -2174,6 +2174,15 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 			}
 		}
 
+		// Delete worker action
+		items = append(items, actions.Item{
+			Label:       "Delete",
+			Description: "Delete the deployed worker for this environment",
+			Section:     "Commands",
+			Action:      "wrangler_delete",
+			Disabled:    cmdRunning,
+		})
+
 		// Version deployment actions
 		items = append(items, actions.Item{
 			Label:       "Deploy Version...",
@@ -2527,6 +2536,11 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		return nil
 	}
 
+	if item.Action == "wrangler_delete" {
+		envName := m.wrangler.FocusedEnvName()
+		return m.startWranglerCmdWithArgs("delete", envName, []string{"--force"})
+	}
+
 	// Wrangler command actions
 	if strings.HasPrefix(item.Action, "wrangler_") {
 		action := strings.TrimPrefix(item.Action, "wrangler_")
@@ -2711,7 +2725,7 @@ func resourceTypeToServiceName(resourceType string) string {
 // isMutatingAction returns true if the wrangler action modifies live deployment state.
 func isMutatingAction(action string) bool {
 	switch action {
-	case "deploy", "versions deploy":
+	case "deploy", "versions deploy", "delete":
 		return true
 	}
 	return false

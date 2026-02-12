@@ -1024,7 +1024,7 @@ func (m Model) updateDirBrowser(msg tea.KeyMsg) (Model, tea.Cmd) {
 func (m Model) updateOuter(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
-		if m.focusedEnv > 0 {
+		if m.focusedEnv > -1 {
 			m.focusedEnv--
 			m.adjustScroll()
 		}
@@ -1034,6 +1034,20 @@ func (m Model) updateOuter(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.adjustScroll()
 		}
 	case "enter":
+		if m.focusedEnv == -1 {
+			// Triggers item — open the triggers view
+			configPath := m.configPath
+			projectName := ""
+			if m.config != nil {
+				projectName = m.config.Name
+			}
+			return m, func() tea.Msg {
+				return ShowTriggersMsg{
+					ConfigPath:  configPath,
+					ProjectName: projectName,
+				}
+			}
+		}
 		if len(m.envBoxes) > 0 && m.focusedEnv < len(m.envBoxes) {
 			box := &m.envBoxes[m.focusedEnv]
 			if box.ItemCount() > 0 {
@@ -1064,20 +1078,6 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return NavigateMsg{
 					ServiceName: "Workers",
 					ResourceID:  workerName,
-				}
-			}
-		}
-		// Triggers item selected — open the triggers view
-		if box.IsTriggersSelected() {
-			configPath := m.configPath
-			projectName := ""
-			if m.config != nil {
-				projectName = m.config.Name
-			}
-			return m, func() tea.Msg {
-				return ShowTriggersMsg{
-					ConfigPath:  configPath,
-					ProjectName: projectName,
 				}
 			}
 		}
@@ -1293,6 +1293,24 @@ func (m Model) View() string {
 		allLines = append(allLines, workerLine)
 	}
 	allLines = append(allLines, "") // spacer
+
+	// Triggers item (project-level, above env boxes)
+	{
+		cronCount := 0
+		if m.config != nil {
+			cronCount = len(m.config.CronTriggers())
+		}
+		triggerCursor := "  "
+		triggerStyle := theme.NormalItemStyle
+		if !m.insideBox && m.focusedEnv == -1 {
+			triggerCursor = theme.SelectedItemStyle.Render("> ")
+			triggerStyle = theme.SelectedItemStyle
+		}
+		triggerLabel := triggerStyle.Render(fmt.Sprintf("Triggers (%d)", cronCount))
+		navArrow := " " + theme.ActionNavArrowStyle.Render("\u2192") // →
+		allLines = append(allLines, fmt.Sprintf("%s%s%s", triggerCursor, triggerLabel, navArrow))
+		allLines = append(allLines, "") // spacer
+	}
 
 	// Add box views (each box is multi-line, split by \n)
 	for _, bv := range boxViews {

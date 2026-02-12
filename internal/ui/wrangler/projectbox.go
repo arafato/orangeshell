@@ -70,6 +70,15 @@ func (b ProjectBox) View(width int, focused bool) string {
 	var parts []string
 	parts = append(parts, title)
 	parts = append(parts, pathLine)
+
+	// Triggers summary (display-only, project-level)
+	if crons := b.Config.CronTriggers(); len(crons) > 0 {
+		triggerLine := fmt.Sprintf("%s %s",
+			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Triggers")),
+			theme.ValueStyle.Render(fmt.Sprintf("%d cron(s)", len(crons))))
+		parts = append(parts, triggerLine)
+	}
+
 	if len(envSections) > 0 {
 		parts = append(parts, "") // spacer
 		parts = append(parts, strings.Join(envSections, "\n\n"))

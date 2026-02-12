@@ -32,6 +32,7 @@ var defaultServices = []serviceEntry{
 	{Name: "Queues", Icon: "Q"},
 	{Name: "Hyperdrive", Icon: "H"},
 	{Name: "Env Variables", Icon: "E"},
+	{Name: "Triggers", Icon: "T"},
 }
 
 // Model represents the service launcher overlay.

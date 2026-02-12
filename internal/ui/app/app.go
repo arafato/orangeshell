@@ -167,7 +167,8 @@ type Model struct {
 	envVarsFromResourceList bool // true when env vars view was opened from the Resources launcher
 
 	// Cron triggers view
-	triggersView uitriggers.Model
+	triggersView             uitriggers.Model
+	triggersFromResourceList bool // true when triggers view was opened from the Resources launcher
 
 	// Deploy all popup overlay
 	showDeployAllPopup bool
@@ -365,6 +366,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail.BackToList()
 			m.envVarsFromResourceList = true
 			return m, m.openEnvVarsView(configPath, "", projectName)
+		}
+		if msg.ServiceName == "Triggers" {
+			configPath := msg.ResourceID
+			projectName := ""
+			for _, p := range m.wrangler.ProjectConfigs() {
+				if p.ConfigPath == configPath {
+					if p.Config != nil {
+						projectName = p.Config.Name
+					}
+					break
+				}
+			}
+			m.detail.BackToList()
+			m.triggersFromResourceList = true
+			return m, m.openTriggersView(configPath, projectName)
 		}
 		m.viewState = ViewServiceDetail
 		return m, tea.Batch(m.loadResourceDetail(msg.ServiceName, msg.ResourceID), m.detail.SpinnerInit())
@@ -796,6 +812,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openEnvVarsView(msg.ConfigPath, msg.EnvName, msg.ProjectName)
 
 	case uiwrangler.ShowTriggersMsg:
+		m.triggersFromResourceList = false
 		return m, m.openTriggersView(msg.ConfigPath, msg.ProjectName)
 
 	case uiwrangler.CmdOutputMsg:
@@ -1008,7 +1025,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Cron triggers view messages
 	case uitriggers.CloseMsg:
-		m.viewState = ViewWrangler
+		if m.triggersFromResourceList {
+			m.triggersFromResourceList = false
+			m.viewState = ViewServiceList
+		} else {
+			m.viewState = ViewWrangler
+		}
 		return m, nil
 
 	case uitriggers.AddCronMsg:
@@ -1076,6 +1098,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.ServiceName == "Env Variables" {
 			return m, m.navigateToEnvVarsList()
+		}
+		if msg.ServiceName == "Triggers" {
+			return m, m.navigateToTriggersList()
 		}
 		return m, m.navigateToService(msg.ServiceName)
 
@@ -1249,6 +1274,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail.ClearTail()
 			m.detail.ClearD1()
 			m.envVarsFromResourceList = false
+			m.triggersFromResourceList = false
 			m.viewState = ViewWrangler
 			// Refresh deployment data if stale
 			if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
@@ -2766,6 +2792,7 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 			return nil
 		}
 
+		m.triggersFromResourceList = false
 		return m.openTriggersView(configPath, projectName)
 	}
 
@@ -3226,6 +3253,39 @@ func (m *Model) navigateToEnvVarsList() tea.Cmd {
 	m.viewState = ViewServiceList
 	m.detail.SetFocused(true)
 	m.detail.SetServiceFresh("Env Variables", resources)
+	return nil
+}
+
+// navigateToTriggersList builds a project list for the "Triggers" resource type
+// and shows it in the standard detail list view.
+func (m *Model) navigateToTriggersList() tea.Cmd {
+	m.stopTail()
+	m.detail.ClearTail()
+	m.detail.ClearD1()
+
+	projects := m.wrangler.ProjectConfigs()
+	resources := make([]svc.Resource, 0, len(projects))
+	for _, p := range projects {
+		if p.Config == nil {
+			continue
+		}
+		cronCount := len(p.Config.CronTriggers())
+		summary := "no cron triggers defined"
+		if cronCount > 0 {
+			summary = fmt.Sprintf("%d cron trigger(s)", cronCount)
+		}
+
+		resources = append(resources, svc.Resource{
+			ID:          p.ConfigPath,
+			Name:        p.Config.Name,
+			ServiceType: "Triggers",
+			Summary:     summary,
+		})
+	}
+
+	m.viewState = ViewServiceList
+	m.detail.SetFocused(true)
+	m.detail.SetServiceFresh("Triggers", resources)
 	return nil
 }
 

@@ -20,7 +20,7 @@ func renderHyperlink(url, text string) string {
 
 // EnvBox renders a single environment box in the Wrangler view.
 // The inner cursor covers all navigable items: the worker name at position 0,
-// followed by bindings at positions 1..N, then triggers, then env vars.
+// followed by bindings at positions 1..N, then env vars.
 type EnvBox struct {
 	EnvName    string             // "default" or named env
 	WorkerName string             // resolved worker name
@@ -28,8 +28,7 @@ type EnvBox struct {
 	Routes     []wcfg.RouteConfig // routes for this env
 	Bindings   []wcfg.Binding     // bindings for this env
 	Vars       map[string]string  // vars for this env (names only)
-	Crons      []string           // cron triggers (top-level only, same across all envs)
-	cursor     int                // inner cursor position (0=worker, 1..N=bindings, then triggers, then env vars)
+	cursor     int                // inner cursor position (0=worker, 1..N=bindings, then env vars)
 
 	// Deployment info (fetched async from API)
 	Deployment        *DeploymentDisplay // active deployment for this env
@@ -46,7 +45,6 @@ func NewEnvBox(cfg *wcfg.WranglerConfig, envName string) EnvBox {
 		Routes:     cfg.EnvRoutes(envName),
 		Bindings:   cfg.EnvBindings(envName),
 		Vars:       cfg.EnvVars(envName),
-		Crons:      cfg.CronTriggers(), // top-level only, shared across all envs
 		cursor:     0,
 	}
 }
@@ -56,15 +54,14 @@ func (b EnvBox) BindingCount() int {
 	return len(b.Bindings)
 }
 
-// ItemCount returns the total number of navigable items (worker name + bindings + triggers + env vars).
+// ItemCount returns the total number of navigable items (worker name + bindings + env vars item).
 func (b EnvBox) ItemCount() int {
 	count := 0
 	if b.WorkerName != "" {
 		count++ // worker name at position 0
 	}
 	count += len(b.Bindings)
-	count++ // triggers item (always present, even when no crons defined)
-	count++ // env vars item (always present, even when no vars defined)
+	count++ // env vars item is always present (to allow adding vars even when none exist)
 	return count
 }
 
@@ -123,17 +120,6 @@ func (b EnvBox) SelectedBinding() *wcfg.Binding {
 		return nil
 	}
 	return &b.Bindings[bindingIdx]
-}
-
-// triggersIndex returns the cursor index of the Triggers item.
-// Triggers come right after bindings: workerOffset + len(Bindings).
-func (b EnvBox) triggersIndex() int {
-	return b.workerOffset() + len(b.Bindings)
-}
-
-// IsTriggersSelected returns true if the cursor is on the "Triggers" item.
-func (b EnvBox) IsTriggersSelected() bool {
-	return b.cursor == b.triggersIndex()
 }
 
 // IsEnvVarsSelected returns true if the cursor is on the "Environment Variables" item.
@@ -253,29 +239,12 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 		}
 	}
 
-	// Configuration section: Triggers + Environment Variables
-	var configLines []string
-	configLines = append(configLines, theme.LabelStyle.Render("Configuration"))
-
-	// Triggers (navigable item)
-	triggersIdx := b.triggersIndex()
+	// Environment Variables (navigable item)
+	envVarsIdx := b.ItemCount() - 1 // always the last item
+	var varLines []string
 	{
-		cursor := "  "
-		nameStyle := theme.NormalItemStyle
-		if inside && triggersIdx == b.cursor {
-			cursor = theme.SelectedItemStyle.Render("> ")
-			nameStyle = theme.SelectedItemStyle
-		}
+		varLines = append(varLines, theme.LabelStyle.Render("Vars"))
 
-		cronCount := len(b.Crons)
-		label := nameStyle.Render(fmt.Sprintf("Triggers (%d)", cronCount))
-		navArrow := " " + theme.ActionNavArrowStyle.Render("\u2192") // →
-		configLines = append(configLines, fmt.Sprintf("%s%s%s", cursor, label, navArrow))
-	}
-
-	// Environment Variables (navigable item — always last)
-	envVarsIdx := b.ItemCount() - 1
-	{
 		cursor := "  "
 		nameStyle := theme.NormalItemStyle
 		if inside && envVarsIdx == b.cursor {
@@ -286,7 +255,7 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 		varCount := len(b.Vars)
 		label := nameStyle.Render(fmt.Sprintf("Environment Variables (%d)", varCount))
 		navArrow := " " + theme.ActionNavArrowStyle.Render("\u2192") // →
-		configLines = append(configLines, fmt.Sprintf("%s%s%s", cursor, label, navArrow))
+		varLines = append(varLines, fmt.Sprintf("%s%s%s", cursor, label, navArrow))
 	}
 
 	// Assemble box content
@@ -310,8 +279,8 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 	if len(bindingLines) > 0 {
 		contentParts = append(contentParts, strings.Join(bindingLines, "\n"))
 	}
-	if len(configLines) > 0 {
-		contentParts = append(contentParts, strings.Join(configLines, "\n"))
+	if len(varLines) > 0 {
+		contentParts = append(contentParts, strings.Join(varLines, "\n"))
 	}
 
 	content := strings.Join(contentParts, "\n")

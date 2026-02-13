@@ -98,26 +98,9 @@ func (m Model) renderTabContent() string {
 }
 
 // renderOperationsTab renders the Operations tab content.
-// Currently routes all existing ViewState content here — this will be narrowed
-// in later phases as views move to their own tabs.
 func (m Model) renderOperationsTab() string {
-	switch m.viewState {
-	case ViewWrangler:
+	if m.viewState == ViewWrangler {
 		return m.wrangler.View()
-	case ViewServiceList, ViewServiceDetail:
-		return m.detail.View()
-	case ViewEnvVars:
-		contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
-		if contentHeight < 1 {
-			contentHeight = 1
-		}
-		return m.envvarsView.View(m.width, contentHeight)
-	case ViewTriggers:
-		contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
-		if contentHeight < 1 {
-			contentHeight = 1
-		}
-		return m.triggersView.View(m.width, contentHeight)
 	}
 	return ""
 }
@@ -127,14 +110,31 @@ func (m Model) renderMonitoringTab() string {
 	return m.renderPlaceholderTab("Monitoring", "Live tail grid — coming soon")
 }
 
-// renderResourcesTab renders the Resources tab placeholder.
+// renderResourcesTab renders the Resources tab content (service list / detail).
 func (m Model) renderResourcesTab() string {
-	return m.renderPlaceholderTab("Resources", "Service browser — coming soon")
+	switch m.viewState {
+	case ViewServiceList, ViewServiceDetail:
+		return m.detail.View()
+	}
+	return m.renderPlaceholderTab("Resources", "Press ctrl+l to browse services")
 }
 
-// renderConfigurationTab renders the Configuration tab placeholder.
+// renderConfigurationTab renders the Configuration tab content (env vars, triggers).
 func (m Model) renderConfigurationTab() string {
-	return m.renderPlaceholderTab("Configuration", "Env vars, triggers, bindings — coming soon")
+	contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	switch m.viewState {
+	case ViewEnvVars:
+		return m.envvarsView.View(m.width, contentHeight)
+	case ViewTriggers:
+		return m.triggersView.View(m.width, contentHeight)
+	case ViewServiceList:
+		// Env Variables / Triggers project list (shown via detail model)
+		return m.detail.View()
+	}
+	return m.renderPlaceholderTab("Configuration", "Press ctrl+l to open env vars or triggers")
 }
 
 // renderPlaceholderTab renders a centered placeholder message for tabs that are not yet implemented.
@@ -233,9 +233,9 @@ func (m Model) renderHelp() string {
 	case tabbar.TabMonitoring:
 		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 	case tabbar.TabResources:
-		entries = append(entries, helpEntry{"ctrl+l", "resources"}, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		entries = append(entries, m.renderResourcesHelp()...)
 	case tabbar.TabConfiguration:
-		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		entries = append(entries, m.renderConfigurationHelp()...)
 	}
 
 	var parts []string
@@ -303,6 +303,52 @@ func (m Model) renderOperationsHelp() []helpEntry {
 		}
 		entries = append(entries, helpEntry{"q", "quit"})
 		return entries
+	}
+	return nil
+}
+
+// renderResourcesHelp returns the context-sensitive help entries for the Resources tab.
+func (m Model) renderResourcesHelp() []helpEntry {
+	switch m.viewState {
+	case ViewServiceList:
+		entries := []helpEntry{
+			{"ctrl+h", "home"},
+			{"ctrl+l", "resources"},
+			{"ctrl+k", "search"},
+			{"enter", "detail"},
+		}
+		if s := m.registry.Get(m.detail.Service()); s != nil {
+			if _, ok := s.(svc.Deleter); ok {
+				entries = append(entries, helpEntry{"d", "delete"})
+			}
+		}
+		entries = append(entries, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		return entries
+	case ViewServiceDetail:
+		entries := []helpEntry{
+			{"esc", "back"},
+			{"ctrl+h", "home"},
+			{"ctrl+p", "actions"},
+			{"ctrl+k", "search"},
+		}
+		if m.detail.IsWorkersDetail() {
+			entries = append(entries, helpEntry{"t", "tail"})
+		}
+		entries = append(entries, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		return entries
+	}
+	// Placeholder state (no service loaded)
+	return []helpEntry{
+		{"ctrl+l", "resources"},
+		{"ctrl+k", "search"},
+		{"[/]", "accounts"},
+		{"q", "quit"},
+	}
+}
+
+// renderConfigurationHelp returns the context-sensitive help entries for the Configuration tab.
+func (m Model) renderConfigurationHelp() []helpEntry {
+	switch m.viewState {
 	case ViewEnvVars:
 		return []helpEntry{
 			{"esc", "back"},
@@ -318,32 +364,19 @@ func (m Model) renderOperationsHelp() []helpEntry {
 			{"ctrl+h", "home"},
 		}
 	case ViewServiceList:
-		entries := []helpEntry{
-			{"esc", "back"},
+		return []helpEntry{
 			{"ctrl+h", "home"},
 			{"ctrl+l", "resources"},
-			{"ctrl+k", "search"},
 			{"enter", "detail"},
+			{"[/]", "accounts"},
+			{"q", "quit"},
 		}
-		if s := m.registry.Get(m.detail.Service()); s != nil {
-			if _, ok := s.(svc.Deleter); ok {
-				entries = append(entries, helpEntry{"d", "delete"})
-			}
-		}
-		entries = append(entries, helpEntry{"[/]", "accounts"})
-		return entries
-	case ViewServiceDetail:
-		entries := []helpEntry{
-			{"esc", "back"},
-			{"ctrl+h", "home"},
-			{"ctrl+p", "actions"},
-			{"ctrl+k", "search"},
-		}
-		if m.detail.IsWorkersDetail() {
-			entries = append(entries, helpEntry{"t", "tail"})
-		}
-		entries = append(entries, helpEntry{"[/]", "accounts"})
-		return entries
 	}
-	return nil
+	// Placeholder state
+	return []helpEntry{
+		{"ctrl+l", "resources"},
+		{"ctrl+k", "search"},
+		{"[/]", "accounts"},
+		{"q", "quit"},
+	}
 }

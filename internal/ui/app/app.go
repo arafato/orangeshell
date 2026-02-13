@@ -883,6 +883,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showLauncher = false
 		if msg.ServiceName == "" {
 			// Go home
+			m.activeTab = tabbar.TabOperations
 			m.viewState = ViewWrangler
 			if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
 				return m, cmd
@@ -1025,10 +1026,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.viewState == ViewEnvVars {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
-			case "ctrl+h":
-				// Let ctrl+h fall through to the global handler below
-			case "ctrl+l":
-				// Let ctrl+l fall through to the global handler below
+			case "ctrl+h", "ctrl+l", "1", "2", "3", "4":
+				// Let global shortcuts and tab-switch keys fall through
 			default:
 				return m.updateEnvVars(msg)
 			}
@@ -1041,10 +1040,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.viewState == ViewTriggers {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
-			case "ctrl+h":
-				// Let ctrl+h fall through to the global handler below
-			case "ctrl+l":
-				// Let ctrl+l fall through to the global handler below
+			case "ctrl+h", "ctrl+l", "1", "2", "3", "4":
+				// Let global shortcuts and tab-switch keys fall through
 			default:
 				return m.updateTriggers(msg)
 			}
@@ -1080,16 +1077,22 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, t := range tabbar.All() {
 					if z := zone.Get(t.ZoneID()); z != nil && z.InBounds(msg) {
 						m.activeTab = t
+						m.ensureViewStateForTab()
 						return m, nil
 					}
 				}
 			}
 		}
 
-		// Forward mouse events to the detail panel regardless of view (for copy-on-click)
-		var cmd tea.Cmd
-		m.detail, cmd = m.detail.Update(msg)
-		return m, cmd
+		// Forward mouse events to the detail panel when it's visible (for copy-on-click)
+		if m.activeTab == tabbar.TabResources ||
+			(m.activeTab == tabbar.TabConfiguration && m.viewState == ViewServiceList) ||
+			(m.activeTab == tabbar.TabOperations && (m.viewState == ViewServiceList || m.viewState == ViewServiceDetail)) {
+			var cmd tea.Cmd
+			m.detail, cmd = m.detail.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
@@ -1109,15 +1112,28 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "4":
 					m.activeTab = tabbar.TabConfiguration
 				}
+				m.ensureViewStateForTab()
 				return m, nil
 			}
 
 		case "q":
-			// Quit from non-Operations tabs (they have no text inputs yet).
-			if m.activeTab != tabbar.TabOperations {
+			// Quit from Monitoring placeholder (no text inputs).
+			if m.activeTab == tabbar.TabMonitoring {
 				return m, tea.Quit
 			}
-			// Only quit when not in a text-input context
+			// Configuration tab: quit from project list or placeholder.
+			// When in ViewEnvVars/ViewTriggers, q is intercepted by their key handlers above.
+			if m.activeTab == tabbar.TabConfiguration {
+				return m, tea.Quit
+			}
+			// Resources tab: quit unless D1 console is active
+			if m.activeTab == tabbar.TabResources {
+				if m.viewState == ViewServiceDetail && m.detail.D1Active() {
+					break // let it fall through to detail's Update
+				}
+				return m, tea.Quit
+			}
+			// Operations tab: only quit when not in a text-input context
 			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() && !m.wrangler.CmdRunning() {
 				return m, tea.Quit
 			}
@@ -1180,7 +1196,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "ctrl+p":
-			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
+			if m.activeTab == tabbar.TabOperations && m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
 				m.showActions = true
 				if m.wrangler.IsOnProjectList() {
 					m.actionsPopup = m.buildMonorepoActionsPopup()
@@ -1223,9 +1239,13 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Esc at the app level handles view-state navigation back
 			switch m.viewState {
 			case ViewServiceList:
-				// Service list → go home
+				if m.activeTab == tabbar.TabResources || m.activeTab == tabbar.TabConfiguration {
+					// On Resources/Configuration tab: list is the root — Esc does nothing
+					return m, nil
+				}
+				// Fallback: go home
+				m.activeTab = tabbar.TabOperations
 				m.viewState = ViewWrangler
-				// Refresh deployment data if stale
 				if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
 					return m, cmd
 				}
@@ -1243,13 +1263,15 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Route to the active view — only when on the Operations tab.
-	// Other tabs are placeholders and don't process messages yet.
-	if m.activeTab == tabbar.TabOperations {
-		var cmd tea.Cmd
-		switch m.viewState {
-		case ViewWrangler:
+	// Route to the active view based on current tab.
+	var cmd tea.Cmd
+	switch m.activeTab {
+	case tabbar.TabOperations:
+		if m.viewState == ViewWrangler {
 			m.wrangler, cmd = m.wrangler.Update(msg)
+		}
+	case tabbar.TabResources:
+		switch m.viewState {
 		case ViewServiceList, ViewServiceDetail:
 			wasDetail := m.detail.InDetailView()
 			m.detail, cmd = m.detail.Update(msg)
@@ -1257,15 +1279,19 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if wasDetail && !m.detail.InDetailView() {
 				m.viewState = ViewServiceList
 			}
+		}
+	case tabbar.TabConfiguration:
+		switch m.viewState {
 		case ViewEnvVars:
 			m.envvarsView, cmd = m.envvarsView.Update(msg)
 		case ViewTriggers:
 			m.triggersView, cmd = m.triggersView.Update(msg)
+		case ViewServiceList:
+			// Env Variables / Triggers project list (via detail model)
+			m.detail, cmd = m.detail.Update(msg)
 		}
-		return m, cmd
 	}
-
-	return m, nil
+	return m, cmd
 }
 
 func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1295,6 +1321,29 @@ func (m Model) isTextInputActive() bool {
 		return true
 	}
 	return false
+}
+
+// ensureViewStateForTab resets the viewState to the tab's root view when switching
+// tabs, if the current viewState doesn't belong to the target tab.
+// This prevents a blank screen when switching from e.g. Resources (ViewServiceList)
+// to Operations (which doesn't render ViewServiceList).
+func (m *Model) ensureViewStateForTab() {
+	switch m.activeTab {
+	case tabbar.TabOperations:
+		// Only ViewWrangler is the natural root for Operations.
+		// Any other viewState (service list/detail, env vars, triggers) belongs
+		// to another tab context — reset to Wrangler home.
+		if m.viewState != ViewWrangler {
+			m.viewState = ViewWrangler
+		}
+	case tabbar.TabResources:
+		// Service list/detail are valid; anything else shows placeholder.
+	case tabbar.TabConfiguration:
+		// Env vars, triggers, and service list (project picker) are valid.
+		// Anything else (e.g. ViewServiceDetail, ViewWrangler) shows placeholder.
+	case tabbar.TabMonitoring:
+		// Placeholder tab — viewState doesn't matter for rendering.
+	}
 }
 
 // layout recalculates component sizes based on terminal dimensions.

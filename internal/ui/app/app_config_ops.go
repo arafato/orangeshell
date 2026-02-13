@@ -15,6 +15,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/envvars"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
+	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 	uitriggers "github.com/oarafat/orangeshell/internal/ui/triggers"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
@@ -227,6 +228,7 @@ func (m *Model) navigateToEnvVarsList() tea.Cmd {
 		})
 	}
 
+	m.activeTab = tabbar.TabConfiguration
 	m.viewState = ViewServiceList
 	m.detail.SetFocused(true)
 	m.detail.SetServiceFresh("Env Variables", resources)
@@ -260,6 +262,7 @@ func (m *Model) navigateToTriggersList() tea.Cmd {
 		})
 	}
 
+	m.activeTab = tabbar.TabConfiguration
 	m.viewState = ViewServiceList
 	m.detail.SetFocused(true)
 	m.detail.SetServiceFresh("Triggers", resources)
@@ -282,6 +285,7 @@ func (m *Model) openEnvVarsView(configPath, envName, projectName string) tea.Cmd
 		contentHeight = 1
 	}
 	m.envvarsView.SetSize(m.width, contentHeight)
+	m.activeTab = tabbar.TabConfiguration
 	m.viewState = ViewEnvVars
 	return nil
 }
@@ -343,6 +347,7 @@ func (m *Model) openTriggersView(configPath, projectName string) tea.Cmd {
 		contentHeight = 1
 	}
 	m.triggersView.SetSize(m.width, contentHeight)
+	m.activeTab = tabbar.TabConfiguration
 	m.viewState = ViewTriggers
 	return nil
 }
@@ -697,10 +702,13 @@ func (m *Model) handleEnvVarsMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case envvars.CloseMsg:
 		if m.envVarsFromResourceList {
-			// Return to the Env Variables project list
+			// Return to the Env Variables project list on the Configuration tab
 			m.envVarsFromResourceList = false
+			m.activeTab = tabbar.TabConfiguration
 			m.viewState = ViewServiceList
 		} else {
+			// Opened from wrangler — return to Operations
+			m.activeTab = tabbar.TabOperations
 			m.viewState = ViewWrangler
 		}
 		return *m, nil, true
@@ -739,9 +747,13 @@ func (m *Model) handleTriggersMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case uitriggers.CloseMsg:
 		if m.triggersFromResourceList {
+			// Return to the Triggers project list on the Configuration tab
 			m.triggersFromResourceList = false
+			m.activeTab = tabbar.TabConfiguration
 			m.viewState = ViewServiceList
 		} else {
+			// Opened from wrangler — return to Operations
+			m.activeTab = tabbar.TabOperations
 			m.viewState = ViewWrangler
 		}
 		return *m, nil, true

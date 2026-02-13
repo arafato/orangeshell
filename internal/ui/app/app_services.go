@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
+	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 )
 
 // fetchStaleForSearch triggers background refreshes for any stale service caches so search
@@ -32,6 +33,7 @@ func (m *Model) navigateToService(name string) tea.Cmd {
 	m.detail.ClearTail()
 	m.detail.ClearD1()
 
+	m.activeTab = tabbar.TabResources
 	m.viewState = ViewServiceList
 	m.detail.SetFocused(true)
 
@@ -235,6 +237,7 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 
 // navigateTo navigates directly to a specific resource's detail view.
 func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
+	m.activeTab = tabbar.TabResources
 	m.viewState = ViewServiceDetail
 	m.detail.SetFocused(true)
 

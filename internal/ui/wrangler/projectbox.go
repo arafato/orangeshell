@@ -5,10 +5,16 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
+
+// ProjectBoxURLZoneID returns the bubblezone marker ID for a URL in a project box env section.
+func ProjectBoxURLZoneID(projIdx int, envName string) string {
+	return fmt.Sprintf("proj-url-%d-%s", projIdx, envName)
+}
 
 // DeploymentDisplay holds deployment data for rendering in a project box.
 type DeploymentDisplay struct {
@@ -31,6 +37,7 @@ type ProjectBox struct {
 	Deployments       map[string]*DeploymentDisplay // envName -> deployment info
 	DeploymentFetched map[string]bool               // envName -> true once API responded
 	Subdomain         string                        // account's workers.dev subdomain
+	Index             int                           // position in the projects slice (for zone IDs)
 }
 
 // View renders the project box.
@@ -104,14 +111,15 @@ func (b ProjectBox) renderEnvSection(envName string) string {
 		theme.ValueStyle.Render(workerName),
 		theme.ActionNavArrowStyle.Render("\u2192"))
 
-	// URL line (clickable hyperlink) — only shown when the worker is actually deployed
+	// URL line (clickable) — only shown when the worker is actually deployed
 	var urlLine string
 	dep := b.Deployments[envName]
 	if b.Subdomain != "" && dep != nil && len(dep.Versions) > 0 {
 		url := fmt.Sprintf("https://%s.%s.workers.dev", workerName, b.Subdomain)
-		urlLine = fmt.Sprintf("  %s  %s",
+		rendered := fmt.Sprintf("  %s  %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-9s", "URL")),
 			renderHyperlink(url, url))
+		urlLine = zone.Mark(ProjectBoxURLZoneID(b.Index, envName), rendered)
 	}
 
 	// Deployment line

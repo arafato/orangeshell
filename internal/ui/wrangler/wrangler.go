@@ -9,10 +9,16 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
+
+// ProjectBoxZoneID returns the bubblezone marker ID for a monorepo project box.
+func ProjectBoxZoneID(idx int) string {
+	return fmt.Sprintf("proj-box-%d", idx)
+}
 
 // versionCacheTTL is how long fetched versions remain valid before re-fetching.
 const versionCacheTTL = 30 * time.Second
@@ -61,6 +67,12 @@ type ShowEnvVarsMsg struct {
 type ShowTriggersMsg struct {
 	ConfigPath  string
 	ProjectName string
+}
+
+// OpenURLMsg is sent when the user clicks a URL in the wrangler view.
+// The parent (app.go) handles this to open the URL in the default browser.
+type OpenURLMsg struct {
+	URL string
 }
 
 // ConfigLoadedMsg is sent when a wrangler config has been scanned and parsed.
@@ -222,7 +234,7 @@ func (m *Model) SetConfig(cfg *wcfg.WranglerConfig, path string, err error) {
 	m.envNames = cfg.EnvNames()
 	m.envBoxes = make([]EnvBox, len(m.envNames))
 	for i, name := range m.envNames {
-		m.envBoxes[i] = NewEnvBox(cfg, name)
+		m.envBoxes[i] = NewEnvBox(cfg, name, i)
 	}
 }
 
@@ -345,6 +357,7 @@ func (m *Model) SetProjects(projects []wcfg.ProjectInfo, rootName, rootDir strin
 			Err:               err,
 			Deployments:       make(map[string]*DeploymentDisplay),
 			DeploymentFetched: make(map[string]bool),
+			Index:             i,
 		}
 
 		m.projects[i] = projectEntry{
@@ -513,7 +526,7 @@ func (m *Model) ReloadConfig(configPath string, cfg *wcfg.WranglerConfig) {
 				m.envNames = cfg.EnvNames()
 				m.envBoxes = make([]EnvBox, len(m.envNames))
 				for i, name := range m.envNames {
-					m.envBoxes[i] = NewEnvBox(cfg, name)
+					m.envBoxes[i] = NewEnvBox(cfg, name, i)
 					// Copy deployment data from the project box
 					if dep, ok := entry.box.Deployments[name]; ok {
 						m.envBoxes[i].Deployment = dep
@@ -537,7 +550,7 @@ func (m *Model) ReloadConfig(configPath string, cfg *wcfg.WranglerConfig) {
 		m.envNames = cfg.EnvNames()
 		m.envBoxes = make([]EnvBox, len(m.envNames))
 		for i, name := range m.envNames {
-			m.envBoxes[i] = NewEnvBox(cfg, name)
+			m.envBoxes[i] = NewEnvBox(cfg, name, i)
 		}
 	}
 }
@@ -722,6 +735,72 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
+			return m, nil
+		}
+
+		// --- Monorepo project list view ---
+		if m.IsOnProjectList() {
+			// Check URL clicks in project boxes first (more specific zones)
+			for i, entry := range m.projects {
+				if entry.box.Config == nil {
+					continue
+				}
+				for _, envName := range entry.box.Config.EnvNames() {
+					if z := zone.Get(ProjectBoxURLZoneID(i, envName)); z != nil && z.InBounds(msg) {
+						workerName := entry.box.Config.ResolvedEnvName(envName)
+						if workerName != "" && entry.box.Subdomain != "" {
+							url := fmt.Sprintf("https://%s.%s.workers.dev", workerName, entry.box.Subdomain)
+							return m, func() tea.Msg { return OpenURLMsg{URL: url} }
+						}
+						return m, nil
+					}
+				}
+			}
+			// Check project box clicks
+			n := len(m.projects)
+			for i := 0; i < n; i++ {
+				if z := zone.Get(ProjectBoxZoneID(i)); z != nil && z.InBounds(msg) {
+					if i == m.projectCursor {
+						return m.drillIntoProject(i)
+					}
+					m.projectCursor = i
+					m.adjustProjectScroll()
+					return m, nil
+				}
+			}
+			return m, nil
+		}
+
+		// --- Single project / env box view ---
+		// Check URL clicks in env boxes first (more specific zones)
+		for i := range m.envBoxes {
+			if z := zone.Get(EnvBoxURLZoneID(i)); z != nil && z.InBounds(msg) {
+				box := &m.envBoxes[i]
+				if box.WorkerName != "" && box.Subdomain != "" {
+					url := fmt.Sprintf("https://%s.%s.workers.dev", box.WorkerName, box.Subdomain)
+					return m, func() tea.Msg { return OpenURLMsg{URL: url} }
+				}
+				return m, nil
+			}
+		}
+		// Check env box clicks (select / enter)
+		for i := range m.envBoxes {
+			if z := zone.Get(EnvBoxZoneID(i)); z != nil && z.InBounds(msg) {
+				if i == m.focusedEnv && !m.insideBox {
+					// Already focused — enter the box
+					m.insideBox = true
+					return m, nil
+				}
+				// Select this env box
+				m.focusedEnv = i
+				m.insideBox = false
+				m.adjustScroll()
+				return m, nil
+			}
+		}
+		return m, nil
 	case tea.KeyMsg:
 		// Handle version picker mode — it takes exclusive key focus
 		if m.showVersionPicker {
@@ -867,7 +946,7 @@ func (m Model) drillIntoProject(idx int) (Model, tea.Cmd) {
 		m.envNames = entry.config.EnvNames()
 		m.envBoxes = make([]EnvBox, len(m.envNames))
 		for i, name := range m.envNames {
-			m.envBoxes[i] = NewEnvBox(entry.config, name)
+			m.envBoxes[i] = NewEnvBox(entry.config, name, i)
 			// Copy deployment data from the project box into the env box
 			if dep, ok := entry.box.Deployments[name]; ok {
 				m.envBoxes[i].Deployment = dep
@@ -1179,7 +1258,7 @@ func (m Model) View() string {
 	for i := range m.envBoxes {
 		focused := i == m.focusedEnv
 		inside := focused && m.insideBox
-		boxView := m.envBoxes[i].View(boxWidth, focused, inside)
+		boxView := zone.Mark(EnvBoxZoneID(i), m.envBoxes[i].View(boxWidth, focused, inside))
 		boxViews = append(boxViews, boxView)
 	}
 
@@ -1289,12 +1368,12 @@ func (m Model) viewProjectList(contentHeight, boxWidth int, title, sep string) s
 		rightIdx := leftIdx + 1
 
 		leftFocused := leftIdx == m.projectCursor
-		leftView := m.projects[leftIdx].box.View(colWidth, leftFocused)
+		leftView := zone.Mark(ProjectBoxZoneID(leftIdx), m.projects[leftIdx].box.View(colWidth, leftFocused))
 
 		var rightView string
 		if rightIdx < n {
 			rightFocused := rightIdx == m.projectCursor
-			rightView = m.projects[rightIdx].box.View(colWidth, rightFocused)
+			rightView = zone.Mark(ProjectBoxZoneID(rightIdx), m.projects[rightIdx].box.View(colWidth, rightFocused))
 		} else {
 			// Empty placeholder for odd count — match the left box height
 			leftLines := strings.Split(leftView, "\n")

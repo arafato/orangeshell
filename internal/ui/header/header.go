@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 	"github.com/oarafat/orangeshell/internal/config"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
@@ -18,14 +19,21 @@ type Account struct {
 type Model struct {
 	accounts   []Account
 	activeIdx  int
+	hoverIdx   int // -1 means no hover
 	authMethod config.AuthMethod
 	width      int
+}
+
+// AccountZoneID returns the bubblezone marker ID for a header account tab.
+func AccountZoneID(idx int) string {
+	return fmt.Sprintf("hdr-acct-%d", idx)
 }
 
 // New creates a new header model.
 func New(authMethod config.AuthMethod) Model {
 	return Model{
 		authMethod: authMethod,
+		hoverIdx:   -1,
 	}
 }
 
@@ -88,6 +96,24 @@ func (m *Model) PrevAccount() bool {
 	return m.activeIdx != prev
 }
 
+// SetActiveIndex switches to the account at the given index. Returns true if the account changed.
+func (m *Model) SetActiveIndex(idx int) bool {
+	if idx < 0 || idx >= len(m.accounts) || idx == m.activeIdx {
+		return false
+	}
+	m.activeIdx = idx
+	return true
+}
+
+// SetHoverIdx sets which account tab the mouse is hovering over (-1 for none).
+func (m *Model) SetHoverIdx(idx int) {
+	m.hoverIdx = idx
+}
+
+// AccountCount returns the number of accounts.
+// (Kept for backward compat — the original AccountCount is duplicated below,
+// this is the hover-aware variant that also exposes the count.)
+
 // View renders the header bar with account tabs.
 func (m Model) View() string {
 	authLabel := ""
@@ -129,7 +155,7 @@ func (m Model) View() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, tabs, fill, right)
 }
 
-// renderTabs builds the account tab strip.
+// renderTabs builds the account tab strip with zone markers for mouse support.
 func (m Model) renderTabs() string {
 	if len(m.accounts) == 0 {
 		return ""
@@ -143,6 +169,11 @@ func (m Model) renderTabs() string {
 
 	inactiveTab := lipgloss.NewStyle().
 		Foreground(theme.ColorGray).
+		Background(theme.ColorDarkGray).
+		Padding(0, 1)
+
+	hoverTab := lipgloss.NewStyle().
+		Foreground(theme.ColorWhite).
 		Background(theme.ColorDarkGray).
 		Padding(0, 1)
 
@@ -164,11 +195,16 @@ func (m Model) renderTabs() string {
 				name = name[:12] + "…"
 			}
 		}
-		if i == m.activeIdx {
-			parts = append(parts, activeTab.Render(name))
-		} else {
-			parts = append(parts, inactiveTab.Render(name))
+		var rendered string
+		switch {
+		case i == m.activeIdx:
+			rendered = activeTab.Render(name)
+		case i == m.hoverIdx:
+			rendered = hoverTab.Render(name)
+		default:
+			rendered = inactiveTab.Render(name)
 		}
+		parts = append(parts, zone.Mark(AccountZoneID(i), rendered))
 	}
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)

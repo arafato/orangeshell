@@ -9,9 +9,15 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 	"github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
+
+// ResourceItemZoneID returns the bubblezone marker ID for a resource list item.
+func ResourceItemZoneID(idx int) string {
+	return fmt.Sprintf("res-item-%d", idx)
+}
 
 // View mode tracks whether we're looking at a list or a single item.
 type viewMode int
@@ -515,8 +521,42 @@ func (m Model) SelectedResource() *service.Resource {
 
 // Update handles events for the detail panel.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	// Handle mouse clicks for copy-on-click regardless of focus
+	// Handle mouse clicks
 	if mouseMsg, ok := msg.(tea.MouseMsg); ok {
+		if mouseMsg.Button == tea.MouseButtonLeft && mouseMsg.Action == tea.MouseActionRelease {
+			// Check resource list item clicks (list mode only)
+			if m.mode == viewList && len(m.resources) > 0 {
+				for i, r := range m.resources {
+					if z := zone.Get(ResourceItemZoneID(i)); z != nil && z.InBounds(mouseMsg) {
+						if i == m.cursor {
+							// Already selected — drill into detail
+							m.mode = viewDetail
+							m.detailLoading = true
+							m.detailErr = nil
+							m.detail = nil
+							m.detailID = r.ID
+							m.scrollOffset = 0
+							return m, func() tea.Msg {
+								return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
+							}
+						}
+						// Select the item
+						m.cursor = i
+						return m, nil
+					}
+				}
+			}
+			// Copy-on-click for detail view fields
+			if mouseMsg.Action == tea.MouseActionRelease {
+				relY := mouseMsg.Y - m.yOffset
+				if text, found := m.copyTargets[relY]; found {
+					return m, func() tea.Msg {
+						return CopyToClipboardMsg{Text: text}
+					}
+				}
+			}
+		}
+		// Also handle press for copy-on-click (backward compat)
 		if mouseMsg.Button == tea.MouseButtonLeft && mouseMsg.Action == tea.MouseActionPress {
 			relY := mouseMsg.Y - m.yOffset
 			if text, found := m.copyTargets[relY]; found {
@@ -792,7 +832,7 @@ func (m Model) viewList(maxHeight int) string {
 		name := nameStyle.Render(r.Name)
 		summary := theme.DimStyle.Render(truncateRunes(r.Summary, availableWidth-utf8.RuneCountInString(r.Name)-4))
 		line := fmt.Sprintf("%s%s  %s", cursor, name, summary)
-		lines = append(lines, line)
+		lines = append(lines, zone.Mark(ResourceItemZoneID(i), line))
 	}
 
 	// Apply scroll window to list if too long

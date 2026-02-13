@@ -5,17 +5,29 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
 
+// EnvBoxZoneID returns the bubblezone marker ID for an env box.
+func EnvBoxZoneID(idx int) string {
+	return fmt.Sprintf("env-box-%d", idx)
+}
+
+// EnvBoxURLZoneID returns the bubblezone marker ID for a URL line in an env box.
+func EnvBoxURLZoneID(idx int) string {
+	return fmt.Sprintf("env-url-%d", idx)
+}
+
 // renderHyperlink wraps text in an OSC 8 terminal hyperlink with blue underline styling.
 // Most modern terminals (iTerm2, Ghostty, WezTerm, Windows Terminal, Kitty) support this,
 // making the text clickable — clicking opens the URL in the default browser.
+// Uses ST (\x1b\\) as the OSC terminator for broad compatibility.
 func renderHyperlink(url, text string) string {
 	styled := lipgloss.NewStyle().Foreground(theme.ColorBlue).Underline(true).Render(text)
-	return fmt.Sprintf("\x1b]8;;%s\x07%s\x1b]8;;\x07", url, styled)
+	return fmt.Sprintf("\x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\", url, styled)
 }
 
 // EnvBox renders a single environment box in the Wrangler view.
@@ -29,6 +41,7 @@ type EnvBox struct {
 	Bindings   []wcfg.Binding     // bindings for this env
 	Vars       map[string]string  // vars for this env (names only)
 	cursor     int                // inner cursor position (0=worker, 1..N=bindings, then env vars)
+	Index      int                // position in the envBoxes slice (for zone IDs)
 
 	// Deployment info (fetched async from API)
 	Deployment        *DeploymentDisplay // active deployment for this env
@@ -36,9 +49,9 @@ type EnvBox struct {
 	DeploymentFetched bool               // true once API response received (distinguishes "not fetched" from "not deployed")
 }
 
-// NewEnvBox creates an EnvBox from a wrangler config and environment name.
-func NewEnvBox(cfg *wcfg.WranglerConfig, envName string) EnvBox {
-	return EnvBox{
+// NewEnvBox creates an EnvBox from a wrangler config, environment name, and index.
+func NewEnvBox(cfg *wcfg.WranglerConfig, envName string, idx ...int) EnvBox {
+	box := EnvBox{
 		EnvName:    envName,
 		WorkerName: cfg.ResolvedEnvName(envName),
 		CompatDate: cfg.ResolvedCompatDate(envName),
@@ -47,6 +60,10 @@ func NewEnvBox(cfg *wcfg.WranglerConfig, envName string) EnvBox {
 		Vars:       cfg.EnvVars(envName),
 		cursor:     0,
 	}
+	if len(idx) > 0 {
+		box.Index = idx[0]
+	}
+	return box
 }
 
 // BindingCount returns the number of bindings in this environment.
@@ -157,13 +174,14 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 			navArrow)
 	}
 
-	// URL line (clickable hyperlink) — only shown when the worker is actually deployed
+	// URL line (clickable) — only shown when the worker is actually deployed
 	var urlLine string
 	if b.WorkerName != "" && b.Subdomain != "" && b.Deployment != nil && len(b.Deployment.Versions) > 0 {
 		url := fmt.Sprintf("https://%s.%s.workers.dev", b.WorkerName, b.Subdomain)
-		urlLine = fmt.Sprintf("  %s %s",
+		rendered := fmt.Sprintf("  %s %s",
 			theme.DimStyle.Render(fmt.Sprintf("%-10s", "URL")),
 			renderHyperlink(url, url))
+		urlLine = zone.Mark(EnvBoxURLZoneID(b.Index), rendered)
 	}
 
 	// Deployment line

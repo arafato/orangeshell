@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -801,6 +803,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case uiwrangler.ActionMsg:
 		return m, m.startWranglerCmd(msg.Action, msg.EnvName)
 
+	case uiwrangler.OpenURLMsg:
+		return m, openURL(msg.URL)
+
 	case uiwrangler.VersionsFetchedMsg:
 		if msg.Err != nil {
 			// Show error and close picker
@@ -1066,6 +1071,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		// Reset hover state on every mouse event — re-set below if still hovering.
 		m.hoverTab = -1
+		m.header.SetHoverIdx(-1)
 
 		switch msg.Action {
 		case tea.MouseActionMotion:
@@ -1073,6 +1079,13 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, t := range tabbar.All() {
 				if z := zone.Get(t.ZoneID()); z != nil && z.InBounds(msg) {
 					m.hoverTab = t
+					break
+				}
+			}
+			// Track hover over header account tabs.
+			for i := 0; i < m.header.AccountCount(); i++ {
+				if z := zone.Get(header.AccountZoneID(i)); z != nil && z.InBounds(msg) {
+					m.header.SetHoverIdx(i)
 					break
 				}
 			}
@@ -1088,10 +1101,26 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 				}
+				// Check header account tab clicks.
+				for i := 0; i < m.header.AccountCount(); i++ {
+					if z := zone.Get(header.AccountZoneID(i)); z != nil && z.InBounds(msg) {
+						if m.header.SetActiveIndex(i) {
+							return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
+						}
+						return m, nil
+					}
+				}
 			}
 		}
 
-		// Forward mouse events to the detail panel when it's visible (for copy-on-click)
+		// Forward mouse events to the wrangler on Operations tab (project box clicks)
+		if m.activeTab == tabbar.TabOperations && m.viewState == ViewWrangler {
+			var cmd tea.Cmd
+			m.wrangler, cmd = m.wrangler.Update(msg)
+			return m, cmd
+		}
+
+		// Forward mouse events to the detail panel when it's visible (for copy-on-click + list clicks)
 		if m.activeTab == tabbar.TabResources ||
 			(m.activeTab == tabbar.TabConfiguration && m.viewState == ViewServiceList) ||
 			(m.activeTab == tabbar.TabOperations && (m.viewState == ViewServiceList || m.viewState == ViewServiceDetail)) {
@@ -1401,4 +1430,23 @@ func (m *Model) layout() {
 	m.monitoring.SetSize(contentWidth, contentHeight)
 	// Detail content starts after: header(1) + tab bar(3) + top border(1) = 5 rows from top of terminal
 	m.detail.SetYOffset(headerHeight + tabBarHeight + 1)
+}
+
+// openURL opens a URL in the user's default browser.
+func openURL(url string) tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.Command("open", url)
+		case "linux":
+			cmd = exec.Command("xdg-open", url)
+		case "windows":
+			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		default:
+			return nil
+		}
+		_ = cmd.Start()
+		return nil
+	}
 }

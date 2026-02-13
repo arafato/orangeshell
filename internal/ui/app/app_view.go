@@ -10,6 +10,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	svc "github.com/oarafat/orangeshell/internal/service"
+	"github.com/oarafat/orangeshell/internal/ui/monitoring"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 	"github.com/oarafat/orangeshell/version"
@@ -377,25 +378,43 @@ func (m Model) renderConfigurationHelp() []helpEntry {
 
 // renderMonitoringHelp returns the context-sensitive help entries for the Monitoring tab.
 func (m Model) renderMonitoringHelp() []helpEntry {
-	if m.monitoring.IsParallelTailActive() {
+	if !m.monitoring.HasWorkerTree() && m.monitoring.GridPaneCount() == 0 {
+		// No workers available — show generic help
 		return []helpEntry{
-			{"esc", "stop"},
-			{"j/k", "scroll"},
+			{"ctrl+l", "resources"},
+			{"ctrl+k", "search"},
+			{"[/]", "accounts"},
+			{"q", "quit"},
+		}
+	}
+
+	switch m.monitoring.Focus() {
+	case monitoring.FocusLeft:
+		entries := []helpEntry{
+			{"j/k", "navigate"},
+			{"a", "add"},
+			{"d", "remove"},
+			{"tab", "grid"},
+			{"esc", "back"},
+		}
+		entries = append(entries, helpEntry{"ctrl+h", "home"})
+		return entries
+	case monitoring.FocusRight:
+		if m.monitoring.GridPaneCount() == 0 {
+			return []helpEntry{
+				{"tab", "workers"},
+				{"esc", "back"},
+				{"ctrl+h", "home"},
+			}
+		}
+		return []helpEntry{
+			{"h/j/k/l", "navigate"},
+			{"t", "toggle"},
+			{"ctrl+t", "toggle all"},
+			{"tab", "workers"},
+			{"esc", "back"},
 			{"ctrl+h", "home"},
 		}
 	}
-	if m.monitoring.SingleTailActive() || m.monitoring.SingleTailStarting() {
-		return []helpEntry{
-			{"t", "stop tail"},
-			{"j/k", "scroll"},
-			{"ctrl+h", "home"},
-		}
-	}
-	// Idle state
-	return []helpEntry{
-		{"ctrl+l", "resources"},
-		{"ctrl+k", "search"},
-		{"[/]", "accounts"},
-		{"q", "quit"},
-	}
+	return nil
 }

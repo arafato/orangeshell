@@ -640,6 +640,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Wrangler messages
 	case uiwrangler.ConfigLoadedMsg:
 		m.wrangler.SetConfig(msg.Config, msg.Path, msg.Err)
+		// Refresh the monitoring worker tree in case we're on the Monitoring tab
+		m.refreshMonitoringWorkerTree()
 		// Trigger deployment fetching for single-project environments
 		if msg.Err == nil && msg.Config != nil {
 			return m, m.fetchSingleProjectDeployments(msg.Config)
@@ -671,6 +673,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case uiwrangler.ProjectsDiscoveredMsg:
 		m.wrangler.SetProjects(msg.Projects, msg.RootName, msg.RootDir)
+		// Refresh the monitoring worker tree
+		m.refreshMonitoringWorkerTree()
 		// Trigger deployment fetching for all projects
 		return m, m.fetchAllProjectDeployments()
 
@@ -783,6 +787,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case monitoring.ParallelTailStopMsg:
 		m.stopAllParallelTails()
+		return m, nil
+
+	// New monitoring dual-pane messages
+	case monitoring.TailAddMsg:
+		// User pressed 'a' on a worker in the tree — add to grid and start tail
+		if m.client == nil {
+			return m, nil
+		}
+		m.monitoring.AddToGrid(msg.ScriptName, "")
+		m.parallelTailActive = true
+		accountID := m.registry.ActiveAccountID()
+		return m, m.startGridTailCmd(accountID, msg.ScriptName)
+
+	case monitoring.TailRemoveMsg:
+		// User pressed 'd' on a worker in the tree — stop tail and remove from grid
+		m.stopGridTail(msg.ScriptName)
+		m.monitoring.RemoveFromGrid(msg.ScriptName)
+		return m, nil
+
+	case monitoring.TailToggleMsg:
+		if m.client == nil {
+			return m, nil
+		}
+		if msg.Start {
+			// Restart the tail for this pane
+			m.parallelTailActive = true
+			accountID := m.registry.ActiveAccountID()
+			return m, m.startGridTailCmd(accountID, msg.ScriptName)
+		}
+		// Stop the tail for this pane (but keep in grid)
+		m.stopGridTail(msg.ScriptName)
+		m.monitoring.GridSetStopped(msg.ScriptName)
+		return m, nil
+
+	case monitoring.TailToggleAllMsg:
+		if m.client == nil {
+			return m, nil
+		}
+		if msg.Start {
+			// Start tails for all stopped grid panes
+			m.parallelTailActive = true
+			accountID := m.registry.ActiveAccountID()
+			var cmds []tea.Cmd
+			for _, script := range m.monitoring.AllGridPaneScripts() {
+				if !m.hasGridTailSession(script) {
+					cmds = append(cmds, m.startGridTailCmd(accountID, script))
+				}
+			}
+			if len(cmds) > 0 {
+				return m, tea.Batch(cmds...)
+			}
+			return m, nil
+		}
+		// Stop all grid tails
+		m.stopAllGridTails()
 		return m, nil
 
 	case uiwrangler.LoadConfigPathMsg:
@@ -1277,23 +1336,17 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "esc":
-			// Esc on the Monitoring tab
+			// Esc on the Monitoring tab — dual-pane navigation
 			if m.activeTab == tabbar.TabMonitoring {
-				mode := m.monitoring.CurrentMode()
-				if mode == monitoring.ModeIdle {
-					// Idle: go back to Operations
-					m.activeTab = tabbar.TabOperations
-					m.viewState = ViewWrangler
+				if m.monitoring.Focus() == monitoring.FocusRight {
+					// Right pane focused → switch to left pane
+					m.monitoring.SetFocusLeft()
 					return m, nil
 				}
-				if mode == monitoring.ModeSingle && !m.monitoring.SingleTailActive() && !m.monitoring.SingleTailStarting() {
-					// Single tail stopped: clear and go back to Operations
-					m.monitoring.ClearSingleTail()
-					m.activeTab = tabbar.TabOperations
-					m.viewState = ViewWrangler
-					return m, nil
-				}
-				// Active tail: let monitoring model handle esc (falls through to routing)
+				// Left pane focused → go back to Operations tab
+				m.activeTab = tabbar.TabOperations
+				m.viewState = ViewWrangler
+				return m, nil
 			}
 
 			// Esc at the app level handles view-state navigation back
@@ -1404,8 +1457,60 @@ func (m *Model) ensureViewStateForTab() {
 		// Env vars, triggers, and service list (project picker) are valid.
 		// Anything else (e.g. ViewServiceDetail, ViewWrangler) shows placeholder.
 	case tabbar.TabMonitoring:
-		// Placeholder tab — viewState doesn't matter for rendering.
+		// Rebuild the worker tree from wrangler data so the left pane is up to date.
+		m.refreshMonitoringWorkerTree()
 	}
+}
+
+// refreshMonitoringWorkerTree builds the worker tree from wrangler data and
+// passes it to the monitoring model. Called when switching to the Monitoring tab
+// or when wrangler config changes.
+func (m *Model) refreshMonitoringWorkerTree() {
+	workers := m.wrangler.WorkerList()
+	if len(workers) == 0 {
+		m.monitoring.SetWorkerTree(nil)
+		return
+	}
+
+	var tree []monitoring.WorkerTreeEntry
+
+	// Group workers by project name, preserving order from WorkerList()
+	type projectGroup struct {
+		name    string
+		workers []uiwrangler.WorkerInfo
+	}
+	var groups []projectGroup
+	groupIdx := make(map[string]int)
+
+	for _, w := range workers {
+		if idx, ok := groupIdx[w.ProjectName]; ok {
+			groups[idx].workers = append(groups[idx].workers, w)
+		} else {
+			groupIdx[w.ProjectName] = len(groups)
+			groups = append(groups, projectGroup{
+				name:    w.ProjectName,
+				workers: []uiwrangler.WorkerInfo{w},
+			})
+		}
+	}
+
+	for _, g := range groups {
+		// Project header
+		tree = append(tree, monitoring.WorkerTreeEntry{
+			ProjectName: g.name,
+			IsHeader:    true,
+		})
+		// Workers under this project
+		for _, w := range g.workers {
+			tree = append(tree, monitoring.WorkerTreeEntry{
+				ProjectName: w.ProjectName,
+				ScriptName:  w.ScriptName,
+				EnvName:     w.EnvName,
+			})
+		}
+	}
+
+	m.monitoring.SetWorkerTree(tree)
 }
 
 // layout recalculates component sizes based on terminal dimensions.

@@ -112,3 +112,60 @@ func (m *Model) stopAllParallelTails() {
 		}()
 	}
 }
+
+// --- Grid tail lifecycle helpers (for dual-pane monitoring) ---
+
+// startGridTailCmd returns a command that creates a tail session for a grid pane.
+// Reuses the same message types as parallel tail so existing handlers route data correctly.
+func (m Model) startGridTailCmd(accountID, scriptName string) tea.Cmd {
+	return m.startParallelTailSessionCmd(accountID, scriptName)
+}
+
+// hasGridTailSession returns whether an active tail session exists for the given script.
+func (m Model) hasGridTailSession(scriptName string) bool {
+	for _, s := range m.parallelTailSessions {
+		if s.ScriptName == scriptName {
+			return true
+		}
+	}
+	return false
+}
+
+// stopGridTail stops the tail session for a specific script name and removes it
+// from the session slice. Does not modify the monitoring model's grid state.
+func (m *Model) stopGridTail(scriptName string) {
+	client := m.client
+	for i, s := range m.parallelTailSessions {
+		if s.ScriptName == scriptName {
+			session := s
+			m.parallelTailSessions = append(m.parallelTailSessions[:i], m.parallelTailSessions[i+1:]...)
+			go func() {
+				ctx := context.Background()
+				svc.StopTail(ctx, client.CF, session)
+			}()
+			return
+		}
+	}
+}
+
+// stopAllGridTails stops all grid tail sessions and marks all panes as stopped.
+func (m *Model) stopAllGridTails() {
+	sessions := m.parallelTailSessions
+	client := m.client
+	m.parallelTailSessions = nil
+	m.parallelTailActive = false
+
+	// Mark all grid panes as stopped
+	for _, script := range m.monitoring.AllGridPaneScripts() {
+		m.monitoring.GridSetStopped(script)
+	}
+
+	if len(sessions) > 0 {
+		go func() {
+			ctx := context.Background()
+			for _, s := range sessions {
+				svc.StopTail(ctx, client.CF, s)
+			}
+		}()
+	}
+}

@@ -577,6 +577,56 @@ func (m *Model) StopDevServer() {
 	m.cmdPane.FinishWithMessage("Stopped", false)
 }
 
+// WorkerInfo describes a single worker resolved from a wrangler config.
+// Used by the Monitoring tab to build the worker tree.
+type WorkerInfo struct {
+	ProjectName string // wrangler project name (for grouping)
+	EnvName     string // environment name (e.g. "default", "staging")
+	ScriptName  string // resolved worker script name
+}
+
+// WorkerList returns a flat list of all known workers across all projects/environments.
+// In monorepo mode, it iterates all projects. In single-project mode, it uses the loaded config.
+func (m Model) WorkerList() []WorkerInfo {
+	if m.IsMonorepo() {
+		var workers []WorkerInfo
+		for _, p := range m.projects {
+			if p.config == nil {
+				continue
+			}
+			projectName := p.box.Name
+			for _, envName := range p.config.EnvNames() {
+				scriptName := p.config.ResolvedEnvName(envName)
+				if scriptName != "" {
+					workers = append(workers, WorkerInfo{
+						ProjectName: projectName,
+						EnvName:     envName,
+						ScriptName:  scriptName,
+					})
+				}
+			}
+		}
+		return workers
+	}
+	// Single project mode
+	if m.config == nil {
+		return nil
+	}
+	projectName := m.config.Name
+	var workers []WorkerInfo
+	for _, envName := range m.config.EnvNames() {
+		scriptName := m.config.ResolvedEnvName(envName)
+		if scriptName != "" {
+			workers = append(workers, WorkerInfo{
+				ProjectName: projectName,
+				EnvName:     envName,
+				ScriptName:  scriptName,
+			})
+		}
+	}
+	return workers
+}
+
 // AllEnvNames returns the union of env names across all monorepo projects.
 // Returns nil in single-project mode.
 func (m Model) AllEnvNames() []string {

@@ -1,5 +1,5 @@
-// Package monitoring implements the Monitoring tab — a dedicated view for
-// Workers live log tailing (single-worker and parallel/monorepo multi-worker).
+// Package monitoring implements the Monitoring tab — a dual-pane view with a
+// worker tree browser on the left (~20%) and a live tail grid on the right (~80%).
 package monitoring
 
 import (
@@ -15,71 +15,123 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
 
-// Mode describes whether we're in single-worker or parallel (multi-worker) tail mode.
-type Mode int
+// --- Constants ---
 
 const (
-	ModeIdle     Mode = iota // No active tail
-	ModeSingle               // Tailing one worker
-	ModeParallel             // Tailing multiple workers (monorepo)
+	gridMaxLines   = 200 // max log lines retained per grid pane
+	gridMinPaneH   = 6   // minimum grid pane height
+	gridCols       = 2   // fixed number of columns in the tail grid
+	leftPaneRatio  = 20  // left pane gets ~20% of width
+	rightPaneRatio = 80  // right pane gets ~80% of width
 )
 
+// --- Focus ---
+
+// FocusPane identifies which pane has keyboard focus.
+type FocusPane int
+
 const (
-	singleTailMaxLines   = 500
-	parallelTailMaxLines = 200
-	parallelTailMinPaneH = 6
-	parallelTailCols     = 2
+	FocusLeft  FocusPane = iota // Worker tree browser
+	FocusRight                  // Live tail grid
 )
 
 // --- Messages emitted by the monitoring model ---
 
-// TailStopMsg requests the app to stop the active tail session.
+// TailAddMsg requests the app to start tailing a worker and add it to the grid.
+type TailAddMsg struct {
+	ScriptName string
+}
+
+// TailRemoveMsg requests the app to stop tailing a worker and remove it from the grid.
+type TailRemoveMsg struct {
+	ScriptName string
+}
+
+// TailToggleMsg requests the app to toggle tailing for a specific grid pane.
+type TailToggleMsg struct {
+	ScriptName string
+	Start      bool // true = start, false = stop
+}
+
+// TailToggleAllMsg requests the app to toggle all grid panes on or off.
+type TailToggleAllMsg struct {
+	Start bool // true = start all, false = stop all
+}
+
+// TailStopMsg requests the app to stop the active single tail session (backward compat).
 type TailStopMsg struct{}
 
-// ParallelTailStopMsg requests the app to stop all parallel tail sessions.
+// ParallelTailStopMsg requests the app to stop all parallel tail sessions (backward compat).
 type ParallelTailStopMsg struct{}
 
-// TailPane holds per-worker tail state in the parallel tail grid.
+// --- Worker tree ---
+
+// WorkerTreeEntry represents a single item in the left-pane worker tree.
+type WorkerTreeEntry struct {
+	ProjectName string // wrangler project name (e.g. "express-d1-app")
+	ScriptName  string // resolved worker name (empty for headers)
+	EnvName     string // environment name (e.g. "default", "staging")
+	IsHeader    bool   // true for project group headers (non-selectable)
+}
+
+// --- Tail pane (grid) ---
+
+// TailPane holds per-worker tail state in the live grid.
 type TailPane struct {
 	ScriptName string
 	URL        string
 	Lines      []svc.TailLine
 	Connecting bool
 	Connected  bool
+	Active     bool // true if tail is running (or starting)
 	Error      string
 	SessionID  string
 }
 
 func (p *TailPane) appendLines(lines []svc.TailLine) {
 	p.Lines = append(p.Lines, lines...)
-	if len(p.Lines) > parallelTailMaxLines {
-		p.Lines = p.Lines[len(p.Lines)-parallelTailMaxLines:]
+	if len(p.Lines) > gridMaxLines {
+		p.Lines = p.Lines[len(p.Lines)-gridMaxLines:]
 	}
 }
 
-// ParallelTailTarget identifies a worker to tail.
+// ParallelTailTarget identifies a worker to tail (used by app layer).
 type ParallelTailTarget struct {
 	ScriptName string
 	URL        string
 }
 
+// --- Backward-compat Mode type (still used by app layer queries) ---
+
+// Mode describes the monitoring state for external queries.
+type Mode int
+
+const (
+	ModeIdle     Mode = iota // No active tailing
+	ModeSingle               // Single worker being tailed (via grid)
+	ModeParallel             // Multiple workers being tailed (via grid)
+)
+
+// --- Model ---
+
 // Model holds all monitoring tab state.
 type Model struct {
-	mode Mode
+	// Worker tree (left pane)
+	workerTree  []WorkerTreeEntry
+	treeCursor  int // cursor position in workerTree (skips headers)
+	treeScrollY int // vertical scroll offset for tree
 
-	// Single-tail state
-	scriptName   string
-	tailLines    []svc.TailLine
-	tailActive   bool
-	tailStarting bool
-	tailError    string
-	scrollOffset int  // lines scrolled up from bottom (0 = pinned to bottom)
-	userScrolled bool // true if user has manually scrolled
+	// Live tail grid (right pane)
+	gridPanes   []TailPane
+	gridCursor  int // which pane is focused (index into gridPanes)
+	gridScrollY int // vertical scroll offset for grid rows
 
-	// Parallel-tail state
-	envName         string
-	panes           []TailPane
-	parallelScrollY int
+	// Focus
+	focusPane FocusPane
+
+	// Legacy single-tail state (for backward compat with t-from-Operations)
+	singleScript string // script name if started via StartSingleTail
+	singleActive bool   // true if the single tail was started (not from tree)
 
 	// Dimensions
 	width  int
@@ -97,195 +149,333 @@ func (m *Model) SetSize(w, h int) {
 	m.height = h
 }
 
-// Mode returns the current monitoring mode.
-func (m Model) CurrentMode() Mode {
-	return m.mode
+// --- Worker tree API ---
+
+// SetWorkerTree sets the worker tree data for the left pane.
+// Called by the app layer when switching to the Monitoring tab.
+func (m *Model) SetWorkerTree(tree []WorkerTreeEntry) {
+	m.workerTree = tree
+	// Reset cursor if out of range
+	if m.treeCursor >= len(tree) {
+		m.treeCursor = 0
+	}
+	// Ensure cursor is on a selectable item (not a header)
+	m.advanceCursorToSelectable(1)
 }
 
-// IsActive returns whether any tail session is active or starting.
-func (m Model) IsActive() bool {
-	return m.mode != ModeIdle
+// HasWorkerTree returns true if a worker tree is populated.
+func (m Model) HasWorkerTree() bool {
+	return len(m.workerTree) > 0
 }
 
-// --- Single-tail API ---
+// Focus returns which pane currently has keyboard focus.
+func (m Model) Focus() FocusPane {
+	return m.focusPane
+}
 
-// StartSingleTail initializes the model for tailing a single worker.
+// SetFocusLeft switches keyboard focus to the left (worker tree) pane.
+func (m *Model) SetFocusLeft() {
+	m.focusPane = FocusLeft
+}
+
+// --- Grid API (called by app layer to route tail data) ---
+
+// AddToGrid adds a worker to the tail grid. Does not start a session — that's
+// signaled back to the app via TailAddMsg from Update().
+func (m *Model) AddToGrid(scriptName, url string) {
+	// Check if already in grid
+	for _, p := range m.gridPanes {
+		if p.ScriptName == scriptName {
+			return
+		}
+	}
+	m.gridPanes = append(m.gridPanes, TailPane{
+		ScriptName: scriptName,
+		URL:        url,
+		Connecting: true,
+		Active:     true,
+	})
+}
+
+// RemoveFromGrid removes a worker from the tail grid.
+func (m *Model) RemoveFromGrid(scriptName string) {
+	for i, p := range m.gridPanes {
+		if p.ScriptName == scriptName {
+			m.gridPanes = append(m.gridPanes[:i], m.gridPanes[i+1:]...)
+			// Adjust grid cursor
+			if m.gridCursor >= len(m.gridPanes) {
+				m.gridCursor = len(m.gridPanes) - 1
+			}
+			if m.gridCursor < 0 {
+				m.gridCursor = 0
+			}
+			return
+		}
+	}
+}
+
+// IsInGrid returns whether a script is in the live grid.
+func (m Model) IsInGrid(scriptName string) bool {
+	for _, p := range m.gridPanes {
+		if p.ScriptName == scriptName {
+			return true
+		}
+	}
+	return false
+}
+
+// GridSetConnected marks a grid pane as connected.
+func (m *Model) GridSetConnected(scriptName string) {
+	for i := range m.gridPanes {
+		if m.gridPanes[i].ScriptName == scriptName {
+			m.gridPanes[i].Connecting = false
+			m.gridPanes[i].Connected = true
+			m.gridPanes[i].Active = true
+			return
+		}
+	}
+}
+
+// GridSetSessionID records the tail session ID for a grid pane.
+func (m *Model) GridSetSessionID(scriptName, sessionID string) {
+	for i := range m.gridPanes {
+		if m.gridPanes[i].ScriptName == scriptName {
+			m.gridPanes[i].SessionID = sessionID
+			return
+		}
+	}
+}
+
+// GridAppendLines routes lines to the correct grid pane.
+func (m *Model) GridAppendLines(scriptName string, lines []svc.TailLine) {
+	for i := range m.gridPanes {
+		if m.gridPanes[i].ScriptName == scriptName {
+			m.gridPanes[i].appendLines(lines)
+			return
+		}
+	}
+}
+
+// GridSetError marks a grid pane as errored.
+func (m *Model) GridSetError(scriptName string, err error) {
+	for i := range m.gridPanes {
+		if m.gridPanes[i].ScriptName == scriptName {
+			m.gridPanes[i].Connecting = false
+			m.gridPanes[i].Error = err.Error()
+			return
+		}
+	}
+}
+
+// GridSetStopped marks a grid pane as stopped (but keeps it in the grid).
+func (m *Model) GridSetStopped(scriptName string) {
+	for i := range m.gridPanes {
+		if m.gridPanes[i].ScriptName == scriptName {
+			m.gridPanes[i].Active = false
+			m.gridPanes[i].Connected = false
+			m.gridPanes[i].Connecting = false
+			return
+		}
+	}
+}
+
+// GridPaneCount returns the number of panes in the grid.
+func (m Model) GridPaneCount() int {
+	return len(m.gridPanes)
+}
+
+// GridPaneScripts returns the script names of all active grid panes.
+func (m Model) GridPaneScripts() []string {
+	var names []string
+	for _, p := range m.gridPanes {
+		if p.Active {
+			names = append(names, p.ScriptName)
+		}
+	}
+	return names
+}
+
+// AllGridPaneScripts returns the script names of all grid panes (active or not).
+func (m Model) AllGridPaneScripts() []string {
+	var names []string
+	for _, p := range m.gridPanes {
+		names = append(names, p.ScriptName)
+	}
+	return names
+}
+
+// --- Backward-compat API (used by app layer) ---
+
+// StartSingleTail adds a worker to the grid and focuses it (backward compat).
+// Called when the user presses t on a worker from Operations/Resources tab.
 func (m *Model) StartSingleTail(scriptName string) {
-	m.mode = ModeSingle
-	m.scriptName = scriptName
-	m.tailLines = nil
-	m.tailActive = false
-	m.tailStarting = true
-	m.tailError = ""
-	m.scrollOffset = 0
-	m.userScrolled = false
+	m.singleScript = scriptName
+	m.singleActive = true
+	m.AddToGrid(scriptName, "")
+	m.focusPane = FocusRight
+	// Focus the newly added pane
+	for i, p := range m.gridPanes {
+		if p.ScriptName == scriptName {
+			m.gridCursor = i
+			break
+		}
+	}
 }
 
-// SetTailConnected marks the single tail as connected.
+// SetTailConnected marks the single tail as connected (routes to grid).
 func (m *Model) SetTailConnected() {
-	m.tailStarting = false
-	m.tailActive = true
-	m.tailLines = nil
-	m.scrollOffset = 0
-	m.tailError = ""
+	if m.singleScript != "" {
+		m.GridSetConnected(m.singleScript)
+	}
 }
 
-// AppendTailLines adds lines to the single-tail buffer.
+// AppendTailLines adds lines to the single-tail buffer (routes to grid).
 func (m *Model) AppendTailLines(lines []svc.TailLine) {
-	m.tailLines = append(m.tailLines, lines...)
-	if len(m.tailLines) > singleTailMaxLines {
-		m.tailLines = m.tailLines[len(m.tailLines)-singleTailMaxLines:]
-	}
-	if !m.userScrolled {
-		m.scrollOffset = 0
+	if m.singleScript != "" {
+		m.GridAppendLines(m.singleScript, lines)
 	}
 }
 
-// SetTailError records a tail error.
+// SetTailError records a tail error (routes to grid).
 func (m *Model) SetTailError(err error) {
-	m.tailStarting = false
-	m.tailError = err.Error()
+	if m.singleScript != "" {
+		m.GridSetError(m.singleScript, err)
+	}
 }
 
-// SetTailStopped marks the single tail as stopped (but keeps mode so we show the last lines).
+// SetTailStopped marks the single tail as stopped.
 func (m *Model) SetTailStopped() {
-	m.tailActive = false
-	m.tailStarting = false
-	m.scrollOffset = 0
+	if m.singleScript != "" {
+		m.GridSetStopped(m.singleScript)
+	}
+	m.singleActive = false
 }
 
-// ClearSingleTail resets all single-tail state and returns to idle.
+// ClearSingleTail resets single-tail state.
 func (m *Model) ClearSingleTail() {
-	m.mode = ModeIdle
-	m.scriptName = ""
-	m.tailLines = nil
-	m.tailActive = false
-	m.tailStarting = false
-	m.tailError = ""
-	m.scrollOffset = 0
-	m.userScrolled = false
+	if m.singleScript != "" {
+		m.RemoveFromGrid(m.singleScript)
+	}
+	m.singleScript = ""
+	m.singleActive = false
 }
 
 // SingleTailActive returns whether a single tail is actively connected.
 func (m Model) SingleTailActive() bool {
-	return m.mode == ModeSingle && m.tailActive
+	if m.singleScript == "" {
+		return false
+	}
+	for _, p := range m.gridPanes {
+		if p.ScriptName == m.singleScript {
+			return p.Connected && p.Active
+		}
+	}
+	return false
 }
 
 // SingleTailStarting returns whether a single tail is waiting for connection.
 func (m Model) SingleTailStarting() bool {
-	return m.mode == ModeSingle && m.tailStarting
+	if m.singleScript == "" {
+		return false
+	}
+	for _, p := range m.gridPanes {
+		if p.ScriptName == m.singleScript {
+			return p.Connecting
+		}
+	}
+	return false
 }
 
-// ScriptName returns the script being tailed (single mode).
+// ScriptName returns the script being tailed (single mode, backward compat).
 func (m Model) ScriptName() string {
-	return m.scriptName
+	return m.singleScript
 }
 
-// --- Parallel-tail API ---
+// CurrentMode returns the monitoring mode for external queries (backward compat).
+func (m Model) CurrentMode() Mode {
+	if len(m.gridPanes) == 0 {
+		return ModeIdle
+	}
+	if len(m.gridPanes) == 1 && m.singleActive {
+		return ModeSingle
+	}
+	return ModeParallel
+}
 
-// StartParallelTail initializes the model for parallel multi-worker tailing.
+// IsActive returns whether any tail session is active or a grid is populated.
+func (m Model) IsActive() bool {
+	return len(m.gridPanes) > 0
+}
+
+// IsParallelTailActive returns whether the grid has multiple active panes.
+func (m Model) IsParallelTailActive() bool {
+	return len(m.gridPanes) > 1
+}
+
+// --- Backward-compat parallel API (routes to grid) ---
+
+// StartParallelTail initializes the grid for parallel multi-worker tailing.
 func (m *Model) StartParallelTail(envName string, targets []ParallelTailTarget) {
-	m.mode = ModeParallel
-	m.envName = envName
-	m.panes = make([]TailPane, len(targets))
+	m.gridPanes = make([]TailPane, len(targets))
 	for i, t := range targets {
-		m.panes[i] = TailPane{
+		m.gridPanes[i] = TailPane{
 			ScriptName: t.ScriptName,
 			URL:        t.URL,
 			Connecting: true,
+			Active:     true,
 		}
 	}
-	m.parallelScrollY = 0
-	// Clear single-tail state
-	m.scriptName = ""
-	m.tailLines = nil
-	m.tailActive = false
-	m.tailStarting = false
-	m.tailError = ""
-	m.scrollOffset = 0
-	m.userScrolled = false
+	m.gridCursor = 0
+	m.gridScrollY = 0
+	m.focusPane = FocusRight
+	m.singleScript = ""
+	m.singleActive = false
 }
 
-// StopParallelTail clears all parallel tail state and returns to idle.
+// StopParallelTail clears all grid panes.
 func (m *Model) StopParallelTail() {
-	m.mode = ModeIdle
-	m.panes = nil
-	m.envName = ""
-	m.parallelScrollY = 0
+	m.gridPanes = nil
+	m.gridCursor = 0
+	m.gridScrollY = 0
 }
 
-// IsParallelTailActive returns whether parallel tailing is active.
-func (m Model) IsParallelTailActive() bool {
-	return m.mode == ModeParallel
-}
-
-// ParallelTailAppendLines routes lines to the correct pane.
+// ParallelTailAppendLines routes lines to the correct grid pane.
 func (m *Model) ParallelTailAppendLines(scriptName string, lines []svc.TailLine) {
-	for i := range m.panes {
-		if m.panes[i].ScriptName == scriptName {
-			m.panes[i].appendLines(lines)
-			return
-		}
-	}
+	m.GridAppendLines(scriptName, lines)
 }
 
-// ParallelTailSetConnected marks a pane as connected.
+// ParallelTailSetConnected marks a grid pane as connected.
 func (m *Model) ParallelTailSetConnected(scriptName string) {
-	for i := range m.panes {
-		if m.panes[i].ScriptName == scriptName {
-			m.panes[i].Connecting = false
-			m.panes[i].Connected = true
-			return
-		}
-	}
+	m.GridSetConnected(scriptName)
 }
 
-// ParallelTailSetError marks a pane as errored.
+// ParallelTailSetError marks a grid pane as errored.
 func (m *Model) ParallelTailSetError(scriptName string, err error) {
-	for i := range m.panes {
-		if m.panes[i].ScriptName == scriptName {
-			m.panes[i].Connecting = false
-			m.panes[i].Error = err.Error()
-			return
-		}
-	}
+	m.GridSetError(scriptName, err)
 }
 
-// ParallelTailSetSessionID records the tail session ID for a pane.
+// ParallelTailSetSessionID records the tail session ID for a grid pane.
 func (m *Model) ParallelTailSetSessionID(scriptName, sessionID string) {
-	for i := range m.panes {
-		if m.panes[i].ScriptName == scriptName {
-			m.panes[i].SessionID = sessionID
-			return
-		}
-	}
+	m.GridSetSessionID(scriptName, sessionID)
 }
 
-// EnvName returns the environment being tailed (parallel mode).
-func (m Model) EnvName() string {
-	return m.envName
-}
+// EnvName returns the environment being tailed (backward compat).
+func (m Model) EnvName() string { return "" }
 
-// PaneCount returns the number of parallel panes.
-func (m Model) PaneCount() int {
-	return len(m.panes)
-}
+// PaneCount returns the number of grid panes (backward compat).
+func (m Model) PaneCount() int { return len(m.gridPanes) }
 
-// --- Clear all ---
+// --- Clear ---
 
-// Clear resets the entire monitoring model to idle.
+// Clear resets the entire monitoring model.
 func (m *Model) Clear() {
-	m.mode = ModeIdle
-	m.scriptName = ""
-	m.tailLines = nil
-	m.tailActive = false
-	m.tailStarting = false
-	m.tailError = ""
-	m.scrollOffset = 0
-	m.userScrolled = false
-	m.envName = ""
-	m.panes = nil
-	m.parallelScrollY = 0
+	m.gridPanes = nil
+	m.gridCursor = 0
+	m.gridScrollY = 0
+	m.singleScript = ""
+	m.singleActive = false
+	m.focusPane = FocusLeft
+	// Preserve workerTree — it's rebuilt on tab switch
 }
 
 // --- Update ---
@@ -294,108 +484,211 @@ func (m *Model) Clear() {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch m.mode {
-		case ModeSingle:
-			return m.updateSingle(msg)
-		case ModeParallel:
-			return m.updateParallel(msg)
+		// Tab switches focus between panes
+		if msg.String() == "tab" {
+			if m.focusPane == FocusLeft {
+				m.focusPane = FocusRight
+			} else {
+				m.focusPane = FocusLeft
+			}
+			return m, nil
+		}
+
+		switch m.focusPane {
+		case FocusLeft:
+			return m.updateLeftPane(msg)
+		case FocusRight:
+			return m.updateRightPane(msg)
 		}
 	}
 	return m, nil
 }
 
-func (m Model) updateSingle(msg tea.KeyMsg) (Model, tea.Cmd) {
+func (m Model) updateLeftPane(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
+	case "j", "down":
+		m.moveCursorDown()
+	case "k", "up":
+		m.moveCursorUp()
+	case "a":
+		// Add focused worker to the grid and start tailing
+		if m.treeCursor >= 0 && m.treeCursor < len(m.workerTree) {
+			entry := m.workerTree[m.treeCursor]
+			if !entry.IsHeader && entry.ScriptName != "" && !m.IsInGrid(entry.ScriptName) {
+				return m, func() tea.Msg {
+					return TailAddMsg{ScriptName: entry.ScriptName}
+				}
+			}
+		}
+	case "d":
+		// Remove focused worker from the grid and stop tailing
+		if m.treeCursor >= 0 && m.treeCursor < len(m.workerTree) {
+			entry := m.workerTree[m.treeCursor]
+			if !entry.IsHeader && entry.ScriptName != "" && m.IsInGrid(entry.ScriptName) {
+				return m, func() tea.Msg {
+					return TailRemoveMsg{ScriptName: entry.ScriptName}
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateRightPane(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if len(m.gridPanes) == 0 {
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "j", "down":
+		// Move grid cursor down (next row)
+		next := m.gridCursor + gridCols
+		if next < len(m.gridPanes) {
+			m.gridCursor = next
+			m.adjustGridScroll()
+		}
+	case "k", "up":
+		// Move grid cursor up (prev row)
+		prev := m.gridCursor - gridCols
+		if prev >= 0 {
+			m.gridCursor = prev
+			m.adjustGridScroll()
+		}
+	case "h", "left":
+		if m.gridCursor > 0 {
+			m.gridCursor--
+			m.adjustGridScroll()
+		}
+	case "l", "right":
+		if m.gridCursor < len(m.gridPanes)-1 {
+			m.gridCursor++
+			m.adjustGridScroll()
+		}
 	case "t":
-		if m.tailActive || m.tailStarting {
-			// Stop the tail
-			return m, func() tea.Msg { return TailStopMsg{} }
+		// Toggle tail for focused pane
+		pane := m.gridPanes[m.gridCursor]
+		return m, func() tea.Msg {
+			return TailToggleMsg{ScriptName: pane.ScriptName, Start: !pane.Active}
 		}
-	case "pgup":
-		m.scrollOffset += 10
-		max := len(m.tailLines)
-		if m.scrollOffset > max {
-			m.scrollOffset = max
+	case "ctrl+t":
+		// Toggle all panes: if any are active, stop all; otherwise start all
+		anyActive := false
+		for _, p := range m.gridPanes {
+			if p.Active {
+				anyActive = true
+				break
+			}
 		}
-		m.userScrolled = true
-	case "pgdown":
-		m.scrollOffset -= 10
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
-		}
-		if m.scrollOffset == 0 {
-			m.userScrolled = false
-		}
-	case "end":
-		m.scrollOffset = 0
-		m.userScrolled = false
-	case "j", "down":
-		m.scrollOffset -= 1
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
-		}
-		if m.scrollOffset == 0 {
-			m.userScrolled = false
-		}
-	case "k", "up":
-		m.scrollOffset += 1
-		max := len(m.tailLines)
-		if m.scrollOffset > max {
-			m.scrollOffset = max
-		}
-		m.userScrolled = true
-	}
-	return m, nil
-}
-
-func (m Model) updateParallel(msg tea.KeyMsg) (Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		return m, func() tea.Msg { return ParallelTailStopMsg{} }
-	case "j", "down":
-		totalRows := m.totalRows()
-		if m.parallelScrollY < totalRows-1 {
-			m.parallelScrollY++
-		}
-	case "k", "up":
-		if m.parallelScrollY > 0 {
-			m.parallelScrollY--
-		}
-	case "g", "home":
-		m.parallelScrollY = 0
-	case "G", "end":
-		totalRows := m.totalRows()
-		if totalRows > 0 {
-			m.parallelScrollY = totalRows - 1
+		return m, func() tea.Msg {
+			return TailToggleAllMsg{Start: !anyActive}
 		}
 	}
 	return m, nil
 }
 
-func (m Model) totalRows() int {
-	return int(math.Ceil(float64(len(m.panes)) / float64(parallelTailCols)))
+// --- Cursor helpers ---
+
+func (m *Model) moveCursorDown() {
+	for i := m.treeCursor + 1; i < len(m.workerTree); i++ {
+		if !m.workerTree[i].IsHeader {
+			m.treeCursor = i
+			m.adjustTreeScroll()
+			return
+		}
+	}
+}
+
+func (m *Model) moveCursorUp() {
+	for i := m.treeCursor - 1; i >= 0; i-- {
+		if !m.workerTree[i].IsHeader {
+			m.treeCursor = i
+			m.adjustTreeScroll()
+			return
+		}
+	}
+}
+
+func (m *Model) advanceCursorToSelectable(direction int) {
+	if len(m.workerTree) == 0 {
+		return
+	}
+	if m.treeCursor < 0 {
+		m.treeCursor = 0
+	}
+	if m.treeCursor >= len(m.workerTree) {
+		m.treeCursor = len(m.workerTree) - 1
+	}
+	if !m.workerTree[m.treeCursor].IsHeader {
+		return
+	}
+	// Search in the given direction for a non-header
+	if direction >= 0 {
+		for i := m.treeCursor; i < len(m.workerTree); i++ {
+			if !m.workerTree[i].IsHeader {
+				m.treeCursor = i
+				return
+			}
+		}
+	}
+	for i := m.treeCursor; i >= 0; i-- {
+		if !m.workerTree[i].IsHeader {
+			m.treeCursor = i
+			return
+		}
+	}
+}
+
+func (m *Model) adjustTreeScroll() {
+	leftHeight := m.height - 2 // borders
+	if leftHeight < 1 {
+		leftHeight = 1
+	}
+	if m.treeCursor < m.treeScrollY {
+		m.treeScrollY = m.treeCursor
+	}
+	if m.treeCursor >= m.treeScrollY+leftHeight {
+		m.treeScrollY = m.treeCursor - leftHeight + 1
+	}
+}
+
+func (m *Model) adjustGridScroll() {
+	row := m.gridCursor / gridCols
+	gridHeight := m.height - 4
+	if gridHeight < gridMinPaneH {
+		gridHeight = gridMinPaneH
+	}
+	visibleRows := gridHeight / gridMinPaneH
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+	if row < m.gridScrollY {
+		m.gridScrollY = row
+	}
+	if row >= m.gridScrollY+visibleRows {
+		m.gridScrollY = row - visibleRows + 1
+	}
+}
+
+func (m Model) totalGridRows() int {
+	return int(math.Ceil(float64(len(m.gridPanes)) / float64(gridCols)))
 }
 
 // --- View ---
 
 // View renders the monitoring tab content.
 func (m Model) View() string {
-	switch m.mode {
-	case ModeSingle:
-		return m.viewSingle()
-	case ModeParallel:
-		return m.viewParallel()
-	default:
-		return m.viewIdle()
+	if !m.HasWorkerTree() && len(m.gridPanes) == 0 {
+		return m.viewEmpty()
 	}
+	return m.viewDualPane()
 }
 
-func (m Model) viewIdle() string {
+func (m Model) viewEmpty() string {
 	contentHeight := m.height
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
-	hint := theme.DimStyle.Render("  No active tail session. Press t on a Worker to start tailing.")
+	hint := theme.DimStyle.Render("  No workers available. Open a project in Operations first.")
 	lines := []string{"", hint}
 	for len(lines) < contentHeight {
 		lines = append(lines, "")
@@ -403,162 +696,157 @@ func (m Model) viewIdle() string {
 	return strings.Join(lines[:contentHeight], "\n")
 }
 
-func (m Model) viewSingle() string {
+func (m Model) viewDualPane() string {
+	if m.width < 20 || m.height < 3 {
+		return ""
+	}
+
+	leftWidth := m.width * leftPaneRatio / 100
+	if leftWidth < 12 {
+		leftWidth = 12
+	}
+	rightWidth := m.width - leftWidth - 1 // 1 for the vertical separator
+	if rightWidth < 10 {
+		rightWidth = 10
+	}
+
 	contentHeight := m.height
-	if contentHeight < 3 {
-		contentHeight = 3
-	}
-	boxWidth := m.width - 4
-	if boxWidth < 10 {
-		boxWidth = 10
-	}
-
-	// Title
-	var titleText string
-	if m.tailActive {
-		titleText = fmt.Sprintf("  \u25b8 Live Logs — %s", m.scriptName)
-	} else if m.tailStarting {
-		titleText = fmt.Sprintf("  Connecting to %s...", m.scriptName)
-	} else {
-		titleText = fmt.Sprintf("  \u25b9 %s (stopped)", m.scriptName)
-	}
-	title := theme.LogConsoleHeaderStyle.Render(titleText)
-
-	sepWidth := boxWidth - 2
-	if sepWidth < 0 {
-		sepWidth = 0
-	}
-	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
-		fmt.Sprintf(" %s", strings.Repeat("\u2500", sepWidth)))
-
-	// Help line
-	var helpText string
-	if m.tailActive || m.tailStarting {
-		helpText = theme.DimStyle.Render("  t stop tail  |  j/k scroll  |  pgup/pgdn page  |  end bottom")
-	} else {
-		helpText = theme.DimStyle.Render("  esc back to previous tab")
-	}
-
-	headerLines := []string{title, sep}
-	footerLines := []string{helpText}
-
-	// Content area
-	availableLines := contentHeight - len(headerLines) - len(footerLines)
-	if availableLines < 1 {
-		availableLines = 1
-	}
-
-	var contentLines []string
-
-	if m.tailError != "" {
-		errLine := theme.ErrorStyle.Render(fmt.Sprintf("  Error: %s", m.tailError))
-		contentLines = append(contentLines, errLine)
-	} else if m.tailStarting {
-		contentLines = append(contentLines, "  "+theme.DimStyle.Render("Waiting for connection..."))
-	} else if len(m.tailLines) == 0 {
-		contentLines = append(contentLines, "  "+theme.DimStyle.Render("Waiting for log events..."))
-	} else {
-		contentLines = m.renderTailLines(boxWidth)
-		contentLines = m.applyScroll(contentLines, availableLines)
-	}
-
-	// Pad content to fill space
-	for len(contentLines) < availableLines {
-		contentLines = append(contentLines, "")
-	}
-	if len(contentLines) > availableLines {
-		contentLines = contentLines[:availableLines]
-	}
-
-	var allLines []string
-	allLines = append(allLines, headerLines...)
-	allLines = append(allLines, contentLines...)
-	allLines = append(allLines, footerLines...)
-
-	// Apply black background to every line
-	return m.applyBackground(allLines, m.width)
-}
-
-func (m Model) renderTailLines(width int) []string {
-	var out []string
-	maxTextWidth := width - 14 // "  HH:MM:SS  " prefix
-	if maxTextWidth < 5 {
-		maxTextWidth = 5
-	}
-	for _, tl := range m.tailLines {
-		text := truncateStr(tl.Text, maxTextWidth)
-		ts := theme.LogTimestampStyle.Render(tl.Timestamp.Format(time.TimeOnly))
-		style := styleTailLevel(tl.Level)
-		out = append(out, fmt.Sprintf("  %s %s", ts, style.Render(text)))
-	}
-	return out
-}
-
-func (m Model) applyScroll(lines []string, viewHeight int) []string {
-	if len(lines) <= viewHeight {
-		return lines
-	}
-	end := len(lines) - m.scrollOffset
-	if end < viewHeight {
-		end = viewHeight
-	}
-	if end > len(lines) {
-		end = len(lines)
-	}
-	start := end - viewHeight
-	if start < 0 {
-		start = 0
-	}
-	return lines[start:end]
-}
-
-func (m Model) applyBackground(lines []string, width int) string {
-	bgStyle := lipgloss.NewStyle().Background(theme.LogConsoleBg).Width(width)
-	var result []string
-	for _, line := range lines {
-		result = append(result, bgStyle.Render(line))
-	}
-	return strings.Join(result, "\n")
-}
-
-// --- Parallel tail view ---
-
-func (m Model) viewParallel() string {
-	if len(m.panes) == 0 {
-		return m.viewIdle()
-	}
-
-	contentHeight := m.height - 4
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
-	boxWidth := m.width - 4
+
+	leftView := m.viewWorkerTree(leftWidth, contentHeight)
+	rightView := m.viewTailGrid(rightWidth, contentHeight)
+
+	// Vertical separator
+	sepStyle := lipgloss.NewStyle().Foreground(theme.ColorDarkGray)
+	var sepLines []string
+	for i := 0; i < contentHeight; i++ {
+		sepLines = append(sepLines, sepStyle.Render("│"))
+	}
+	separator := strings.Join(sepLines, "\n")
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftView, separator, rightView)
+}
+
+// --- Left pane: Worker tree ---
+
+func (m Model) viewWorkerTree(width, height int) string {
+	innerWidth := width - 2 // padding
 
 	// Title
-	title := theme.TitleStyle.Render(fmt.Sprintf("  Tail \u2014 %s", m.envName))
-	sepWidth := m.width - 6
-	if sepWidth < 0 {
-		sepWidth = 0
-	}
-	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
-		fmt.Sprintf(" %s", strings.Repeat("\u2500", sepWidth)))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorWhite)
+	title := " " + titleStyle.Render("Workers")
 
-	subtitle := theme.DimStyle.Render(fmt.Sprintf("  %d workers", len(m.panes)))
+	var lines []string
+	lines = append(lines, title)
+
+	// Render tree entries
+	for i, entry := range m.workerTree {
+		if entry.IsHeader {
+			// Project group header
+			headerStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorOrange)
+			line := " " + headerStyle.Render(truncateStr(entry.ProjectName, innerWidth-1))
+			lines = append(lines, line)
+		} else {
+			// Worker item
+			cursor := "  "
+			nameStyle := lipgloss.NewStyle().Foreground(theme.ColorWhite)
+			if i == m.treeCursor && m.focusPane == FocusLeft {
+				cursor = lipgloss.NewStyle().Foreground(theme.ColorOrange).Bold(true).Render("> ")
+				nameStyle = lipgloss.NewStyle().Foreground(theme.ColorOrange).Bold(true)
+			}
+
+			// Grid indicator
+			indicator := " "
+			if m.IsInGrid(entry.ScriptName) {
+				indicator = lipgloss.NewStyle().Foreground(theme.ColorGreen).Render("●")
+			}
+
+			name := truncateStr(entry.ScriptName, innerWidth-5)
+			envSuffix := ""
+			if entry.EnvName != "" && entry.EnvName != "default" {
+				envSuffix = " " + theme.DimStyle.Render(fmt.Sprintf("[%s]", entry.EnvName))
+			}
+
+			line := fmt.Sprintf(" %s%s %s%s", cursor, indicator, nameStyle.Render(name), envSuffix)
+			lines = append(lines, line)
+		}
+	}
+
+	// Apply scroll
+	visibleHeight := height - 1 // title
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+	treeLines := lines[1:] // skip title
+	scrollY := m.treeScrollY
+	if scrollY > len(treeLines)-visibleHeight {
+		scrollY = len(treeLines) - visibleHeight
+	}
+	if scrollY < 0 {
+		scrollY = 0
+	}
+	endIdx := scrollY + visibleHeight
+	if endIdx > len(treeLines) {
+		endIdx = len(treeLines)
+	}
+	visible := treeLines[scrollY:endIdx]
+
+	var result []string
+	result = append(result, lines[0]) // title
+	result = append(result, visible...)
+
+	// Pad to exact height
+	for len(result) < height {
+		result = append(result, "")
+	}
+	if len(result) > height {
+		result = result[:height]
+	}
+
+	// Apply width
+	styled := lipgloss.NewStyle().Width(width)
+	var output []string
+	for _, line := range result {
+		output = append(output, styled.Render(line))
+	}
+	return strings.Join(output, "\n")
+}
+
+// --- Right pane: Tail grid ---
+
+func (m Model) viewTailGrid(width, height int) string {
+	if len(m.gridPanes) == 0 {
+		return m.viewGridEmpty(width, height)
+	}
+
+	// Title
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorWhite)
+	activeCount := 0
+	for _, p := range m.gridPanes {
+		if p.Active {
+			activeCount++
+		}
+	}
+	title := fmt.Sprintf(" %s  %s",
+		titleStyle.Render("Live Tail"),
+		theme.DimStyle.Render(fmt.Sprintf("%d/%d active", activeCount, len(m.gridPanes))))
 
 	// Grid layout
-	totalRows := m.totalRows()
-	colWidth := boxWidth / parallelTailCols
+	totalRows := m.totalGridRows()
+	colWidth := width / gridCols
 	if colWidth < 10 {
 		colWidth = 10
 	}
 
-	headerLines := 4 // title + sep + subtitle + spacer
-	gridHeight := contentHeight - headerLines
-	if gridHeight < parallelTailMinPaneH {
-		gridHeight = parallelTailMinPaneH
+	headerLines := 1 // title
+	gridHeight := height - headerLines
+	if gridHeight < gridMinPaneH {
+		gridHeight = gridMinPaneH
 	}
 
-	visibleRows := gridHeight / parallelTailMinPaneH
+	visibleRows := gridHeight / gridMinPaneH
 	if visibleRows < 1 {
 		visibleRows = 1
 	}
@@ -567,15 +855,15 @@ func (m Model) viewParallel() string {
 	}
 
 	paneHeight := gridHeight / visibleRows
-	if paneHeight < parallelTailMinPaneH {
-		paneHeight = parallelTailMinPaneH
+	if paneHeight < gridMinPaneH {
+		paneHeight = gridMinPaneH
 	}
 
 	maxScroll := totalRows - visibleRows
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
-	scrollY := m.parallelScrollY
+	scrollY := m.gridScrollY
 	if scrollY > maxScroll {
 		scrollY = maxScroll
 	}
@@ -583,13 +871,16 @@ func (m Model) viewParallel() string {
 	// Build visible rows
 	var rowViews []string
 	for row := scrollY; row < scrollY+visibleRows && row < totalRows; row++ {
-		leftIdx := row * parallelTailCols
+		leftIdx := row * gridCols
 		rightIdx := leftIdx + 1
 
-		leftView := m.renderPane(&m.panes[leftIdx], colWidth, paneHeight)
-		rightView := ""
-		if rightIdx < len(m.panes) {
-			rightView = m.renderPane(&m.panes[rightIdx], colWidth, paneHeight)
+		leftFocused := leftIdx == m.gridCursor && m.focusPane == FocusRight
+		leftView := m.renderGridPane(&m.gridPanes[leftIdx], colWidth, paneHeight, leftFocused)
+
+		var rightView string
+		if rightIdx < len(m.gridPanes) {
+			rightFocused := rightIdx == m.gridCursor && m.focusPane == FocusRight
+			rightView = m.renderGridPane(&m.gridPanes[rightIdx], colWidth, paneHeight, rightFocused)
 		} else {
 			rightView = strings.Repeat("\n", paneHeight-1)
 			rightView = lipgloss.NewStyle().Width(colWidth).Render(rightView)
@@ -601,100 +892,125 @@ func (m Model) viewParallel() string {
 
 	grid := lipgloss.JoinVertical(lipgloss.Left, rowViews...)
 
-	scrollHint := ""
-	if totalRows > visibleRows {
-		scrollHint = theme.DimStyle.Render(fmt.Sprintf("  [%d/%d rows]", scrollY+1, totalRows))
-	}
-
-	helpText := theme.DimStyle.Render("  esc back  |  j/k scroll")
-
 	var allLines []string
-	allLines = append(allLines, title, sep, subtitle)
-	if scrollHint != "" {
-		allLines = append(allLines, scrollHint)
-	}
-	allLines = append(allLines, "")
+	allLines = append(allLines, title)
 
 	gridLines := strings.Split(grid, "\n")
 	allLines = append(allLines, gridLines...)
-	allLines = append(allLines, "", helpText)
 
-	if len(allLines) > contentHeight {
-		allLines = allLines[:contentHeight]
+	// Truncate/pad to exact height
+	if len(allLines) > height {
+		allLines = allLines[:height]
 	}
-	for len(allLines) < contentHeight {
+	for len(allLines) < height {
 		allLines = append(allLines, "")
 	}
 
 	return strings.Join(allLines, "\n")
 }
 
-func (m Model) renderPane(pane *TailPane, width, height int) string {
+func (m Model) viewGridEmpty(width, height int) string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorWhite)
+	title := " " + titleStyle.Render("Live Tail")
+	hint := " " + theme.DimStyle.Render("Select a worker and press a to start tailing.")
+
+	lines := []string{title, "", hint}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	styled := lipgloss.NewStyle().Width(width)
+	var output []string
+	for _, line := range lines[:height] {
+		output = append(output, styled.Render(line))
+	}
+	return strings.Join(output, "\n")
+}
+
+func (m Model) renderGridPane(pane *TailPane, width, height int, focused bool) string {
 	if height < 1 {
 		return ""
 	}
 
-	innerWidth := width - 3
+	innerWidth := width - 4 // border + padding
 
-	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorOrange)
-	header := "  " + nameStyle.Render(truncateStr(pane.ScriptName, innerWidth))
-
-	urlLine := ""
-	if pane.URL != "" {
-		urlText := truncateStr(pane.URL, innerWidth)
-		urlLine = "  " + renderHyperlink(pane.URL, urlText)
+	// Header with status indicator
+	var statusIcon string
+	if pane.Active && pane.Connected {
+		statusIcon = lipgloss.NewStyle().Foreground(theme.ColorGreen).Render("●")
+	} else if pane.Active && pane.Connecting {
+		statusIcon = lipgloss.NewStyle().Foreground(theme.ColorYellow).Render("◌")
+	} else if pane.Error != "" {
+		statusIcon = lipgloss.NewStyle().Foreground(theme.ColorRed).Render("✕")
+	} else {
+		statusIcon = lipgloss.NewStyle().Foreground(theme.ColorGray).Render("○")
 	}
 
-	sepWidth := width - 2
+	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorOrange)
+	header := fmt.Sprintf(" %s %s", statusIcon, nameStyle.Render(truncateStr(pane.ScriptName, innerWidth-3)))
+
+	sepWidth := width - 4
 	if sepWidth < 0 {
 		sepWidth = 0
 	}
-	paneSep := "  " + lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(strings.Repeat("\u2500", sepWidth))
+	paneSep := " " + lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(strings.Repeat("─", sepWidth))
 
 	var lines []string
-	lines = append(lines, header)
-	if urlLine != "" {
-		lines = append(lines, urlLine)
-	}
-	lines = append(lines, paneSep)
+	lines = append(lines, header, paneSep)
 
-	contentLines := height - len(lines)
+	contentLines := height - len(lines) - 2 // border top/bottom
 	if contentLines < 1 {
 		contentLines = 1
 	}
 
 	if pane.Error != "" {
-		errLine := "  " + theme.ErrorStyle.Render(truncateStr(pane.Error, innerWidth))
+		errLine := " " + theme.ErrorStyle.Render(truncateStr(pane.Error, innerWidth))
 		lines = append(lines, errLine)
 	} else if pane.Connecting {
-		lines = append(lines, "  "+theme.DimStyle.Render("Connecting..."))
+		lines = append(lines, " "+theme.DimStyle.Render("Connecting..."))
+	} else if !pane.Active {
+		lines = append(lines, " "+theme.DimStyle.Render("Tail stopped (t to restart)"))
 	} else if len(pane.Lines) == 0 {
-		lines = append(lines, "  "+theme.DimStyle.Render("Waiting for log events..."))
+		lines = append(lines, " "+theme.DimStyle.Render("Waiting for log events..."))
 	} else {
 		start := len(pane.Lines) - contentLines
 		if start < 0 {
 			start = 0
 		}
 		for _, tl := range pane.Lines[start:] {
-			ts := tl.Timestamp.Format("15:04:05")
+			ts := tl.Timestamp.Format(time.TimeOnly)
 			text := truncateStr(tl.Text, innerWidth-10)
 			style := styleTailLevel(tl.Level)
-			logLine := fmt.Sprintf("  %s %s",
+			logLine := fmt.Sprintf(" %s %s",
 				theme.LogTimestampStyle.Render(ts),
 				style.Render(text))
 			lines = append(lines, logLine)
 		}
 	}
 
-	for len(lines) < height {
+	// Pad to exact content height
+	totalContentH := height - 2 // border top/bottom
+	for len(lines) < totalContentH {
 		lines = append(lines, "")
 	}
-	if len(lines) > height {
-		lines = lines[:height]
+	if len(lines) > totalContentH {
+		lines = lines[:totalContentH]
 	}
 
 	content := strings.Join(lines, "\n")
-	return lipgloss.NewStyle().Width(width).Render(content)
+
+	// Box border
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Width(width-2). // subtract border chars
+		Padding(0, 0)
+
+	if focused {
+		boxStyle = boxStyle.BorderForeground(theme.ColorOrange)
+	} else {
+		boxStyle = boxStyle.BorderForeground(theme.ColorDarkGray)
+	}
+
+	return boxStyle.Render(content)
 }
 
 // --- Utilities ---

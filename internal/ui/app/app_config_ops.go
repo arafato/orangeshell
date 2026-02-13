@@ -651,8 +651,8 @@ func (m *Model) handleProjectPopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			rescanCmd = m.discoverProjectsFromDir(msg.Dir)
 		} else if rootDir := m.wrangler.RootDir(); rootDir != "" {
 			rescanCmd = m.discoverProjectsFromDir(rootDir)
-		} else {
-			rescanCmd = m.discoverProjectsCmd()
+		} else if m.scanDir != "" {
+			rescanCmd = m.discoverProjectsFromDir(m.scanDir)
 		}
 		return *m, tea.Batch(rescanCmd, toastTick()), true
 	}
@@ -684,8 +684,8 @@ func (m *Model) handleRemoveProjectMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		var rescanCmd tea.Cmd
 		if rootDir := m.wrangler.RootDir(); rootDir != "" {
 			rescanCmd = m.discoverProjectsFromDir(rootDir)
-		} else {
-			rescanCmd = m.discoverProjectsCmd()
+		} else if m.scanDir != "" {
+			rescanCmd = m.discoverProjectsFromDir(m.scanDir)
 		}
 		return *m, tea.Batch(rescanCmd, toastTick()), true
 	}

@@ -226,10 +226,16 @@ type Model struct {
 	// Toast notification
 	toastMsg    string
 	toastExpiry time.Time
+
+	// scanDir is the directory to scan for wrangler projects (from CLI arg).
+	// Empty means no auto-scan — show the empty-state menu immediately.
+	scanDir string
 }
 
 // NewModel creates the root model. If config is already set up, skips to dashboard.
-func NewModel(cfg *config.Config) Model {
+// scanDir is an optional directory path to scan for wrangler projects; if empty,
+// no auto-scan is performed and the empty-state menu is shown immediately.
+func NewModel(cfg *config.Config, scanDir string) Model {
 	phase := PhaseSetup
 	if cfg.IsConfigured() {
 		phase = PhaseDashboard
@@ -245,6 +251,7 @@ func NewModel(cfg *config.Config) Model {
 		viewState: ViewWrangler, // wrangler is the home screen
 		cfg:       cfg,
 		registry:  svc.NewRegistry(),
+		scanDir:   scanDir,
 	}
 
 	return m
@@ -253,10 +260,18 @@ func NewModel(cfg *config.Config) Model {
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
 	if m.phase == PhaseDashboard {
-		// Discover wrangler configs immediately (pure filesystem I/O) in parallel with auth.
-		// This eliminates the "Loading wrangler configuration..." spinner delay that
-		// previously waited for API auth to complete before starting discovery.
-		cmds := []tea.Cmd{m.initDashboardCmd(), m.discoverProjectsCmd(), m.wrangler.SpinnerInit()}
+		cmds := []tea.Cmd{m.initDashboardCmd(), m.wrangler.SpinnerInit()}
+
+		if m.scanDir != "" {
+			// A directory was provided on the CLI — scan it for wrangler projects.
+			cmds = append(cmds, m.discoverProjectsFromDir(m.scanDir))
+		} else {
+			// No directory provided — skip discovery, show empty-state menu immediately.
+			cmds = append(cmds, func() tea.Msg {
+				return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
+			})
+		}
+
 		return tea.Batch(cmds...)
 	}
 	return nil
@@ -933,7 +948,16 @@ func (m Model) updateSetup(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.header = header.New(m.cfg.AuthMethod)
 		m.phase = PhaseDashboard
 		m.layout()
-		return m, m.initDashboardCmd()
+
+		cmds := []tea.Cmd{m.initDashboardCmd(), m.wrangler.SpinnerInit()}
+		if m.scanDir != "" {
+			cmds = append(cmds, m.discoverProjectsFromDir(m.scanDir))
+		} else {
+			cmds = append(cmds, func() tea.Msg {
+				return uiwrangler.ConfigLoadedMsg{Config: nil, Path: "", Err: nil}
+			})
+		}
+		return m, tea.Batch(cmds...)
 	}
 
 	return m, cmd

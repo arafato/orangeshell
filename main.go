@@ -17,13 +17,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Optional: first positional arg is the directory to scan for projects.
+	// Without it, orangeshell skips auto-scan and shows the empty-state menu.
+	var scanDir string
+	if len(os.Args) > 1 {
+		scanDir = os.Args[1]
+	}
+
 	// Force a black default background for the terminal session (OSC 11).
 	// This ensures borders, gaps, and all empty areas are black regardless
 	// of the user's terminal theme. Restore the original on exit (OSC 111).
 	fmt.Fprint(os.Stdout, "\x1b]11;#000000\x1b\\")
 	defer fmt.Fprint(os.Stdout, "\x1b]111\x1b\\")
 
-	model := app.NewModel(cfg)
+	model := app.NewModel(cfg, scanDir)
 
 	p := tea.NewProgram(model,
 		tea.WithAltScreen(),

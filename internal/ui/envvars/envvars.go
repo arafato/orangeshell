@@ -78,10 +78,11 @@ type Model struct {
 	cursor   int
 	mode     mode
 
-	// Filter focus: when true, the filter bar is the active item and all
-	// printable keys go to the text input. When false, focus is on the
-	// var list and a/d are shortcuts. Arrow keys move between the two.
-	filterFocused bool
+	// Focus state: exactly one of filterFocused / addButtonFocused / (neither)
+	// is true. When neither is true, focus is on the var list.
+	// Navigation order: filter → +Add button → list.
+	filterFocused    bool
+	addButtonFocused bool
 
 	// Context
 	configPath    string
@@ -252,6 +253,9 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.filterFocused {
 		return m.updateFilterFocused(msg)
 	}
+	if m.addButtonFocused {
+		return m.updateAddButtonFocused(msg)
+	}
 	return m.updateItemFocused(msg)
 }
 
@@ -272,10 +276,10 @@ func (m Model) updateFilterFocused(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, func() tea.Msg { return CloseMsg{} }
 
 	case "down":
-		// Move focus from filter to the first list item
+		// Move focus from filter to the +Add button
 		m.filterFocused = false
 		m.filter.Blur()
-		m.cursor = 0
+		m.addButtonFocused = true
 		return m, nil
 
 	case "enter":
@@ -300,8 +304,50 @@ func (m Model) updateFilterFocused(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
+// updateAddButtonFocused handles keys when the +Add button has focus.
+// enter triggers add-variable mode, arrows navigate to filter or list.
+func (m Model) updateAddButtonFocused(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.filter.Value() != "" {
+			m.filter.SetValue("")
+			m.applyFilter()
+			m.cursor = 0
+			m.scrollY = 0
+			return m, nil
+		}
+		return m, func() tea.Msg { return CloseMsg{} }
+
+	case "up":
+		// Move focus to filter
+		m.addButtonFocused = false
+		m.filterFocused = true
+		return m, m.filter.Focus()
+
+	case "down":
+		// Move focus to list
+		m.addButtonFocused = false
+		m.cursor = 0
+		return m, nil
+
+	case "enter":
+		// Trigger add-variable mode
+		m.addButtonFocused = false
+		m.mode = modeAdd
+		m.editNameInput.SetValue("")
+		m.editValueInput.SetValue("")
+		m.errMsg = ""
+		m.editEnvName = m.sourceEnvName
+		if m.editEnvName == "" {
+			m.editEnvName = "default"
+		}
+		return m, m.editNameInput.Focus()
+	}
+	return m, nil
+}
+
 // updateItemFocused handles keys when the var list has focus.
-// a/d are shortcuts, arrow keys navigate, up at cursor 0 moves focus to filter.
+// d is a shortcut, arrow keys navigate, up at cursor 0 moves focus to +Add button.
 func (m Model) updateItemFocused(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -320,9 +366,8 @@ func (m Model) updateItemFocused(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.cursor--
 			m.adjustScroll()
 		} else {
-			// At top of list — move focus to filter
-			m.filterFocused = true
-			return m, m.filter.Focus()
+			// At top of list — move focus to +Add button
+			m.addButtonFocused = true
 		}
 		return m, nil
 
@@ -345,18 +390,6 @@ func (m Model) updateItemFocused(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, m.editValueInput.Focus()
 		}
 		return m, nil
-
-	case "a":
-		// Add new var — default to the source env the user navigated from
-		m.mode = modeAdd
-		m.editNameInput.SetValue("")
-		m.editValueInput.SetValue("")
-		m.errMsg = ""
-		m.editEnvName = m.sourceEnvName
-		if m.editEnvName == "" {
-			m.editEnvName = "default"
-		}
-		return m, m.editNameInput.Focus()
 
 	case "d":
 		// Delete selected var (show inline confirmation)
@@ -528,6 +561,15 @@ func (m Model) View(termWidth, termHeight int) string {
 			m.filter.View())
 	}
 
+	// +Add button — green, with cursor indicator when focused
+	addStyle := theme.SuccessStyle
+	var addLine string
+	if m.addButtonFocused && m.mode == modeList {
+		addLine = addStyle.Bold(true).Render("  > + Add Variable")
+	} else {
+		addLine = addStyle.Render("    + Add Variable")
+	}
+
 	// Count
 	countText := theme.DimStyle.Render(fmt.Sprintf("  %d variable(s)", len(m.filtered)))
 	if len(m.filtered) != len(m.vars) {
@@ -535,7 +577,7 @@ func (m Model) View(termWidth, termHeight int) string {
 	}
 
 	var allLines []string
-	allLines = append(allLines, title, sep, filterLine, countText, "")
+	allLines = append(allLines, title, sep, filterLine, addLine, countText, "")
 
 	switch m.mode {
 	case modeList:
@@ -695,7 +737,10 @@ func (m Model) viewHelp() string {
 		if m.filterFocused {
 			return theme.DimStyle.Render("  type to filter  |  down list  |  esc back")
 		}
-		return theme.DimStyle.Render("  up/down navigate  |  enter edit  |  a add  |  d delete  |  up filter  |  esc back")
+		if m.addButtonFocused {
+			return theme.DimStyle.Render("  enter add variable  |  up filter  |  down list  |  esc back")
+		}
+		return theme.DimStyle.Render("  up/down navigate  |  enter edit  |  d delete  |  esc back")
 	case modeEdit:
 		return theme.DimStyle.Render("  esc cancel  |  enter save")
 	case modeAdd:

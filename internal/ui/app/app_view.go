@@ -198,8 +198,7 @@ func (m Model) renderHelp() string {
 	case ViewEnvVars:
 		entries = []helpEntry{
 			{"esc", "back"},
-			{"enter", "edit"},
-			{"a", "add"},
+			{"enter", "edit/add"},
 			{"d", "delete"},
 			{"ctrl+h", "home"},
 		}

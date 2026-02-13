@@ -17,6 +17,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Force a black default background for the terminal session (OSC 11).
+	// This ensures borders, gaps, and all empty areas are black regardless
+	// of the user's terminal theme. Restore the original on exit (OSC 111).
+	fmt.Fprint(os.Stdout, "\x1b]11;#000000\x1b\\")
+	defer fmt.Fprint(os.Stdout, "\x1b]111\x1b\\")
+
 	model := app.NewModel(cfg)
 
 	p := tea.NewProgram(model,

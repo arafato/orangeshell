@@ -9,7 +9,6 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	svc "github.com/oarafat/orangeshell/internal/service"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 
 	"github.com/oarafat/orangeshell/internal/ui/theme"
@@ -185,9 +184,6 @@ type Model struct {
 	// Version cache (shared between Deploy Version and Gradual Deployment)
 	cachedVersions    []wcfg.Version
 	versionsFetchedAt time.Time
-
-	// Parallel tail grid (monorepo only)
-	parallelTail ParallelTailModel
 
 	width   int
 	height  int
@@ -486,7 +482,6 @@ func (m *Model) SetConfigLoading() {
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.parallelTail.SetSize(w, h)
 }
 
 // FocusedEnvName returns the name of the currently focused environment.
@@ -569,42 +564,6 @@ func (m *Model) StopDevServer() {
 	m.cmdPane.FinishWithMessage("Stopped", false)
 }
 
-// --- Tail delegation methods ---
-
-// StartTail prepares the cmd pane for tail log streaming.
-func (m *Model) StartTail(scriptName string) {
-	m.cmdPane.StartTail(scriptName)
-}
-
-// AppendTailLines adds tail log lines to the cmd pane.
-func (m *Model) AppendTailLines(lines []svc.TailLine) {
-	for _, line := range lines {
-		m.cmdPane.AppendTailLine(line)
-	}
-}
-
-// SetTailError records a tail error in the cmd pane.
-func (m *Model) SetTailError(err error) {
-	m.cmdPane.SetTailError(err.Error())
-}
-
-// StopTailPane marks the tail as stopped in the cmd pane.
-func (m *Model) StopTailPane() {
-	m.cmdPane.StopTail()
-}
-
-// TailActive returns whether the cmd pane is in tail mode and running.
-func (m Model) TailActive() bool {
-	return m.cmdPane.IsTail() && m.cmdPane.IsRunning()
-}
-
-// TailConnected marks the tail as connected (first data may arrive).
-func (m *Model) TailConnected() {
-	m.cmdPane.TailConnected()
-}
-
-// --- Parallel tail delegation methods ---
-
 // AllEnvNames returns the union of env names across all monorepo projects.
 // Returns nil in single-project mode.
 func (m Model) AllEnvNames() []string {
@@ -625,42 +584,6 @@ func (m Model) AllEnvNames() []string {
 		}
 	}
 	return names
-}
-
-// StartParallelTail initializes the parallel tail grid for the given env and targets.
-func (m *Model) StartParallelTail(envName string, targets []ParallelTailTarget) {
-	m.parallelTail.SetSize(m.width, m.height)
-	m.parallelTail.Start(envName, targets)
-}
-
-// StopParallelTail stops the parallel tail grid display.
-func (m *Model) StopParallelTail() {
-	m.parallelTail.Stop()
-}
-
-// IsParallelTailActive returns whether the parallel tail grid is active.
-func (m Model) IsParallelTailActive() bool {
-	return m.parallelTail.IsActive()
-}
-
-// ParallelTailAppendLines routes lines to the correct parallel tail pane.
-func (m *Model) ParallelTailAppendLines(scriptName string, lines []svc.TailLine) {
-	m.parallelTail.AppendLines(scriptName, lines)
-}
-
-// ParallelTailSetConnected marks a parallel tail pane as connected.
-func (m *Model) ParallelTailSetConnected(scriptName string) {
-	m.parallelTail.SetConnected(scriptName)
-}
-
-// ParallelTailSetError marks a parallel tail pane as errored.
-func (m *Model) ParallelTailSetError(scriptName string, err error) {
-	m.parallelTail.SetError(scriptName, err.Error())
-}
-
-// ParallelTailSetSessionID records the session ID for a parallel tail pane.
-func (m *Model) ParallelTailSetSessionID(scriptName, sessionID string) {
-	m.parallelTail.SetSessionID(scriptName, sessionID)
 }
 
 // SetEnvDeployment updates deployment/subdomain data on the matching EnvBox.
@@ -806,12 +729,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.versionPicker, cmd = m.versionPicker.Update(msg)
 			return m, cmd
 		}
-		// Handle parallel tail mode — exclusive key focus (only esc, j/k)
-		if m.parallelTail.IsActive() {
-			var cmd tea.Cmd
-			m.parallelTail, cmd = m.parallelTail.Update(msg)
-			return m, cmd
-		}
 		// Handle directory browser mode
 		if m.showDirBrowser {
 			return m.updateDirBrowser(msg)
@@ -872,14 +789,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Handle "t" key for tail toggle (before routing to inner/outer nav).
-		// Block when a wrangler command (non-tail) is running.
+		// Handle "t" key — emit TailStartMsg for the app to route to Monitoring tab.
+		// Block when a wrangler command is running.
 		if msg.String() == "t" {
-			if m.TailActive() {
-				// Tail is running — stop it
-				return m, func() tea.Msg { return TailStoppedMsg{} }
-			}
-			// Don't start tail if a non-tail command is running
 			if !m.cmdPane.IsRunning() {
 				workerName := m.FocusedWorkerName()
 				if workerName != "" {
@@ -1170,12 +1082,6 @@ func (m Model) View() string {
 	}
 	boxWidth := m.width - 4 // padding within the detail panel
 
-	// Parallel tail grid takes over the entire view
-	if m.parallelTail.IsActive() {
-		content := m.parallelTail.View()
-		return m.renderBorder(content, contentHeight)
-	}
-
 	// Title bar
 	titleText := "  Wrangler"
 	if m.IsMonorepo() && m.activeProject >= 0 && m.activeProject < len(m.projects) {
@@ -1241,30 +1147,17 @@ func (m Model) View() string {
 
 	// Calculate layout split:
 	// - When a wrangler command is running: command output pane at ~35%
-	// - When tail is active (tailing, connecting, or error): tail console at ~40%
 	// - Otherwise: env boxes get full height (no bottom pane)
 	cmdPaneHeight := 0
-	tailConsoleHeight := 0
 	envPaneHeight := contentHeight
 
-	cmdActive := m.cmdPane.IsActive() && !m.cmdPane.IsTail()
-	if cmdActive {
+	if m.cmdPane.IsActive() {
 		// Wrangler command output pane
 		cmdPaneHeight = contentHeight * 35 / 100
 		if cmdPaneHeight < 6 {
 			cmdPaneHeight = 6
 		}
 		envPaneHeight = contentHeight - cmdPaneHeight
-		if envPaneHeight < 5 {
-			envPaneHeight = 5
-		}
-	} else if m.cmdPane.IsTailVisible() {
-		// Tail console — only shown when actively tailing, connecting, or error
-		tailConsoleHeight = contentHeight * 40 / 100
-		if tailConsoleHeight < 6 {
-			tailConsoleHeight = 6
-		}
-		envPaneHeight = contentHeight - tailConsoleHeight
 		if envPaneHeight < 5 {
 			envPaneHeight = 5
 		}
@@ -1364,11 +1257,6 @@ func (m Model) View() string {
 		envContent := strings.Join(visible, "\n")
 		cmdContent := m.cmdPane.View(cmdPaneHeight, m.width-4, m.spinner.View())
 		content = envContent + "\n" + cmdContent
-	} else if tailConsoleHeight > 0 {
-		// Split view: env boxes on top, tail console on bottom
-		envContent := strings.Join(visible, "\n")
-		tailContent := m.cmdPane.ViewTailConsole(tailConsoleHeight, m.width-4, m.spinner.View())
-		content = envContent + "\n" + tailContent
 	} else {
 		content = strings.Join(visible, "\n")
 	}

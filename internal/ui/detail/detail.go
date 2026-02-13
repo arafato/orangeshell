@@ -141,13 +141,6 @@ type Model struct {
 	// Scroll offset for detail view
 	scrollOffset int
 
-	// Tail state (Workers live logs)
-	tailLines    []service.TailLine
-	tailActive   bool
-	tailStarting bool // true while waiting for TailStartedMsg
-	tailScroll   int  // scroll offset within log console (0 = pinned to bottom)
-	tailError    string
-
 	// D1 SQL console state
 	d1Input      textinput.Model // SQL text input
 	d1Active     bool            // true when D1 console is initialized
@@ -372,60 +365,6 @@ func (m *Model) SetDetail(detail *service.ResourceDetail, err error) {
 	m.scrollOffset = 0
 }
 
-// TailActive returns whether a tail session is active.
-func (m Model) TailActive() bool {
-	return m.tailActive
-}
-
-// SetTailStarting marks the tail as starting (waiting for session creation).
-func (m *Model) SetTailStarting() {
-	m.tailStarting = true
-	m.tailError = ""
-}
-
-// SetTailStarted marks the tail session as active.
-func (m *Model) SetTailStarted() {
-	m.tailActive = true
-	m.tailStarting = false
-	m.tailLines = nil
-	m.tailScroll = 0
-	m.tailError = ""
-}
-
-// AppendTailLines adds new lines to the tail buffer.
-func (m *Model) AppendTailLines(lines []service.TailLine) {
-	m.tailLines = append(m.tailLines, lines...)
-	if len(m.tailLines) > 200 {
-		m.tailLines = m.tailLines[len(m.tailLines)-200:]
-	}
-	// Auto-scroll to bottom if the user hasn't scrolled up
-	if m.tailScroll == 0 {
-		// tailScroll == 0 means "pinned to bottom" (no manual scroll offset)
-	}
-}
-
-// SetTailError records a tail error message.
-func (m *Model) SetTailError(err error) {
-	m.tailStarting = false
-	m.tailError = err.Error()
-}
-
-// SetTailStopped clears tail state.
-func (m *Model) SetTailStopped() {
-	m.tailActive = false
-	m.tailStarting = false
-	m.tailScroll = 0
-}
-
-// ClearTail resets all tail state (used on navigation away).
-func (m *Model) ClearTail() {
-	m.tailActive = false
-	m.tailStarting = false
-	m.tailLines = nil
-	m.tailScroll = 0
-	m.tailError = ""
-}
-
 // IsWorkersDetail returns true if we're viewing a Workers resource detail.
 func (m Model) IsWorkersDetail() bool {
 	return m.mode == viewDetail && m.service == "Workers"
@@ -557,7 +496,7 @@ func (m Model) SpinnerInit() tea.Cmd {
 
 // IsLoading returns whether the detail panel is in a loading state (spinner should run).
 func (m Model) IsLoading() bool {
-	return m.loading || m.detailLoading || m.tailStarting || m.d1SchemaLoading || m.d1Querying
+	return m.loading || m.detailLoading || m.d1SchemaLoading || m.d1Querying
 }
 
 // UpdateSpinner forwards a message to the embedded spinner and returns the updated model + cmd.
@@ -667,17 +606,11 @@ func isDeletableService(name string) bool {
 func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "backspace":
-		// If tail is active, signal the app to stop it
-		needStopTail := m.tailActive || m.tailStarting
 		m.mode = viewList
 		m.detail = nil
 		m.detailErr = nil
 		m.detailID = ""
 		m.scrollOffset = 0
-		m.ClearTail()
-		if needStopTail {
-			return m, func() tea.Msg { return TailStoppedMsg{} }
-		}
 		return m, nil
 	case "t":
 		// Only available in Workers detail view — starts tail on Monitoring tab
@@ -934,17 +867,12 @@ func (m Model) viewDetail(maxHeight int) string {
 		fieldLines = append(fieldLines, line)
 	}
 
-	// For Workers, split layout: fields on top, log console on bottom
-	if m.service == "Workers" {
-		return m.viewDetailWithTail(maxHeight, title, sep, fieldLines, copyLineMap)
-	}
-
 	// For D1, split layout: SQL console on left, schema on right
 	if m.service == "D1" && m.d1Active {
 		return m.viewDetailWithD1(maxHeight, title, sep, fieldLines, copyLineMap)
-	}
+			}
 
-	// Other services: original layout
+	// Standard layout for all services (including Workers)
 	help := "\n" + theme.DimStyle.Render("  esc/backspace back  |  j/k scroll")
 
 	allLines := []string{title, sep}
@@ -983,55 +911,6 @@ func (m Model) viewDetail(maxHeight int) string {
 	visible := allLines[offset:endIdx]
 
 	return strings.Join(visible, "\n")
-}
-
-// viewDetailWithTail renders a split layout: detail fields on top, log console on bottom.
-func (m Model) viewDetailWithTail(maxHeight int, title, sep string, fieldLines []string, copyLineMap map[int]string) string {
-	// Calculate layout split: fields get ~60%, log console gets ~40%
-	logConsoleHeight := maxHeight * 40 / 100
-	if logConsoleHeight < 5 {
-		logConsoleHeight = 5
-	}
-	fieldsHeight := maxHeight - logConsoleHeight
-	if fieldsHeight < 3 {
-		fieldsHeight = 3
-	}
-
-	// -- Upper region: detail fields --
-	fieldContent := []string{title, sep}
-	fieldContent = append(fieldContent, fieldLines...)
-
-	// Apply scroll to fields
-	visibleFieldsH := fieldsHeight
-	if visibleFieldsH > len(fieldContent) {
-		visibleFieldsH = len(fieldContent)
-	}
-	maxFieldScroll := len(fieldContent) - fieldsHeight
-	if maxFieldScroll < 0 {
-		maxFieldScroll = 0
-	}
-	offset := m.scrollOffset
-	if offset > maxFieldScroll {
-		offset = maxFieldScroll
-	}
-	endIdx := offset + fieldsHeight
-	if endIdx > len(fieldContent) {
-		endIdx = len(fieldContent)
-	}
-	visibleFields := fieldContent[offset:endIdx]
-
-	// Register copy targets for visible field lines
-	m.registerCopyTargets(copyLineMap, offset, endIdx)
-
-	// Pad fields region to exact height
-	for len(visibleFields) < fieldsHeight {
-		visibleFields = append(visibleFields, "")
-	}
-
-	// -- Lower region: log console --
-	logLines := m.renderLogConsole(logConsoleHeight)
-
-	return strings.Join(visibleFields, "\n") + "\n" + strings.Join(logLines, "\n")
 }
 
 // viewDetailWithD1 renders the D1 detail layout:

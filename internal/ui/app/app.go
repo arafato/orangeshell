@@ -23,6 +23,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/envvars"
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
+	"github.com/oarafat/orangeshell/internal/ui/monitoring"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/search"
@@ -185,9 +186,12 @@ type Model struct {
 	wranglerRunnerAction  string       // action string of the running wrangler command (e.g. "deploy", "versions deploy")
 	wranglerVersionRunner *wcfg.Runner // separate runner for background version fetches
 
+	// Monitoring tab model (live tail sessions)
+	monitoring monitoring.Model
+
 	// Active tail session (nil when no tail is running)
 	tailSession *svc.TailSession
-	tailSource  string // "wrangler" or "detail" — which view owns the current tail
+	tailSource  string // "wrangler", "detail", or "monitoring" — which view owns the current tail
 
 	// Parallel tail sessions (monorepo multi-worker tailing)
 	parallelTailSessions []*svc.TailSession
@@ -246,18 +250,19 @@ func NewModel(cfg *config.Config, scanDir string) Model {
 	}
 
 	m := Model{
-		setup:     setup.New(cfg),
-		header:    header.New(cfg.AuthMethod),
-		detail:    detail.New(),
-		search:    search.New(),
-		wrangler:  uiwrangler.New(),
-		phase:     phase,
-		viewState: ViewWrangler, // wrangler is the home screen
-		activeTab: tabbar.TabOperations,
-		hoverTab:  -1, // no tab hovered
-		cfg:       cfg,
-		registry:  svc.NewRegistry(),
-		scanDir:   scanDir,
+		setup:      setup.New(cfg),
+		header:     header.New(cfg.AuthMethod),
+		detail:     detail.New(),
+		search:     search.New(),
+		wrangler:   uiwrangler.New(),
+		monitoring: monitoring.New(),
+		phase:      phase,
+		viewState:  ViewWrangler, // wrangler is the home screen
+		activeTab:  tabbar.TabOperations,
+		hoverTab:   -1, // no tab hovered
+		cfg:        cfg,
+		registry:   svc.NewRegistry(),
+		scanDir:    scanDir,
 	}
 
 	return m
@@ -512,43 +517,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Tail lifecycle messages
+	// Tail lifecycle messages — all routed to the monitoring model
 	case detail.TailStartMsg:
 		if m.client == nil {
 			return m, nil
 		}
-		m.tailSource = "detail"
-		m.detail.SetTailStarting()
+		m.tailSource = "monitoring"
+		m.monitoring.StartSingleTail(msg.ScriptName)
+		m.activeTab = tabbar.TabMonitoring
 		accountID := m.registry.ActiveAccountID()
 		return m, m.startTailCmd(accountID, msg.ScriptName)
 
 	case detail.TailStartedMsg:
 		m.tailSession = msg.Session
-		if m.tailSource == "wrangler" {
-			m.wrangler.TailConnected()
-		} else {
-			m.detail.SetTailStarted()
-		}
+		m.monitoring.SetTailConnected()
 		return m, m.waitForTailLines()
 
 	case detail.TailLogMsg:
 		if m.tailSession == nil {
 			return m, nil
 		}
-		if m.tailSource == "wrangler" {
-			m.wrangler.AppendTailLines(msg.Lines)
-		} else {
-			m.detail.AppendTailLines(msg.Lines)
-		}
+		m.monitoring.AppendTailLines(msg.Lines)
 		// Continue polling for more lines
 		return m, m.waitForTailLines()
 
 	case detail.TailErrorMsg:
-		if m.tailSource == "wrangler" {
-			m.wrangler.SetTailError(msg.Err)
-		} else {
-			m.detail.SetTailError(msg.Err)
-		}
+		m.monitoring.SetTailError(msg.Err)
 		m.tailSession = nil
 		return m, nil
 
@@ -692,37 +686,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.TailStartMsg:
-		// "t" key pressed in wrangler view — start tailing
+		// "t" key pressed in wrangler view — start tailing on Monitoring tab
 		if m.client == nil {
 			return m, nil
 		}
 		// Stop any existing tail
 		m.stopTail()
-		m.detail.ClearTail()
-		// Start tail in wrangler view
-		m.tailSource = "wrangler"
-		m.wrangler.StartTail(msg.ScriptName)
+		// Start tail via monitoring model and switch to Monitoring tab
+		m.tailSource = "monitoring"
+		m.monitoring.StartSingleTail(msg.ScriptName)
+		m.activeTab = tabbar.TabMonitoring
 		accountID := m.registry.ActiveAccountID()
-		return m, tea.Batch(m.startTailCmd(accountID, msg.ScriptName), m.wrangler.SpinnerInit())
+		return m, m.startTailCmd(accountID, msg.ScriptName)
 
 	case uiwrangler.TailStoppedMsg:
 		// "t" key pressed while tail is active — stop it
 		m.stopTail()
-		m.detail.ClearTail()
 		return m, nil
 
-	// Parallel tail lifecycle messages
+	// Parallel tail lifecycle messages — routed to monitoring model
 	case uiwrangler.ParallelTailStartMsg:
 		if m.client == nil {
 			return m, nil
 		}
 		// Stop any existing single tail and parallel tails
 		m.stopTail()
-		m.detail.ClearTail()
 		m.stopAllParallelTails()
-		// Start parallel tailing
-		m.wrangler.StartParallelTail(msg.EnvName, msg.Scripts)
+		// Convert wrangler targets to monitoring targets
+		monTargets := make([]monitoring.ParallelTailTarget, len(msg.Scripts))
+		for i, t := range msg.Scripts {
+			monTargets[i] = monitoring.ParallelTailTarget{ScriptName: t.ScriptName, URL: t.URL}
+		}
+		// Start parallel tailing on Monitoring tab
+		m.monitoring.StartParallelTail(msg.EnvName, monTargets)
 		m.parallelTailActive = true
+		m.activeTab = tabbar.TabMonitoring
 		accountID := m.registry.ActiveAccountID()
 		var cmds []tea.Cmd
 		for _, target := range msg.Scripts {
@@ -748,15 +746,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.parallelTailSessions = append(m.parallelTailSessions, msg.Session)
-		m.wrangler.ParallelTailSetConnected(msg.ScriptName)
-		m.wrangler.ParallelTailSetSessionID(msg.ScriptName, msg.Session.ID)
+		m.monitoring.ParallelTailSetConnected(msg.ScriptName)
+		m.monitoring.ParallelTailSetSessionID(msg.ScriptName, msg.Session.ID)
 		return m, m.waitForParallelTailLines(msg.ScriptName, msg.Session)
 
 	case parallelTailLogMsg:
 		if !m.parallelTailActive {
 			return m, nil
 		}
-		m.wrangler.ParallelTailAppendLines(msg.ScriptName, msg.Lines)
+		m.monitoring.ParallelTailAppendLines(msg.ScriptName, msg.Lines)
 		// Find the session to continue polling
 		for _, s := range m.parallelTailSessions {
 			if s.ScriptName == msg.ScriptName {
@@ -769,11 +767,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.parallelTailActive {
 			return m, nil
 		}
-		m.wrangler.ParallelTailSetError(msg.ScriptName, msg.Err)
+		m.monitoring.ParallelTailSetError(msg.ScriptName, msg.Err)
 		return m, nil
 
 	case parallelTailSessionDoneMsg:
 		// Channel closed for one session — nothing to do, pane stays with last lines
+		return m, nil
+
+	// Monitoring model messages
+	case monitoring.TailStopMsg:
+		m.stopTail()
+		return m, nil
+
+	case monitoring.ParallelTailStopMsg:
+		m.stopAllParallelTails()
 		return m, nil
 
 	case uiwrangler.LoadConfigPathMsg:
@@ -1117,9 +1124,13 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "q":
-			// Quit from Monitoring placeholder (no text inputs).
+			// Monitoring tab: quit only when idle (no active tail).
 			if m.activeTab == tabbar.TabMonitoring {
-				return m, tea.Quit
+				if !m.monitoring.IsActive() {
+					return m, tea.Quit
+				}
+				// If tail is active, q is not quit — fall through.
+				break
 			}
 			// Configuration tab: quit from project list or placeholder.
 			// When in ViewEnvVars/ViewTriggers, q is intercepted by their key handlers above.
@@ -1147,7 +1158,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+h":
 			// Go to wrangler home screen from anywhere
 			m.stopTail()
-			m.detail.ClearTail()
+			m.stopAllParallelTails()
+			m.monitoring.Clear()
 			m.detail.ClearD1()
 			m.envVarsFromResourceList = false
 			m.triggersFromResourceList = false
@@ -1236,6 +1248,25 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "esc":
+			// Esc on the Monitoring tab
+			if m.activeTab == tabbar.TabMonitoring {
+				mode := m.monitoring.CurrentMode()
+				if mode == monitoring.ModeIdle {
+					// Idle: go back to Operations
+					m.activeTab = tabbar.TabOperations
+					m.viewState = ViewWrangler
+					return m, nil
+				}
+				if mode == monitoring.ModeSingle && !m.monitoring.SingleTailActive() && !m.monitoring.SingleTailStarting() {
+					// Single tail stopped: clear and go back to Operations
+					m.monitoring.ClearSingleTail()
+					m.activeTab = tabbar.TabOperations
+					m.viewState = ViewWrangler
+					return m, nil
+				}
+				// Active tail: let monitoring model handle esc (falls through to routing)
+			}
+
 			// Esc at the app level handles view-state navigation back
 			switch m.viewState {
 			case ViewServiceList:
@@ -1270,6 +1301,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.viewState == ViewWrangler {
 			m.wrangler, cmd = m.wrangler.Update(msg)
 		}
+	case tabbar.TabMonitoring:
+		m.monitoring, cmd = m.monitoring.Update(msg)
 	case tabbar.TabResources:
 		switch m.viewState {
 		case ViewServiceList, ViewServiceDetail:
@@ -1365,6 +1398,7 @@ func (m *Model) layout() {
 	m.header.SetWidth(m.width)
 	m.detail.SetSize(contentWidth, contentHeight)
 	m.wrangler.SetSize(contentWidth, contentHeight)
+	m.monitoring.SetSize(contentWidth, contentHeight)
 	// Detail content starts after: header(1) + tab bar(3) + top border(1) = 5 rows from top of terminal
 	m.detail.SetYOffset(headerHeight + tabBarHeight + 1)
 }

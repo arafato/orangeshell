@@ -680,17 +680,11 @@ func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	case "t":
-		// Only available in Workers detail view
+		// Only available in Workers detail view — starts tail on Monitoring tab
 		if m.service != "Workers" || m.detail == nil {
 			return m, nil
 		}
-		if m.tailActive || m.tailStarting {
-			// Stop tailing
-			m.ClearTail()
-			return m, func() tea.Msg { return TailStoppedMsg{} }
-		}
-		// Start tailing
-		m.SetTailStarting()
+		// Emit TailStartMsg — the app layer handles routing to the Monitoring tab
 		scriptName := m.detail.Name
 		return m, func() tea.Msg {
 			return TailStartMsg{ScriptName: scriptName}

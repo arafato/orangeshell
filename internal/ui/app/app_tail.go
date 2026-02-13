@@ -40,7 +40,7 @@ func (m Model) waitForTailLines() tea.Cmd {
 	}
 }
 
-// stopTail closes the active tail session and cleans up both views.
+// stopTail closes the active tail session and cleans up.
 func (m *Model) stopTail() {
 	if m.tailSession == nil {
 		return
@@ -50,12 +50,8 @@ func (m *Model) stopTail() {
 	client := m.client
 	m.tailSession = nil
 
-	// Clean up the view that owns this tail
-	if m.tailSource == "wrangler" {
-		m.wrangler.StopTailPane()
-	} else {
-		m.detail.SetTailStopped()
-	}
+	// Clean up the monitoring model's single-tail state
+	m.monitoring.SetTailStopped()
 	m.tailSource = ""
 
 	go func() {
@@ -104,7 +100,7 @@ func (m *Model) stopAllParallelTails() {
 	client := m.client
 	m.parallelTailSessions = nil
 	m.parallelTailActive = false
-	m.wrangler.StopParallelTail()
+	m.monitoring.StopParallelTail()
 
 	// Stop all sessions in the background to avoid blocking the UI
 	if len(sessions) > 0 {

@@ -30,7 +30,6 @@ func (m *Model) fetchStaleForSearch() []tea.Cmd {
 func (m *Model) navigateToService(name string) tea.Cmd {
 	// Stop any active tail/D1 session when switching services
 	m.stopTail()
-	m.detail.ClearTail()
 	m.detail.ClearD1()
 
 	m.activeTab = tabbar.TabResources
@@ -191,7 +190,7 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	// Stop any active tail session and wrangler command
 	m.stopTail()
 	m.stopAllParallelTails()
-	m.detail.ClearTail()
+	m.monitoring.Clear()
 	m.detail.ClearD1()
 	m.stopWranglerRunner()
 	m.wrangler.ClearVersionCache()

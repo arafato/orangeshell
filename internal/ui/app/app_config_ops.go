@@ -195,7 +195,6 @@ func (m Model) updateEnvVars(msg tea.Msg) (tea.Model, tea.Cmd) {
 // pressing enter on one opens the envvars detail view for that project.
 func (m *Model) navigateToEnvVarsList() tea.Cmd {
 	m.stopTail()
-	m.detail.ClearTail()
 	m.detail.ClearD1()
 
 	projects := m.wrangler.ProjectConfigs()
@@ -239,7 +238,6 @@ func (m *Model) navigateToEnvVarsList() tea.Cmd {
 // and shows it in the standard detail list view.
 func (m *Model) navigateToTriggersList() tea.Cmd {
 	m.stopTail()
-	m.detail.ClearTail()
 	m.detail.ClearD1()
 
 	projects := m.wrangler.ProjectConfigs()

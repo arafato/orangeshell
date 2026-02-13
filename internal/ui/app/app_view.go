@@ -105,9 +105,9 @@ func (m Model) renderOperationsTab() string {
 	return ""
 }
 
-// renderMonitoringTab renders the Monitoring tab placeholder.
+// renderMonitoringTab renders the Monitoring tab (live tail output).
 func (m Model) renderMonitoringTab() string {
-	return m.renderPlaceholderTab("Monitoring", "Live tail grid — coming soon")
+	return m.monitoring.View()
 }
 
 // renderResourcesTab renders the Resources tab content (service list / detail).
@@ -231,7 +231,7 @@ func (m Model) renderHelp() string {
 	case tabbar.TabOperations:
 		entries = append(entries, m.renderOperationsHelp()...)
 	case tabbar.TabMonitoring:
-		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		entries = append(entries, m.renderMonitoringHelp()...)
 	case tabbar.TabResources:
 		entries = append(entries, m.renderResourcesHelp()...)
 	case tabbar.TabConfiguration:
@@ -271,12 +271,6 @@ func (m Model) renderOperationsHelp() []helpEntry {
 
 	switch m.viewState {
 	case ViewWrangler:
-		if m.wrangler.IsParallelTailActive() {
-			return []helpEntry{
-				{"esc", "back"},
-				{"j/k", "scroll"},
-			}
-		}
 		if m.wrangler.IsEmpty() {
 			return []helpEntry{
 				{"j/k", "navigate"},
@@ -373,6 +367,31 @@ func (m Model) renderConfigurationHelp() []helpEntry {
 		}
 	}
 	// Placeholder state
+	return []helpEntry{
+		{"ctrl+l", "resources"},
+		{"ctrl+k", "search"},
+		{"[/]", "accounts"},
+		{"q", "quit"},
+	}
+}
+
+// renderMonitoringHelp returns the context-sensitive help entries for the Monitoring tab.
+func (m Model) renderMonitoringHelp() []helpEntry {
+	if m.monitoring.IsParallelTailActive() {
+		return []helpEntry{
+			{"esc", "stop"},
+			{"j/k", "scroll"},
+			{"ctrl+h", "home"},
+		}
+	}
+	if m.monitoring.SingleTailActive() || m.monitoring.SingleTailStarting() {
+		return []helpEntry{
+			{"t", "stop tail"},
+			{"j/k", "scroll"},
+			{"ctrl+h", "home"},
+		}
+	}
+	// Idle state
 	return []helpEntry{
 		{"ctrl+l", "resources"},
 		{"ctrl+k", "search"},

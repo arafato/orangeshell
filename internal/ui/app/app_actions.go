@@ -10,6 +10,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
+	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
@@ -24,7 +25,7 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 	// Monitoring section: single entry that opens an environment sub-popup
 	envNames := m.wrangler.AllEnvNames()
 	if len(envNames) > 0 && m.client != nil {
-		if m.parallelTailActive && m.wrangler.IsParallelTailActive() {
+		if m.parallelTailActive && m.monitoring.IsParallelTailActive() {
 			items = append(items, actions.Item{
 				Label:       "Stop Parallel Tail",
 				Description: "Stop all live log streams",
@@ -245,7 +246,7 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 		if workerName != "" {
 			tailLabel := "Tail Logs"
 			tailDesc := fmt.Sprintf("Stream live logs from %s", workerName)
-			if m.tailSession != nil && m.wrangler.TailActive() {
+			if m.tailSession != nil && m.monitoring.SingleTailActive() {
 				tailLabel = "Stop Tail Logs"
 				tailDesc = "Stop the live log stream"
 			}
@@ -254,7 +255,7 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 				Description: tailDesc,
 				Section:     "Monitoring",
 				Action:      "wrangler_tail_toggle",
-				Disabled:    cmdRunning && !m.wrangler.TailActive(),
+				Disabled:    cmdRunning && !m.monitoring.SingleTailActive(),
 			})
 		}
 
@@ -352,7 +353,7 @@ func (m Model) buildWorkerActions() []actions.Item {
 
 	// Actions section
 	tailLabel := "Start tail logs"
-	if m.detail.TailActive() {
+	if m.monitoring.SingleTailActive() {
 		tailLabel = "Stop tail logs"
 	}
 	items = append(items, actions.Item{
@@ -597,9 +598,8 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	// Wrangler tail toggle (must be checked before generic wrangler_ prefix)
 	if item.Action == "wrangler_tail_toggle" {
 		if m.tailSession != nil {
-			// Stop any active tail (wrangler or detail)
+			// Stop any active tail
 			m.stopTail()
-			m.detail.ClearTail()
 			return nil
 		}
 		// Start tailing the focused env's worker
@@ -614,13 +614,12 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		}
 		// Stop any running wrangler command first
 		m.stopWranglerRunner()
-		// Stop any active detail tail
-		m.detail.ClearTail()
-		// Start tail in wrangler view
-		m.tailSource = "wrangler"
-		m.wrangler.StartTail(workerName)
+		// Start tail on Monitoring tab
+		m.tailSource = "monitoring"
+		m.monitoring.StartSingleTail(workerName)
+		m.activeTab = tabbar.TabMonitoring
 		accountID := m.registry.ActiveAccountID()
-		return tea.Batch(m.startTailCmd(accountID, workerName), m.wrangler.SpinnerInit())
+		return m.startTailCmd(accountID, workerName)
 	}
 
 	// Wrangler dev server actions
@@ -652,20 +651,18 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	// Named actions
 	switch item.Action {
 	case "tail_toggle":
-		if m.detail.TailActive() || m.tailSession != nil {
+		if m.monitoring.SingleTailActive() || m.tailSession != nil {
 			// Stop tailing
 			m.stopTail()
-			m.detail.ClearTail()
 			return nil
 		}
 		// Start tailing
 		if m.detail.IsWorkersDetail() && m.client != nil {
-			// Stop any wrangler tail first
-			m.wrangler.StopTailPane()
-			m.tailSource = "detail"
+			m.tailSource = "monitoring"
 			scriptName := m.detail.CurrentDetailName()
+			m.monitoring.StartSingleTail(scriptName)
+			m.activeTab = tabbar.TabMonitoring
 			accountID := m.registry.ActiveAccountID()
-			m.detail.SetTailStarting()
 			return m.startTailCmd(accountID, scriptName)
 		}
 	}

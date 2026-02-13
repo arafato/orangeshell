@@ -25,8 +25,8 @@ func (m *Model) startWranglerCmd(action, envName string) tea.Cmd {
 		return nil
 	}
 
-	// Stop any active wrangler tail since the CmdPane is being taken over
-	if m.tailSource == "wrangler" && m.tailSession != nil {
+	// Stop any active tail (now on Monitoring tab) when starting a wrangler command
+	if m.tailSession != nil {
 		m.stopTail()
 	}
 
@@ -88,8 +88,8 @@ func (m *Model) startWranglerCmdWithArgs(action, envName string, extraArgs []str
 		return nil
 	}
 
-	// Stop any active wrangler tail since the CmdPane is being taken over
-	if m.tailSource == "wrangler" && m.tailSession != nil {
+	// Stop any active tail (now on Monitoring tab) when starting a wrangler command
+	if m.tailSession != nil {
 		m.stopTail()
 	}
 

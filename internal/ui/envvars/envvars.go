@@ -68,6 +68,15 @@ const (
 	modeDelete             // Inline delete confirmation
 )
 
+// addField tracks which field has focus in add mode.
+type addField int
+
+const (
+	addFieldEnv   addField = iota // Environment selector
+	addFieldName                  // Variable name input
+	addFieldValue                 // Variable value input
+)
+
 // --- Model ---
 
 // Model is the env vars view state.
@@ -89,11 +98,18 @@ type Model struct {
 	projectName   string
 	sourceEnvName string // the environment the user navigated from
 
+	// Available environments from the wrangler config (always has at least "default")
+	envNames []string
+
 	// Edit mode
 	editNameInput  textinput.Model
 	editValueInput textinput.Model
 	editEnvName    string // target env for the edit/add
 	editOrigName   string // original var name (for edit, empty for add)
+
+	// Add mode — field focus and env selector
+	addFocusField addField
+	editEnvCursor int
 
 	// Delete confirmation
 	deleteTarget *EnvVar
@@ -108,9 +124,10 @@ type Model struct {
 }
 
 // New creates a new envvars view model with the given variables.
-// envName is the environment the user navigated from (used as default for add
+// envNames is the full list of environments defined in the wrangler config.
+// sourceEnvName is the environment the user navigated from (used as default for add
 // and displayed in the title).
-func New(configPath, projectName, envName string, vars []EnvVar) Model {
+func New(configPath, projectName, sourceEnvName string, envNames []string, vars []EnvVar) Model {
 	fi := textinput.New()
 	fi.Placeholder = "Type to filter..."
 	fi.CharLimit = 100
@@ -141,6 +158,11 @@ func New(configPath, projectName, envName string, vars []EnvVar) Model {
 
 	sorted := sortVars(vars)
 
+	// Ensure envNames always has at least "default".
+	if len(envNames) == 0 {
+		envNames = []string{"default"}
+	}
+
 	m := Model{
 		vars:           sorted,
 		filtered:       sorted,
@@ -148,7 +170,8 @@ func New(configPath, projectName, envName string, vars []EnvVar) Model {
 		filterFocused:  true,
 		configPath:     configPath,
 		projectName:    projectName,
-		sourceEnvName:  envName,
+		sourceEnvName:  sourceEnvName,
+		envNames:       envNames,
 		editNameInput:  ni,
 		editValueInput: vi,
 		mode:           modeList,
@@ -156,8 +179,8 @@ func New(configPath, projectName, envName string, vars []EnvVar) Model {
 
 	// Prepopulate filter with the source environment name so the user
 	// immediately sees only variables relevant to that environment.
-	if envName != "" {
-		m.filter.SetValue(envName)
+	if sourceEnvName != "" {
+		m.filter.SetValue(sourceEnvName)
 		m.applyFilter()
 	}
 
@@ -238,9 +261,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case modeEdit:
 		m.editValueInput, cmd = m.editValueInput.Update(msg)
 	case modeAdd:
-		if m.editNameInput.Focused() {
+		switch m.addFocusField {
+		case addFieldName:
 			m.editNameInput, cmd = m.editNameInput.Update(msg)
-		} else {
+		case addFieldValue:
 			m.editValueInput, cmd = m.editValueInput.Update(msg)
 		}
 	}
@@ -337,11 +361,22 @@ func (m Model) updateAddButtonFocused(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.editNameInput.SetValue("")
 		m.editValueInput.SetValue("")
 		m.errMsg = ""
-		m.editEnvName = m.sourceEnvName
-		if m.editEnvName == "" {
-			m.editEnvName = "default"
+
+		// Default env cursor to sourceEnvName
+		m.editEnvCursor = 0
+		target := m.sourceEnvName
+		if target == "" {
+			target = "default"
 		}
-		return m, m.editNameInput.Focus()
+		for i, name := range m.envNames {
+			if name == target {
+				m.editEnvCursor = i
+				break
+			}
+		}
+		m.editEnvName = m.envNames[m.editEnvCursor]
+		m.addFocusField = addFieldEnv
+		return m, nil
 	}
 	return m, nil
 }
@@ -435,7 +470,9 @@ func (m Model) updateEdit(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// updateAdd handles keys in add mode (name input first, then value).
+// updateAdd handles keys in add mode.
+// Tab cycles focus: Env → Name → Value → Env.
+// When env selector is focused, left/right cycle through available environments.
 func (m Model) updateAdd(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -443,18 +480,45 @@ func (m Model) updateAdd(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.errMsg = ""
 		m.filterFocused = false
 		m.filter.Blur()
+		m.editNameInput.Blur()
+		m.editValueInput.Blur()
 		return m, nil
 
 	case "tab":
-		// Toggle focus between name and value inputs
-		if m.editNameInput.Focused() {
+		switch m.addFocusField {
+		case addFieldEnv:
+			m.addFocusField = addFieldName
+			return m, m.editNameInput.Focus()
+		case addFieldName:
 			m.editNameInput.Blur()
+			m.addFocusField = addFieldValue
 			return m, m.editValueInput.Focus()
+		case addFieldValue:
+			m.editValueInput.Blur()
+			m.addFocusField = addFieldEnv
+			return m, nil
 		}
-		m.editValueInput.Blur()
-		return m, m.editNameInput.Focus()
+
+	case "left":
+		if m.addFocusField == addFieldEnv && len(m.envNames) > 0 {
+			m.editEnvCursor = (m.editEnvCursor - 1 + len(m.envNames)) % len(m.envNames)
+			m.editEnvName = m.envNames[m.editEnvCursor]
+			return m, nil
+		}
+
+	case "right":
+		if m.addFocusField == addFieldEnv && len(m.envNames) > 0 {
+			m.editEnvCursor = (m.editEnvCursor + 1) % len(m.envNames)
+			m.editEnvName = m.envNames[m.editEnvCursor]
+			return m, nil
+		}
 
 	case "enter":
+		// If env selector is focused, advance to name field
+		if m.addFocusField == addFieldEnv {
+			m.addFocusField = addFieldName
+			return m, m.editNameInput.Focus()
+		}
 		name := strings.TrimSpace(m.editNameInput.Value())
 		if name == "" {
 			m.errMsg = "Variable name cannot be empty"
@@ -477,11 +541,12 @@ func (m Model) updateAdd(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	}
 
-	// Forward to the focused input
+	// Forward to the focused text input (env selector has no text input)
 	var cmd tea.Cmd
-	if m.editNameInput.Focused() {
+	switch m.addFocusField {
+	case addFieldName:
 		m.editNameInput, cmd = m.editNameInput.Update(msg)
-	} else {
+	case addFieldValue:
 		m.editValueInput, cmd = m.editValueInput.Update(msg)
 	}
 	m.errMsg = ""
@@ -702,21 +767,33 @@ func (m Model) viewEdit() []string {
 
 func (m Model) viewAdd() []string {
 	var lines []string
-	lines = append(lines, theme.DimStyle.Render(fmt.Sprintf("  Adding variable to [%s]:", m.editEnvName)))
+	lines = append(lines, theme.DimStyle.Render("  Adding variable:"))
 	lines = append(lines, "")
 
-	nameFocused := m.editNameInput.Focused()
-	nameLabel := "Name:"
-	valueLabel := "Value:"
-	if nameFocused {
-		nameLabel = theme.SelectedItemStyle.Render("Name:")
+	// Environment selector (left/right arrows, no text input)
+	envName := m.envNames[m.editEnvCursor]
+	if m.addFocusField == addFieldEnv {
+		arrows := theme.DimStyle.Render("<") + " " + theme.SelectedItemStyle.Render(envName) + " " + theme.DimStyle.Render(">")
+		lines = append(lines, fmt.Sprintf("  %s  %s", theme.SelectedItemStyle.Render("Env:"), arrows))
 	} else {
-		valueLabel = theme.SelectedItemStyle.Render("Value:")
+		lines = append(lines, fmt.Sprintf("  %s  %s", "Env:", theme.ValueStyle.Render(envName)))
 	}
+	lines = append(lines, "")
 
+	// Name field
+	nameLabel := "Name:"
+	if m.addFocusField == addFieldName {
+		nameLabel = theme.SelectedItemStyle.Render("Name:")
+	}
 	lines = append(lines, fmt.Sprintf("  %s", nameLabel))
 	lines = append(lines, m.editNameInput.View())
 	lines = append(lines, "")
+
+	// Value field
+	valueLabel := "Value:"
+	if m.addFocusField == addFieldValue {
+		valueLabel = theme.SelectedItemStyle.Render("Value:")
+	}
 	lines = append(lines, fmt.Sprintf("  %s", valueLabel))
 	lines = append(lines, m.editValueInput.View())
 	return lines
@@ -744,7 +821,7 @@ func (m Model) viewHelp() string {
 	case modeEdit:
 		return theme.DimStyle.Render("  esc cancel  |  enter save")
 	case modeAdd:
-		return theme.DimStyle.Render("  esc cancel  |  tab switch field  |  enter save")
+		return theme.DimStyle.Render("  esc cancel  |  tab next field  |  enter save")
 	case modeDelete:
 		return theme.DimStyle.Render("  y confirm  |  n cancel")
 	}

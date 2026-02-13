@@ -276,7 +276,7 @@ func (m *Model) openEnvVarsView(configPath, envName, projectName string) tea.Cmd
 	}
 
 	vars := m.buildEnvVarsList(configPath, cfg)
-	m.envvarsView = envvars.New(configPath, projectName, envName, vars)
+	m.envvarsView = envvars.New(configPath, projectName, envName, cfg.EnvNames(), vars)
 	contentHeight := m.height - 2
 	if contentHeight < 1 {
 		contentHeight = 1

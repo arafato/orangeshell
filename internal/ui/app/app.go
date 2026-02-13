@@ -8,6 +8,7 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/oarafat/orangeshell/internal/api"
 	"github.com/oarafat/orangeshell/internal/auth"
@@ -26,6 +27,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/setup"
+	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 	uitriggers "github.com/oarafat/orangeshell/internal/ui/triggers"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
@@ -161,6 +163,8 @@ type Model struct {
 	// State
 	phase        Phase
 	viewState    ViewState
+	activeTab    tabbar.TabID
+	hoverTab     tabbar.TabID // -1 means no hover
 	showSearch   bool
 	showActions  bool
 	actionsPopup actions.Model
@@ -249,6 +253,8 @@ func NewModel(cfg *config.Config, scanDir string) Model {
 		wrangler:  uiwrangler.New(),
 		phase:     phase,
 		viewState: ViewWrangler, // wrangler is the home screen
+		activeTab: tabbar.TabOperations,
+		hoverTab:  -1, // no tab hovered
 		cfg:       cfg,
 		registry:  svc.NewRegistry(),
 		scanDir:   scanDir,
@@ -1054,6 +1060,32 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
+		// Reset hover state on every mouse event — re-set below if still hovering.
+		m.hoverTab = -1
+
+		switch msg.Action {
+		case tea.MouseActionMotion:
+			// Track hover over tab bar.
+			for _, t := range tabbar.All() {
+				if z := zone.Get(t.ZoneID()); z != nil && z.InBounds(msg) {
+					m.hoverTab = t
+					break
+				}
+			}
+			return m, nil
+
+		case tea.MouseActionRelease:
+			if msg.Button == tea.MouseButtonLeft {
+				// Check tab bar clicks.
+				for _, t := range tabbar.All() {
+					if z := zone.Get(t.ZoneID()); z != nil && z.InBounds(msg) {
+						m.activeTab = t
+						return m, nil
+					}
+				}
+			}
+		}
+
 		// Forward mouse events to the detail panel regardless of view (for copy-on-click)
 		var cmd tea.Cmd
 		m.detail, cmd = m.detail.Update(msg)
@@ -1062,7 +1094,29 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+
+		// Number keys switch top-level tabs — but only when not in a text input context
+		// (dir browser folder creation, D1 SQL console, etc.).
+		case "1", "2", "3", "4":
+			if !m.isTextInputActive() {
+				switch msg.String() {
+				case "1":
+					m.activeTab = tabbar.TabOperations
+				case "2":
+					m.activeTab = tabbar.TabMonitoring
+				case "3":
+					m.activeTab = tabbar.TabResources
+				case "4":
+					m.activeTab = tabbar.TabConfiguration
+				}
+				return m, nil
+			}
+
 		case "q":
+			// Quit from non-Operations tabs (they have no text inputs yet).
+			if m.activeTab != tabbar.TabOperations {
+				return m, tea.Quit
+			}
 			// Only quit when not in a text-input context
 			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() && !m.wrangler.CmdRunning() {
 				return m, tea.Quit
@@ -1081,6 +1135,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail.ClearD1()
 			m.envVarsFromResourceList = false
 			m.triggersFromResourceList = false
+			m.activeTab = tabbar.TabOperations
 			m.viewState = ViewWrangler
 			// Refresh deployment data if stale
 			if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
@@ -1188,25 +1243,29 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Route to the active view
-	var cmd tea.Cmd
-	switch m.viewState {
-	case ViewWrangler:
-		m.wrangler, cmd = m.wrangler.Update(msg)
-	case ViewServiceList, ViewServiceDetail:
-		wasDetail := m.detail.InDetailView()
-		m.detail, cmd = m.detail.Update(msg)
-		// Detect detail→list transition (detail handled Esc internally)
-		if wasDetail && !m.detail.InDetailView() {
-			m.viewState = ViewServiceList
+	// Route to the active view — only when on the Operations tab.
+	// Other tabs are placeholders and don't process messages yet.
+	if m.activeTab == tabbar.TabOperations {
+		var cmd tea.Cmd
+		switch m.viewState {
+		case ViewWrangler:
+			m.wrangler, cmd = m.wrangler.Update(msg)
+		case ViewServiceList, ViewServiceDetail:
+			wasDetail := m.detail.InDetailView()
+			m.detail, cmd = m.detail.Update(msg)
+			// Detect detail→list transition (detail handled Esc internally)
+			if wasDetail && !m.detail.InDetailView() {
+				m.viewState = ViewServiceList
+			}
+		case ViewEnvVars:
+			m.envvarsView, cmd = m.envvarsView.Update(msg)
+		case ViewTriggers:
+			m.triggersView, cmd = m.triggersView.Update(msg)
 		}
-	case ViewEnvVars:
-		m.envvarsView, cmd = m.envvarsView.Update(msg)
-	case ViewTriggers:
-		m.triggersView, cmd = m.triggersView.Update(msg)
+		return m, cmd
 	}
 
-	return m, cmd
+	return m, nil
 }
 
 func (m Model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1222,8 +1281,24 @@ func (m Model) updateLauncher(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// isTextInputActive returns true when the user is in a text input context
+// (dir browser folder creation, D1 SQL console, wrangler command running, etc.)
+// where number keys should be typed rather than switching tabs.
+func (m Model) isTextInputActive() bool {
+	if m.viewState == ViewWrangler && m.wrangler.IsDirBrowserActive() {
+		return true
+	}
+	if m.viewState == ViewWrangler && m.wrangler.CmdRunning() {
+		return true
+	}
+	if m.viewState == ViewServiceDetail && m.detail.D1Active() {
+		return true
+	}
+	return false
+}
+
 // layout recalculates component sizes based on terminal dimensions.
-// Full-width layout: header(1) + content + help(1).
+// Full-width layout: header(1) + tab bar(3) + content + help(1).
 func (m *Model) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
@@ -1231,7 +1306,7 @@ func (m *Model) layout() {
 
 	headerHeight := 1
 	helpHeight := 1
-	contentHeight := m.height - headerHeight - helpHeight
+	contentHeight := m.height - headerHeight - tabBarHeight - helpHeight
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -1241,6 +1316,6 @@ func (m *Model) layout() {
 	m.header.SetWidth(m.width)
 	m.detail.SetSize(contentWidth, contentHeight)
 	m.wrangler.SetSize(contentWidth, contentHeight)
-	// Detail content starts after: header(1) + top border(1) = 2 rows from top of terminal
-	m.detail.SetYOffset(headerHeight + 1)
+	// Detail content starts after: header(1) + tab bar(3) + top border(1) = 5 rows from top of terminal
+	m.detail.SetYOffset(headerHeight + tabBarHeight + 1)
 }

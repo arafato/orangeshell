@@ -7,18 +7,22 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	zone "github.com/lrstanley/bubblezone"
+
 	svc "github.com/oarafat/orangeshell/internal/service"
+	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 	"github.com/oarafat/orangeshell/version"
 )
 
 // View renders the full application.
+// zone.Scan() strips bubblezone markers and records zone positions for mouse hit-testing.
 func (m Model) View() string {
 	switch m.phase {
 	case PhaseSetup:
 		return m.setup.View()
 	case PhaseDashboard:
-		return m.viewDashboard()
+		return zone.Scan(m.viewDashboard())
 	}
 	return ""
 }
@@ -54,33 +58,21 @@ func (m Model) viewDashboard() string {
 	return m.renderDashboardContent()
 }
 
-// renderDashboardContent renders the normal dashboard (header, content, help, status).
+// tabBarHeight is the number of terminal lines the tab bar occupies.
+// The inactive tabs have a rounded border (top + bottom) adding 2 lines,
+// plus the content row itself = 3 lines total.
+const tabBarHeight = 3
+
+// renderDashboardContent renders the normal dashboard (header, tab bar, content, help, status).
 func (m Model) renderDashboardContent() string {
 	headerView := m.header.View()
+	tabBarView := tabbar.View(m.activeTab, m.hoverTab)
 
-	var content string
-	switch m.viewState {
-	case ViewWrangler:
-		content = m.wrangler.View()
-	case ViewServiceList, ViewServiceDetail:
-		content = m.detail.View()
-	case ViewEnvVars:
-		contentHeight := m.height - 2 // header + help bar
-		if contentHeight < 1 {
-			contentHeight = 1
-		}
-		content = m.envvarsView.View(m.width, contentHeight)
-	case ViewTriggers:
-		contentHeight := m.height - 2 // header + help bar
-		if contentHeight < 1 {
-			contentHeight = 1
-		}
-		content = m.triggersView.View(m.width, contentHeight)
-	}
+	content := m.renderTabContent()
 
 	helpText := m.renderHelp()
 
-	parts := []string{headerView, content, helpText}
+	parts := []string{headerView, tabBarView, content, helpText}
 	if m.toastMsg != "" && time.Now().Before(m.toastExpiry) {
 		parts = append(parts, theme.SuccessStyle.Render(fmt.Sprintf(" ✓ %s ", m.toastMsg)))
 	} else if m.err != nil {
@@ -88,6 +80,75 @@ func (m Model) renderDashboardContent() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// renderTabContent renders the content area for the currently active tab.
+func (m Model) renderTabContent() string {
+	switch m.activeTab {
+	case tabbar.TabOperations:
+		return m.renderOperationsTab()
+	case tabbar.TabMonitoring:
+		return m.renderMonitoringTab()
+	case tabbar.TabResources:
+		return m.renderResourcesTab()
+	case tabbar.TabConfiguration:
+		return m.renderConfigurationTab()
+	}
+	return ""
+}
+
+// renderOperationsTab renders the Operations tab content.
+// Currently routes all existing ViewState content here — this will be narrowed
+// in later phases as views move to their own tabs.
+func (m Model) renderOperationsTab() string {
+	switch m.viewState {
+	case ViewWrangler:
+		return m.wrangler.View()
+	case ViewServiceList, ViewServiceDetail:
+		return m.detail.View()
+	case ViewEnvVars:
+		contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+		return m.envvarsView.View(m.width, contentHeight)
+	case ViewTriggers:
+		contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+		return m.triggersView.View(m.width, contentHeight)
+	}
+	return ""
+}
+
+// renderMonitoringTab renders the Monitoring tab placeholder.
+func (m Model) renderMonitoringTab() string {
+	return m.renderPlaceholderTab("Monitoring", "Live tail grid — coming soon")
+}
+
+// renderResourcesTab renders the Resources tab placeholder.
+func (m Model) renderResourcesTab() string {
+	return m.renderPlaceholderTab("Resources", "Service browser — coming soon")
+}
+
+// renderConfigurationTab renders the Configuration tab placeholder.
+func (m Model) renderConfigurationTab() string {
+	return m.renderPlaceholderTab("Configuration", "Env vars, triggers, bindings — coming soon")
+}
+
+// renderPlaceholderTab renders a centered placeholder message for tabs that are not yet implemented.
+func (m Model) renderPlaceholderTab(title, subtitle string) string {
+	contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+
+	titleText := theme.TitleStyle.Render(title)
+	subtitleText := theme.DimStyle.Render(subtitle)
+
+	block := lipgloss.JoinVertical(lipgloss.Center, titleText, "", subtitleText)
+	return lipgloss.Place(m.width, contentHeight, lipgloss.Center, lipgloss.Center, block)
 }
 
 // dimContent applies ANSI dim (faint) styling to every line of the rendered string.
@@ -154,87 +215,27 @@ func overlayCenter(bg, fg string, termWidth, termHeight int) string {
 	return strings.Join(result, "\n")
 }
 
+// helpEntry is a key-description pair for the help bar.
+type helpEntry struct {
+	key  string
+	desc string
+}
+
 func (m Model) renderHelp() string {
-	type helpEntry struct {
-		key  string
-		desc string
+	// Tab navigation hint — always first.
+	entries := []helpEntry{
+		{"1-4", "tabs"},
 	}
 
-	var entries []helpEntry
-
-	switch m.viewState {
-	case ViewWrangler:
-		if m.wrangler.IsParallelTailActive() {
-			entries = []helpEntry{
-				{"esc", "back"},
-				{"j/k", "scroll"},
-			}
-		} else if m.wrangler.IsEmpty() {
-			entries = []helpEntry{
-				{"j/k", "navigate"},
-				{"enter", "select"},
-				{"ctrl+l", "resources"},
-				{"[/]", "accounts"},
-				{"q", "quit"},
-			}
-		} else {
-			entries = []helpEntry{
-				{"ctrl+l", "resources"},
-				{"ctrl+k", "search"},
-				{"ctrl+p", "actions"},
-				{"ctrl+n", "bindings"},
-				{"[/]", "accounts"},
-			}
-			if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
-				entries = append(entries, helpEntry{"t", "tail"})
-				if m.wrangler.InsideBox() {
-					entries = append(entries, helpEntry{"d", "del binding"})
-				} else {
-					entries = append(entries, helpEntry{"d", "del env"})
-				}
-			}
-			entries = append(entries, helpEntry{"q", "quit"})
-		}
-	case ViewEnvVars:
-		entries = []helpEntry{
-			{"esc", "back"},
-			{"enter", "edit/add"},
-			{"d", "delete"},
-			{"ctrl+h", "home"},
-		}
-	case ViewTriggers:
-		entries = []helpEntry{
-			{"esc", "back"},
-			{"a", "add"},
-			{"d", "delete"},
-			{"ctrl+h", "home"},
-		}
-	case ViewServiceList:
-		entries = []helpEntry{
-			{"esc", "back"},
-			{"ctrl+h", "home"},
-			{"ctrl+l", "resources"},
-			{"ctrl+k", "search"},
-			{"enter", "detail"},
-		}
-		// Show delete shortcut for services that implement the Deleter interface
-		if s := m.registry.Get(m.detail.Service()); s != nil {
-			if _, ok := s.(svc.Deleter); ok {
-				entries = append(entries, helpEntry{"d", "delete"})
-			}
-		}
-		entries = append(entries, helpEntry{"[/]", "accounts"})
-	case ViewServiceDetail:
-		entries = []helpEntry{
-			{"esc", "back"},
-			{"ctrl+h", "home"},
-			{"ctrl+p", "actions"},
-			{"ctrl+k", "search"},
-		}
-		if m.detail.IsWorkersDetail() {
-			entries = append(entries, helpEntry{"t", "tail"})
-		}
-		entries = append(entries, helpEntry{"[/]", "accounts"})
+	switch m.activeTab {
+	case tabbar.TabOperations:
+		entries = append(entries, m.renderOperationsHelp()...)
+	case tabbar.TabMonitoring:
+		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+	case tabbar.TabResources:
+		entries = append(entries, helpEntry{"ctrl+l", "resources"}, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+	case tabbar.TabConfiguration:
+		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 	}
 
 	var parts []string
@@ -263,4 +264,86 @@ func (m Model) renderHelp() string {
 	help += strings.Repeat(" ", gap) + ver
 
 	return theme.HelpBarStyle.Render(help)
+}
+
+// renderOperationsHelp returns the context-sensitive help entries for the Operations tab.
+func (m Model) renderOperationsHelp() []helpEntry {
+
+	switch m.viewState {
+	case ViewWrangler:
+		if m.wrangler.IsParallelTailActive() {
+			return []helpEntry{
+				{"esc", "back"},
+				{"j/k", "scroll"},
+			}
+		}
+		if m.wrangler.IsEmpty() {
+			return []helpEntry{
+				{"j/k", "navigate"},
+				{"enter", "select"},
+				{"ctrl+l", "resources"},
+				{"[/]", "accounts"},
+				{"q", "quit"},
+			}
+		}
+		entries := []helpEntry{
+			{"ctrl+l", "resources"},
+			{"ctrl+k", "search"},
+			{"ctrl+p", "actions"},
+			{"ctrl+n", "bindings"},
+			{"[/]", "accounts"},
+		}
+		if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
+			entries = append(entries, helpEntry{"t", "tail"})
+			if m.wrangler.InsideBox() {
+				entries = append(entries, helpEntry{"d", "del binding"})
+			} else {
+				entries = append(entries, helpEntry{"d", "del env"})
+			}
+		}
+		entries = append(entries, helpEntry{"q", "quit"})
+		return entries
+	case ViewEnvVars:
+		return []helpEntry{
+			{"esc", "back"},
+			{"enter", "edit/add"},
+			{"d", "delete"},
+			{"ctrl+h", "home"},
+		}
+	case ViewTriggers:
+		return []helpEntry{
+			{"esc", "back"},
+			{"a", "add"},
+			{"d", "delete"},
+			{"ctrl+h", "home"},
+		}
+	case ViewServiceList:
+		entries := []helpEntry{
+			{"esc", "back"},
+			{"ctrl+h", "home"},
+			{"ctrl+l", "resources"},
+			{"ctrl+k", "search"},
+			{"enter", "detail"},
+		}
+		if s := m.registry.Get(m.detail.Service()); s != nil {
+			if _, ok := s.(svc.Deleter); ok {
+				entries = append(entries, helpEntry{"d", "delete"})
+			}
+		}
+		entries = append(entries, helpEntry{"[/]", "accounts"})
+		return entries
+	case ViewServiceDetail:
+		entries := []helpEntry{
+			{"esc", "back"},
+			{"ctrl+h", "home"},
+			{"ctrl+p", "actions"},
+			{"ctrl+k", "search"},
+		}
+		if m.detail.IsWorkersDetail() {
+			entries = append(entries, helpEntry{"t", "tail"})
+		}
+		entries = append(entries, helpEntry{"[/]", "accounts"})
+		return entries
+	}
+	return nil
 }

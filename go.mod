@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/cloudflare/cloudflare-go/v6 v6.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/lrstanley/bubblezone v1.0.0
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/tidwall/gjson v1.14.4
 	github.com/tidwall/jsonc v0.3.2
@@ -38,5 +39,5 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/text v0.24.0 // indirect
 )

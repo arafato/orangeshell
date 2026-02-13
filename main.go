@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	tea "github.com/charmbracelet/bubbletea"
+	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/oarafat/orangeshell/internal/config"
 	"github.com/oarafat/orangeshell/internal/ui/app"
@@ -42,6 +43,10 @@ func main() {
 	// of the user's terminal theme. Restore the original on exit (OSC 111).
 	fmt.Fprint(os.Stdout, "\x1b]11;#000000\x1b\\")
 	defer fmt.Fprint(os.Stdout, "\x1b]111\x1b\\")
+
+	// Initialize the global bubblezone manager for mouse event tracking.
+	// zone.Scan() is called in the root View() to register zone positions.
+	zone.NewGlobal()
 
 	model := app.NewModel(cfg, scanDir)
 

@@ -3,7 +3,6 @@ package detail
 import (
 	"fmt"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -870,7 +869,7 @@ func (m Model) viewDetail(maxHeight int) string {
 	// For D1, split layout: SQL console on left, schema on right
 	if m.service == "D1" && m.d1Active {
 		return m.viewDetailWithD1(maxHeight, title, sep, fieldLines, copyLineMap)
-			}
+	}
 
 	// Standard layout for all services (including Workers)
 	help := "\n" + theme.DimStyle.Render("  esc/backspace back  |  j/k scroll")
@@ -1245,119 +1244,6 @@ func joinSideBySide(left, right []string, divider string, leftWidth, height int)
 // For our use case, lipgloss-styled strings have ANSI sequences, so we use lipgloss.Width.
 func runeWidth(s string) int {
 	return lipgloss.Width(s)
-}
-
-// renderLogConsole renders the tail log console region.
-func (m Model) renderLogConsole(height int) []string {
-	sepWidth := m.width - 6
-	if sepWidth < 0 {
-		sepWidth = 0
-	}
-	consoleSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
-		fmt.Sprintf(" %s", strings.Repeat("─", sepWidth)))
-
-	// Header line
-	var headerText string
-	if m.tailActive {
-		headerText = theme.LogConsoleHeaderStyle.Render("  ▸ Live Logs (tailing)")
-	} else if m.tailStarting {
-		headerText = fmt.Sprintf("  %s %s", m.spinner.View(), theme.DimStyle.Render("Connecting to tail..."))
-	} else {
-		headerText = theme.DimStyle.Render("  ▹ Live Logs")
-	}
-
-	// Help line at the bottom
-	var helpText string
-	if m.tailActive {
-		helpText = theme.DimStyle.Render("  esc back  |  t stop tail  |  j/k scroll")
-	} else {
-		helpText = theme.DimStyle.Render("  esc back  |  t start tail  |  j/k scroll")
-	}
-
-	lines := []string{consoleSep, headerText}
-
-	// Available lines for log content (minus sep, header, help)
-	contentHeight := height - 3
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
-
-	if m.tailError != "" {
-		errLine := theme.ErrorStyle.Render(fmt.Sprintf("  Error: %s", m.tailError))
-		lines = append(lines, errLine)
-		for len(lines) < height-1 {
-			lines = append(lines, "")
-		}
-		lines = append(lines, helpText)
-		return lines
-	}
-
-	if !m.tailActive && !m.tailStarting {
-		hint := theme.DimStyle.Render("  Press t to start tailing logs")
-		lines = append(lines, hint)
-		for len(lines) < height-1 {
-			lines = append(lines, "")
-		}
-		lines = append(lines, helpText)
-		return lines
-	}
-
-	if len(m.tailLines) == 0 {
-		waiting := theme.DimStyle.Render("  Waiting for log events...")
-		lines = append(lines, waiting)
-		for len(lines) < height-1 {
-			lines = append(lines, "")
-		}
-		lines = append(lines, helpText)
-		return lines
-	}
-
-	// Render log lines with level-based coloring
-	var logRendered []string
-	for _, tl := range m.tailLines {
-		ts := theme.LogTimestampStyle.Render(tl.Timestamp.Format(time.TimeOnly))
-		text := m.styleTailLine(tl)
-		logRendered = append(logRendered, fmt.Sprintf("  %s %s", ts, text))
-	}
-
-	// Show the most recent lines that fit, respecting tailScroll
-	totalLogLines := len(logRendered)
-	// tailScroll == 0 means pinned to bottom (show most recent)
-	startLine := totalLogLines - contentHeight - m.tailScroll
-	if startLine < 0 {
-		startLine = 0
-	}
-	endLine := startLine + contentHeight
-	if endLine > totalLogLines {
-		endLine = totalLogLines
-	}
-
-	visible := logRendered[startLine:endLine]
-	lines = append(lines, visible...)
-
-	// Pad to fill remaining space
-	for len(lines) < height-1 {
-		lines = append(lines, "")
-	}
-	lines = append(lines, helpText)
-
-	return lines
-}
-
-// styleTailLine applies level-based coloring to a tail line's text.
-func (m Model) styleTailLine(tl service.TailLine) string {
-	switch tl.Level {
-	case "warn":
-		return theme.LogLevelWarn.Render(tl.Text)
-	case "error", "exception":
-		return theme.LogLevelError.Render(tl.Text)
-	case "request":
-		return theme.LogLevelRequest.Render(tl.Text)
-	case "system":
-		return theme.LogLevelSystem.Render(tl.Text)
-	default: // "log", "info"
-		return theme.LogLevelLog.Render(tl.Text)
-	}
 }
 
 // truncateRunes truncates a string to maxLen runes, appending "..." if needed.

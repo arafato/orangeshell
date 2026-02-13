@@ -79,6 +79,57 @@ func LangLabel(lang string) string {
 	}
 }
 
+// CreateFromTemplateCmd describes a template-based project creation command via C3.
+type CreateFromTemplateCmd struct {
+	// Name is the project/directory name to create.
+	Name string
+	// TemplateName is the template directory name, e.g. "vite-react-template".
+	TemplateName string
+	// Dir is the parent directory where the project subdirectory will be created.
+	// If empty, the process's current working directory is used.
+	Dir string
+}
+
+// CreateProjectFromTemplate runs the C3 CLI to scaffold a project from a Cloudflare template.
+// Uses the full GitHub URL format so that C3 (via degit) clones the correct subdirectory.
+// The --category=remote-template flag is required to override C3's default hello-world flow
+// when -y is also passed.
+func CreateProjectFromTemplate(ctx context.Context, cmd CreateFromTemplateCmd) CreateProjectResult {
+	execCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	args := []string{
+		"create", "cloudflare@latest", "--",
+		cmd.Name,
+		"--template=https://github.com/cloudflare/templates/tree/main/" + cmd.TemplateName,
+		"--category=remote-template",
+		"--no-deploy",
+		"--no-git",
+		"-y",
+	}
+
+	c := exec.CommandContext(execCtx, "npm", args...)
+	c.Env = os.Environ()
+	if cmd.Dir != "" {
+		c.Dir = cmd.Dir
+	}
+
+	out, err := c.CombinedOutput()
+	output := strings.TrimSpace(string(out))
+
+	if err != nil {
+		return CreateProjectResult{
+			Success: false,
+			Output:  output,
+		}
+	}
+
+	return CreateProjectResult{
+		Success: true,
+		Output:  output,
+	}
+}
+
 // CreateResourceCmd describes a wrangler CLI resource creation command.
 type CreateResourceCmd struct {
 	// ResourceType is one of: "d1", "kv", "r2", "queue"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -385,19 +386,67 @@ func (m Model) updateRemoveProjectPopup(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // createProjectCmd runs C3 to scaffold a new Worker project.
-func (m Model) createProjectCmd(name, lang, dir string) tea.Cmd {
+// If template is set, creates from a Cloudflare template; otherwise uses lang.
+func (m Model) createProjectCmd(name, lang, template, dir string) tea.Cmd {
 	return func() tea.Msg {
-		result := wcfg.CreateProject(context.Background(), wcfg.CreateProjectCmd{
-			Name: name,
-			Lang: lang,
-			Dir:  dir,
-		})
+		var result wcfg.CreateProjectResult
+		if template != "" {
+			result = wcfg.CreateProjectFromTemplate(context.Background(), wcfg.CreateFromTemplateCmd{
+				Name:         name,
+				TemplateName: template,
+				Dir:          dir,
+			})
+		} else {
+			result = wcfg.CreateProject(context.Background(), wcfg.CreateProjectCmd{
+				Name: name,
+				Lang: lang,
+				Dir:  dir,
+			})
+		}
+
+		var logPath string
+		if !result.Success {
+			logPath = writeCreateLog(name, []byte(result.Output))
+		}
+
 		return projectpopup.CreateProjectDoneMsg{
 			Name:    name,
 			Success: result.Success,
 			Output:  result.Output,
+			LogPath: logPath,
 		}
 	}
+}
+
+// fetchTemplatesCmd fetches the template list from the cloudflare/templates GitHub repo.
+func (m Model) fetchTemplatesCmd() tea.Cmd {
+	return func() tea.Msg {
+		templates, err := wcfg.FetchTemplates(context.Background())
+		return projectpopup.FetchTemplatesDoneMsg{
+			Templates: templates,
+			Err:       err,
+		}
+	}
+}
+
+// writeCreateLog writes project creation error output to ~/.orangeshell/logs/.
+// Returns empty string if writing fails (non-fatal).
+func writeCreateLog(projectName string, output []byte) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	logsDir := filepath.Join(home, ".orangeshell", "logs")
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
+		return ""
+	}
+	ts := time.Now().Format("20060102T150405")
+	filename := fmt.Sprintf("create-%s-%s.log", projectName, ts)
+	logPath := filepath.Join(logsDir, filename)
+	if err := os.WriteFile(logPath, output, 0644); err != nil {
+		return ""
+	}
+	return logPath
 }
 
 // resourceTypeToServiceName maps a binding resource type to its service name in the registry.
@@ -577,7 +626,15 @@ func (m *Model) handleProjectPopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, nil, true
 
 	case projectpopup.CreateProjectMsg:
-		return *m, m.createProjectCmd(msg.Name, msg.Lang, msg.Dir), true
+		return *m, m.createProjectCmd(msg.Name, msg.Lang, msg.Template, msg.Dir), true
+
+	case projectpopup.FetchTemplatesMsg:
+		return *m, m.fetchTemplatesCmd(), true
+
+	case projectpopup.FetchTemplatesDoneMsg:
+		var cmd tea.Cmd
+		m.projectPopup, cmd = m.projectPopup.Update(msg)
+		return *m, cmd, true
 
 	case projectpopup.CreateProjectDoneMsg:
 		var cmd tea.Cmd

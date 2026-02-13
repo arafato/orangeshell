@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -11,6 +12,18 @@ import (
 )
 
 func main() {
+	// Ensure Node.js and npm are available (npx ships with npm since v5.2+).
+	if _, err := exec.LookPath("npx"); err != nil {
+		fmt.Fprintln(os.Stderr, "orangeshell requires Node.js and npm to run.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  Install Node.js and npm:")
+		fmt.Fprintln(os.Stderr, "    https://docs.npmjs.com/downloading-and-installing-node-js-and-npm")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  Install Wrangler (Cloudflare Workers CLI):")
+		fmt.Fprintln(os.Stderr, "    https://developers.cloudflare.com/workers/wrangler/install-and-update/")
+		os.Exit(1)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)

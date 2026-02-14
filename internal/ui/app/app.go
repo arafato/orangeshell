@@ -1244,9 +1244,9 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activeTab == tabbar.TabConfiguration {
 				return m, tea.Quit
 			}
-			// Resources tab: quit unless D1 console is active
+			// Resources tab: quit unless D1 console is actively focused
 			if m.activeTab == tabbar.TabResources {
-				if m.viewState == ViewServiceDetail && m.detail.D1Active() {
+				if m.viewState == ViewServiceDetail && m.detail.D1Active() && m.detail.Focus() == detail.FocusDetail {
 					break // let it fall through to detail's Update
 				}
 				return m, tea.Quit
@@ -1459,7 +1459,7 @@ func (m Model) isTextInputActive() bool {
 	if m.viewState == ViewWrangler && m.wrangler.CmdRunning() {
 		return true
 	}
-	if m.viewState == ViewServiceDetail && m.detail.D1Active() {
+	if m.viewState == ViewServiceDetail && m.detail.D1Active() && m.detail.Focus() == detail.FocusDetail {
 		return true
 	}
 	return false
@@ -1480,10 +1480,18 @@ func (m *Model) ensureViewStateForTab() tea.Cmd {
 		}
 	case tabbar.TabResources:
 		// Service list/detail are valid; anything else shows placeholder.
-		// Auto-open the service dropdown when no service is selected.
 		if m.detail.Service() == "" {
+			// No service selected — auto-open the dropdown
 			m.detail.OpenDropdown()
 			m.viewState = ViewServiceList
+			m.detail.SetFocused(true)
+		} else if m.viewState != ViewServiceList && m.viewState != ViewServiceDetail {
+			// Returning from another tab — restore the correct view state
+			if m.detail.InDetailView() {
+				m.viewState = ViewServiceDetail
+			} else {
+				m.viewState = ViewServiceList
+			}
 			m.detail.SetFocused(true)
 		}
 		// Ensure the binding index is available for managed/bound detection.

@@ -10,6 +10,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 
 	svc "github.com/oarafat/orangeshell/internal/service"
+	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/monitoring"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
@@ -101,7 +102,20 @@ func (m Model) renderTabContent() string {
 // renderOperationsTab renders the Operations tab content.
 func (m Model) renderOperationsTab() string {
 	if m.viewState == ViewWrangler {
-		return m.wrangler.View()
+		content := m.wrangler.View()
+		// Pad to full content height so the help bar stays at the bottom
+		contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+		lines := strings.Split(content, "\n")
+		for len(lines) < contentHeight {
+			lines = append(lines, "")
+		}
+		if len(lines) > contentHeight {
+			lines = lines[:contentHeight]
+		}
+		return strings.Join(lines, "\n")
 	}
 	return ""
 }
@@ -304,12 +318,20 @@ func (m Model) renderOperationsHelp() []helpEntry {
 
 // renderResourcesHelp returns the context-sensitive help entries for the Resources tab.
 func (m Model) renderResourcesHelp() []helpEntry {
-	switch m.viewState {
-	case ViewServiceList:
+	// Dropdown open — show dropdown-specific help
+	if m.detail.DropdownOpen() {
+		return []helpEntry{
+			{"j/k", "navigate"},
+			{"enter", "select"},
+			{"esc", "close"},
+		}
+	}
+
+	switch m.detail.Focus() {
+	case detail.FocusList:
 		entries := []helpEntry{
-			{"ctrl+h", "home"},
-			{"ctrl+l", "resources"},
-			{"ctrl+k", "search"},
+			{"s", "service"},
+			{"j/k", "navigate"},
 			{"enter", "detail"},
 		}
 		if s := m.registry.Get(m.detail.Service()); s != nil {
@@ -317,23 +339,27 @@ func (m Model) renderResourcesHelp() []helpEntry {
 				entries = append(entries, helpEntry{"d", "delete"})
 			}
 		}
-		entries = append(entries, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		if m.detail.InDetailView() {
+			entries = append(entries, helpEntry{"tab", "detail pane"})
+		}
+		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 		return entries
-	case ViewServiceDetail:
+	case detail.FocusDetail:
 		entries := []helpEntry{
+			{"s", "service"},
 			{"esc", "back"},
-			{"ctrl+h", "home"},
-			{"ctrl+p", "actions"},
-			{"ctrl+k", "search"},
+			{"j/k", "scroll"},
 		}
 		if m.detail.IsWorkersDetail() {
 			entries = append(entries, helpEntry{"t", "tail"})
 		}
-		entries = append(entries, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		entries = append(entries, helpEntry{"tab", "list pane"}, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 		return entries
 	}
+
 	// Placeholder state (no service loaded)
 	return []helpEntry{
+		{"s", "service"},
 		{"ctrl+l", "resources"},
 		{"ctrl+k", "search"},
 		{"[/]", "accounts"},

@@ -406,10 +406,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil && msg.Resources != nil {
 			m.registry.SetCache(msg.ServiceName, msg.Resources)
 		}
-		// When Workers list loads, build the binding index in the background
+		// When Workers list loads, build the binding index in the background.
+		// When a non-Workers service loads and no binding index exists yet,
+		// trigger a Workers fetch + index build so managed detection works.
 		var indexCmd tea.Cmd
 		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
 			indexCmd = m.buildBindingIndexCmd()
+		} else if msg.ServiceName != "Workers" && msg.Err == nil && m.registry.GetBindingIndex() == nil {
+			// Binding index not yet available — kick off Workers fetch + build
+			if m.registry.GetCache("Workers") == nil {
+				indexCmd = m.loadServiceResources("Workers")
+			} else {
+				indexCmd = m.buildBindingIndexCmd()
+			}
 		}
 		// Staleness check: ignore if the user has already switched services
 		if msg.ServiceName != m.detail.Service() {
@@ -423,6 +432,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.detail.SetResources(msg.Resources, msg.Err, msg.NotIntegrated)
+		// Update managed resource highlighting
+		m.updateManagedResources()
 		// Update search items after loading
 		if msg.Err == nil {
 			m.search.SetItems(m.registry.AllSearchItems())
@@ -431,6 +442,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, indexCmd
 		}
 		return m, nil
+
+	case detail.SelectServiceMsg:
+		// User selected a service from the dropdown — navigate to it
+		cmd := m.navigateToService(msg.ServiceName)
+		return m, cmd
 
 	case detail.LoadResourcesMsg:
 		// Don't attempt to load if auth hasn't completed yet — services aren't
@@ -507,6 +523,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update the detail panel if it's showing this service (in list mode)
 		if msg.Err == nil && msg.ServiceName == m.detail.Service() {
 			m.detail.RefreshResources(msg.Resources)
+			m.updateManagedResources()
 		}
 		// Always update search items and decrement fetching counter
 		m.search.SetItems(m.registry.AllSearchItems())
@@ -626,6 +643,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.registry.SetBindingIndex(msg.index)
+		// Update managed resource highlighting now that the index is available
+		m.updateManagedResources()
 		// If there's a pending delete request, transition the popup from loading → confirm.
 		if m.pendingDeleteReq != nil {
 			req := m.pendingDeleteReq
@@ -1156,8 +1175,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, t := range tabbar.All() {
 					if z := zone.Get(t.ZoneID()); z != nil && z.InBounds(msg) {
 						m.activeTab = t
-						m.ensureViewStateForTab()
-						return m, nil
+						cmd := m.ensureViewStateForTab()
+						return m, cmd
 					}
 				}
 				// Check header account tab clicks.
@@ -1207,8 +1226,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "4":
 					m.activeTab = tabbar.TabConfiguration
 				}
-				m.ensureViewStateForTab()
-				return m, nil
+				cmd := m.ensureViewStateForTab()
+				return m, cmd
 			}
 
 		case "q":
@@ -1349,11 +1368,18 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+			// Esc on Resources tab — let the detail model handle it entirely:
+			// dropdown open → close, detail focus → list focus, list focus → no-op.
+			if m.activeTab == tabbar.TabResources {
+				// Fall through to the routing section below
+				break
+			}
+
 			// Esc at the app level handles view-state navigation back
 			switch m.viewState {
 			case ViewServiceList:
-				if m.activeTab == tabbar.TabResources || m.activeTab == tabbar.TabConfiguration {
-					// On Resources/Configuration tab: list is the root — Esc does nothing
+				if m.activeTab == tabbar.TabConfiguration {
+					// On Configuration tab: list is the root — Esc does nothing
 					return m, nil
 				}
 				// Fallback: go home
@@ -1388,10 +1414,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tabbar.TabResources:
 		switch m.viewState {
 		case ViewServiceList, ViewServiceDetail:
-			wasDetail := m.detail.InDetailView()
 			m.detail, cmd = m.detail.Update(msg)
-			// Detect detail→list transition (detail handled Esc internally)
-			if wasDetail && !m.detail.InDetailView() {
+			// Sync app viewState with the detail model's internal state
+			if m.detail.InDetailView() {
+				m.viewState = ViewServiceDetail
+			} else {
 				m.viewState = ViewServiceList
 			}
 		}
@@ -1442,7 +1469,7 @@ func (m Model) isTextInputActive() bool {
 // tabs, if the current viewState doesn't belong to the target tab.
 // This prevents a blank screen when switching from e.g. Resources (ViewServiceList)
 // to Operations (which doesn't render ViewServiceList).
-func (m *Model) ensureViewStateForTab() {
+func (m *Model) ensureViewStateForTab() tea.Cmd {
 	switch m.activeTab {
 	case tabbar.TabOperations:
 		// Only ViewWrangler is the natural root for Operations.
@@ -1453,6 +1480,20 @@ func (m *Model) ensureViewStateForTab() {
 		}
 	case tabbar.TabResources:
 		// Service list/detail are valid; anything else shows placeholder.
+		// Auto-open the service dropdown when no service is selected.
+		if m.detail.Service() == "" {
+			m.detail.OpenDropdown()
+			m.viewState = ViewServiceList
+			m.detail.SetFocused(true)
+		}
+		// Ensure the binding index is available for managed/bound detection.
+		// Trigger a Workers fetch + index build if not yet done.
+		if m.registry.GetBindingIndex() == nil && m.client != nil {
+			if m.registry.GetCache("Workers") == nil {
+				return m.loadServiceResources("Workers")
+			}
+			return m.buildBindingIndexCmd()
+		}
 	case tabbar.TabConfiguration:
 		// Env vars, triggers, and service list (project picker) are valid.
 		// Anything else (e.g. ViewServiceDetail, ViewWrangler) shows placeholder.
@@ -1460,6 +1501,7 @@ func (m *Model) ensureViewStateForTab() {
 		// Rebuild the worker tree from wrangler data so the left pane is up to date.
 		m.refreshMonitoringWorkerTree()
 	}
+	return nil
 }
 
 // refreshMonitoringWorkerTree builds the worker tree from wrangler data and

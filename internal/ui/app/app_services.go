@@ -41,10 +41,12 @@ func (m *Model) navigateToService(name string) tea.Cmd {
 		if !m.registry.IsCacheStale(name) {
 			// Cache is fresh — show it without a background refresh
 			m.detail.SetServiceFresh(name, entry.Resources)
+			m.updateManagedResources()
 			return nil
 		}
 		// Cache is stale — show it and trigger a background refresh
 		cmd := m.detail.SetServiceWithCache(name, entry.Resources)
+		m.updateManagedResources()
 		if m.detail.IsLoading() {
 			return tea.Batch(cmd, m.detail.SpinnerInit())
 		}
@@ -164,6 +166,7 @@ func (m Model) loadResourceDetail(serviceName, resourceID string) tea.Cmd {
 
 // registerServices creates and registers all service implementations for the given accountID.
 // Clears any existing services first, then sets the registry's active account for caching.
+// Also populates the Resources tab dropdown with the available services.
 func (m *Model) registerServices(accountID string) {
 	m.registry.ClearServices()
 	m.registry.SetAccountID(accountID)
@@ -182,6 +185,17 @@ func (m *Model) registerServices(accountID string) {
 
 	queuesSvc := svc.NewQueueService(m.client.CF, accountID)
 	m.registry.Register(queuesSvc)
+
+	// Populate the Resources tab service dropdown
+	m.detail.SetServices([]detail.ServiceEntry{
+		{Name: "Workers", Integrated: true},
+		{Name: "KV", Integrated: true},
+		{Name: "R2", Integrated: true},
+		{Name: "D1", Integrated: true},
+		{Name: "Queues", Integrated: true},
+		{Name: "Pages", Integrated: false},
+		{Name: "Hyperdrive", Integrated: false},
+	})
 }
 
 // switchAccount handles switching to a different account. Re-registers services with the
@@ -296,6 +310,69 @@ func (m Model) getD1Service() *svc.D1Service {
 		return d1s
 	}
 	return nil
+}
+
+// updateManagedResources computes which resources in the current service are
+// wrangler-managed (bound to a Worker via the binding index) and updates the
+// detail model's managed set. This affects the white/dim color coding in the list.
+func (m *Model) updateManagedResources() {
+	serviceName := m.detail.Service()
+	if serviceName == "" {
+		m.detail.SetManagedResources(nil)
+		return
+	}
+
+	// For Workers: "managed" means the worker appears in a wrangler config.
+	// Cross-reference the API list with wrangler's WorkerList().
+	if serviceName == "Workers" {
+		wranglerWorkers := m.wrangler.WorkerList()
+		if len(wranglerWorkers) == 0 {
+			m.detail.SetManagedResources(nil)
+			return
+		}
+		wranglerNames := make(map[string]bool, len(wranglerWorkers))
+		for _, w := range wranglerWorkers {
+			wranglerNames[w.ScriptName] = true
+		}
+		managed := make(map[string]bool)
+		entry := m.registry.GetCache(serviceName)
+		if entry != nil {
+			for _, r := range entry.Resources {
+				if wranglerNames[r.ID] {
+					managed[r.ID] = true
+				}
+			}
+		}
+		m.detail.SetManagedResources(managed)
+		return
+	}
+
+	// For other services: "managed" means bound to a Worker via the binding index.
+	idx := m.registry.GetBindingIndex()
+	if idx == nil {
+		m.detail.SetManagedResources(nil)
+		return
+	}
+
+	entry := m.registry.GetCache(serviceName)
+	if entry == nil {
+		m.detail.SetManagedResources(nil)
+		return
+	}
+
+	managed := make(map[string]bool)
+	for _, r := range entry.Resources {
+		// Check by resource ID first, then by Name (some services like Queues
+		// use a UUID as ID but the binding index stores the human-readable name)
+		if bound := idx.Lookup(serviceName, r.ID); len(bound) > 0 {
+			managed[r.ID] = true
+		} else if r.Name != r.ID {
+			if bound := idx.Lookup(serviceName, r.Name); len(bound) > 0 {
+				managed[r.ID] = true
+			}
+		}
+	}
+	m.detail.SetManagedResources(managed)
 }
 
 // enrichDetailWithBoundWorkers appends a "Worker(s)" field to a resource detail

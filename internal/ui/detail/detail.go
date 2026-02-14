@@ -2,6 +2,7 @@ package detail
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -26,6 +27,26 @@ const (
 	viewList   viewMode = iota // List of resources
 	viewDetail                 // Single resource detail
 )
+
+// DetailFocus identifies which pane has keyboard focus in the dual-pane layout.
+type DetailFocus int
+
+const (
+	FocusList   DetailFocus = iota // Left pane (resource list)
+	FocusDetail                    // Right pane (resource detail)
+)
+
+// ServiceEntry describes a service available in the dropdown selector.
+type ServiceEntry struct {
+	Name       string // e.g. "Workers", "KV", "R2"
+	Integrated bool   // false for "coming soon" services
+}
+
+// SelectServiceMsg is emitted when the user selects a service from the dropdown.
+// The app layer handles this to trigger resource loading.
+type SelectServiceMsg struct {
+	ServiceName string
+}
 
 // Messages sent by the detail panel to the parent (app model).
 type (
@@ -119,13 +140,26 @@ type (
 	}
 )
 
-// Model represents the right-side detail panel.
+// Model represents the Resources tab — a dual-pane layout with a service dropdown,
+// a resource list on the left (~20%), and a resource detail on the right (~80%).
 type Model struct {
 	service string // currently selected service name
 	focused bool
 	width   int
 	height  int
 	mode    viewMode
+
+	// Dual-pane layout
+	focus DetailFocus // which pane has keyboard focus
+
+	// Service dropdown
+	services       []ServiceEntry // available services for the dropdown
+	dropdownOpen   bool           // true when the dropdown overlay is visible
+	dropdownCursor int            // cursor position in the dropdown
+
+	// Wrangler-managed resource detection
+	managedIDs   map[string]bool // set of resource IDs that are wrangler-managed
+	managedCount int             // number of managed resources at the front of the slice
 
 	// List state
 	resources  []service.Resource
@@ -213,6 +247,110 @@ func NewLoading(serviceName string) Model {
 	}
 }
 
+// SetServices sets the available services for the dropdown selector.
+func (m *Model) SetServices(services []ServiceEntry) {
+	m.services = services
+}
+
+// SetManagedResources sets the set of resource IDs that are wrangler-managed.
+// Resources in this set are rendered in white; others in dim/gray.
+// Re-sorts the resources slice so managed items appear first, preserving cursor
+// on the same resource.
+func (m *Model) SetManagedResources(ids map[string]bool) {
+	// When no resources are managed (empty map), there's nothing to
+	// distinguish — disable color coding so all items appear normal/white.
+	if ids != nil && len(ids) == 0 {
+		ids = nil
+	}
+	m.managedIDs = ids
+	if ids == nil || len(m.resources) == 0 {
+		m.managedCount = 0
+		return
+	}
+
+	// Remember currently selected resource to restore cursor after sort
+	var selectedID string
+	if m.cursor >= 0 && m.cursor < len(m.resources) {
+		selectedID = m.resources[m.cursor].ID
+	}
+
+	// Copy the slice before sorting to avoid mutating shared cache data
+	sorted := make([]service.Resource, len(m.resources))
+	copy(sorted, m.resources)
+	m.resources = sorted
+
+	// Stable sort: managed first, then unmanaged, preserving order within each group
+	sort.SliceStable(m.resources, func(i, j int) bool {
+		iManaged := ids[m.resources[i].ID]
+		jManaged := ids[m.resources[j].ID]
+		if iManaged != jManaged {
+			return iManaged // managed before unmanaged
+		}
+		return false // preserve original order within group
+	})
+
+	// Count managed items
+	m.managedCount = 0
+	for _, r := range m.resources {
+		if ids[r.ID] {
+			m.managedCount++
+		} else {
+			break
+		}
+	}
+
+	// Restore cursor position
+	if selectedID != "" {
+		for i, r := range m.resources {
+			if r.ID == selectedID {
+				m.cursor = i
+				return
+			}
+		}
+	}
+}
+
+// IsManaged returns whether a resource ID is wrangler-managed.
+func (m Model) IsManaged(resourceID string) bool {
+	if m.managedIDs == nil {
+		return false
+	}
+	return m.managedIDs[resourceID]
+}
+
+// DropdownOpen returns whether the service dropdown is currently open.
+func (m Model) DropdownOpen() bool {
+	return m.dropdownOpen
+}
+
+// OpenDropdown opens the service dropdown. If a service is already selected,
+// positions the cursor on it.
+func (m *Model) OpenDropdown() {
+	m.dropdownOpen = true
+	m.dropdownCursor = 0
+	for i, s := range m.services {
+		if s.Name == m.service {
+			m.dropdownCursor = i
+			break
+		}
+	}
+}
+
+// CloseDropdown closes the service dropdown without changing the selection.
+func (m *Model) CloseDropdown() {
+	m.dropdownOpen = false
+}
+
+// Focus returns which pane currently has keyboard focus.
+func (m Model) Focus() DetailFocus {
+	return m.focus
+}
+
+// SetFocusList switches keyboard focus to the left (list) pane.
+func (m *Model) SetFocusList() {
+	m.focus = FocusList
+}
+
 // SetSize updates the detail panel dimensions.
 func (m *Model) SetSize(w, h int) {
 	m.width = w
@@ -258,6 +396,8 @@ func (m *Model) SetService(name string) tea.Cmd {
 	m.detailID = ""
 	m.scrollOffset = 0
 	m.notIntegrated = false
+	m.managedIDs = nil
+	m.managedCount = 0
 
 	return func() tea.Msg {
 		return LoadResourcesMsg{ServiceName: name}
@@ -278,6 +418,8 @@ func (m *Model) SetServiceWithCache(name string, cached []service.Resource) tea.
 	m.scrollOffset = 0
 	m.notIntegrated = false
 	m.err = nil
+	m.managedIDs = nil
+	m.managedCount = 0
 
 	if cached != nil {
 		// Show cached data immediately, mark as refreshing
@@ -312,6 +454,8 @@ func (m *Model) SetServiceFresh(name string, cached []service.Resource) {
 	m.scrollOffset = 0
 	m.notIntegrated = false
 	m.err = nil
+	m.managedIDs = nil
+	m.managedCount = 0
 	m.resources = cached
 	m.cursor = 0
 	m.loading = false
@@ -525,12 +669,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if mouseMsg, ok := msg.(tea.MouseMsg); ok {
 		if mouseMsg.Button == tea.MouseButtonLeft && mouseMsg.Action == tea.MouseActionRelease {
 			// Check resource list item clicks (list mode only)
-			if m.mode == viewList && len(m.resources) > 0 {
+			if !m.dropdownOpen && len(m.resources) > 0 {
 				for i, r := range m.resources {
 					if z := zone.Get(ResourceItemZoneID(i)); z != nil && z.InBounds(mouseMsg) {
-						if i == m.cursor {
+						if i == m.cursor && m.focus == FocusList {
 							// Already selected — drill into detail
 							m.mode = viewDetail
+							m.focus = FocusDetail
 							m.detailLoading = true
 							m.detailErr = nil
 							m.detail = nil
@@ -542,6 +687,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						}
 						// Select the item
 						m.cursor = i
+						m.focus = FocusList
 						return m, nil
 					}
 				}
@@ -569,7 +715,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	// When D1 console is active, forward all messages to the textinput for cursor blink
-	if m.d1Active && m.mode == viewDetail {
+	if m.d1Active && m.mode == viewDetail && m.focus == FocusDetail {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			return m.updateD1(msg)
@@ -583,11 +729,35 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch m.mode {
-		case viewList:
+		// Dropdown takes exclusive key focus when open
+		if m.dropdownOpen {
+			return m.updateDropdown(msg)
+		}
+
+		// 's' toggles the service dropdown from either pane
+		if msg.String() == "s" {
+			m.OpenDropdown()
+			return m, nil
+		}
+
+		// 'tab' switches focus between panes (only when in detail view)
+		if msg.String() == "tab" && m.mode == viewDetail {
+			if m.focus == FocusList {
+				m.focus = FocusDetail
+			} else {
+				m.focus = FocusList
+			}
+			return m, nil
+		}
+
+		switch m.focus {
+		case FocusList:
 			return m.updateList(msg)
-		case viewDetail:
-			return m.updateDetail(msg)
+		case FocusDetail:
+			if m.mode == viewDetail {
+				return m.updateDetail(msg)
+			}
+			// Detail pane focused but no detail loaded — ignore keys
 		}
 	}
 
@@ -608,6 +778,7 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if len(m.resources) > 0 && m.cursor < len(m.resources) {
 			r := m.resources[m.cursor]
 			m.mode = viewDetail
+			m.focus = FocusDetail
 			m.detailLoading = true
 			m.detailErr = nil
 			m.detail = nil
@@ -633,6 +804,33 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateDropdown handles key events when the service dropdown is open.
+func (m Model) updateDropdown(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		if m.dropdownCursor < len(m.services)-1 {
+			m.dropdownCursor++
+		}
+	case "k", "up":
+		if m.dropdownCursor > 0 {
+			m.dropdownCursor--
+		}
+	case "enter":
+		if m.dropdownCursor >= 0 && m.dropdownCursor < len(m.services) {
+			entry := m.services[m.dropdownCursor]
+			m.dropdownOpen = false
+			if entry.Integrated && entry.Name != m.service {
+				return m, func() tea.Msg {
+					return SelectServiceMsg{ServiceName: entry.Name}
+				}
+			}
+		}
+	case "esc", "s":
+		m.dropdownOpen = false
+	}
+	return m, nil
+}
+
 // isDeletableService returns true for services that support resource deletion from the list view.
 func isDeletableService(name string) bool {
 	switch name {
@@ -645,11 +843,8 @@ func isDeletableService(name string) bool {
 func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "backspace":
-		m.mode = viewList
-		m.detail = nil
-		m.detailErr = nil
-		m.detailID = ""
-		m.scrollOffset = 0
+		// In dual-pane: switch focus to list pane, keep detail visible
+		m.focus = FocusList
 		return m, nil
 	case "t":
 		// Only available in Workers detail view — starts tail on Monitoring tab
@@ -679,13 +874,8 @@ func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 func (m Model) updateD1(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
-		// Back to list, clear D1 state
-		m.mode = viewList
-		m.detail = nil
-		m.detailErr = nil
-		m.detailID = ""
-		m.scrollOffset = 0
-		m.ClearD1()
+		// Switch focus to list pane (dual-pane navigation)
+		m.focus = FocusList
 		return m, nil
 	case tea.KeyEnter:
 		// Submit the SQL query
@@ -730,7 +920,11 @@ func (m Model) calcMaxScroll() int {
 	return max
 }
 
-// View renders the detail panel.
+// View renders the detail panel as a dual-pane layout:
+//   - Dropdown line at the top (collapsed service indicator or expanded overlay)
+//   - Left pane (~20%): resource list
+//   - Vertical separator: │
+//   - Right pane (~80%): resource detail
 func (m Model) View() string {
 	// Clear copy targets for this render cycle (map is a reference type,
 	// so writes from a value receiver mutate the underlying map).
@@ -743,22 +937,54 @@ func (m Model) View() string {
 		borderStyle = theme.ActiveBorderStyle
 	}
 
-	contentHeight := m.height - 4 // border + title + separator
-	if contentHeight < 0 {
-		contentHeight = 0
+	// Total content height inside the border (border takes 2 lines)
+	contentHeight := m.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
 	}
 
-	var content string
-	switch m.mode {
-	case viewList:
-		content = m.viewList(contentHeight)
-	case viewDetail:
-		content = m.viewDetail(contentHeight)
+	// Dropdown line always takes 1 line at the top
+	dropdownLine := m.viewDropdownLine()
+	paneHeight := contentHeight - 1 // remaining for the dual-pane area
+
+	// If dropdown is open, overlay takes precedence over the panes
+	if m.dropdownOpen {
+		overlay := m.viewDropdownOverlay(contentHeight - 1) // full remaining height for overlay
+		content := dropdownLine + "\n" + overlay
+		contentLines := strings.Split(content, "\n")
+		if len(contentLines) > contentHeight {
+			contentLines = contentLines[:contentHeight]
+			content = strings.Join(contentLines, "\n")
+		}
+		return borderStyle.
+			Width(m.width - 2).
+			Height(contentHeight).
+			Render(content)
 	}
 
-	// Truncate content to contentHeight lines to prevent the bordered box from
-	// growing beyond its allocated space. lipgloss Height() is a minimum, not
-	// a maximum — it won't truncate overflow from multi-line field values.
+	if paneHeight < 1 {
+		paneHeight = 1
+	}
+
+	// Calculate pane widths: left ~25%, right ~75%, minus 1 for divider, minus 2 for border
+	innerWidth := m.width - 4 // border takes 2 chars on each side
+	if innerWidth < 10 {
+		innerWidth = 10
+	}
+	leftWidth := innerWidth / 4
+	if leftWidth < 15 {
+		leftWidth = 15
+	}
+	rightWidth := innerWidth - leftWidth - 1 // -1 for divider column
+
+	leftPane := m.viewResourceList(leftWidth, paneHeight)
+	rightPane := m.viewResourceDetail(rightWidth, paneHeight)
+
+	// Join panes side by side with a vertical divider
+	divider := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render("│")
+	dualPane := joinSideBySide(leftPane, rightPane, divider, leftWidth, paneHeight)
+
+	content := dropdownLine + "\n" + dualPane
 	contentLines := strings.Split(content, "\n")
 	if len(contentLines) > contentHeight {
 		contentLines = contentLines[:contentHeight]
@@ -771,153 +997,272 @@ func (m Model) View() string {
 		Render(content)
 }
 
-func (m Model) viewList(maxHeight int) string {
-	title := theme.TitleStyle.Render(fmt.Sprintf("  %s", m.service))
-	sepWidth := m.width - 6
-	if sepWidth < 0 {
-		sepWidth = 0
+// viewDropdownLine renders the collapsed dropdown indicator line.
+// e.g. "▼ KV (5 items)" or "▼ Select Service"
+func (m Model) viewDropdownLine() string {
+	arrow := theme.DimStyle.Render("▼")
+	if m.dropdownOpen {
+		arrow = theme.TitleStyle.Render("▲")
 	}
-	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
-		fmt.Sprintf(" %s", strings.Repeat("─", sepWidth)))
 
 	if m.service == "" {
-		body := theme.DimStyle.Render("\n  Select a service from the sidebar")
-		return fmt.Sprintf("%s\n%s\n%s", title, sep, body)
+		return fmt.Sprintf(" %s %s", arrow, theme.DimStyle.Render("Select Service"))
 	}
 
-	if m.loading {
-		body := fmt.Sprintf("\n  %s %s", m.spinner.View(), theme.DimStyle.Render("Loading resources..."))
-		return fmt.Sprintf("%s\n%s\n%s", title, sep, body)
+	serviceName := theme.TitleStyle.Render(m.service)
+	count := ""
+	if !m.loading && m.err == nil && !m.notIntegrated {
+		count = theme.DimStyle.Render(fmt.Sprintf(" (%d items)", len(m.resources)))
+	} else if m.loading {
+		count = " " + m.spinner.View()
+	}
+	return fmt.Sprintf(" %s %s%s", arrow, serviceName, count)
+}
+
+// viewDropdownOverlay renders the expanded service dropdown list.
+func (m Model) viewDropdownOverlay(maxHeight int) string {
+	if len(m.services) == 0 {
+		return theme.DimStyle.Render("  No services available")
 	}
 
-	if m.err != nil {
-		body := theme.ErrorStyle.Render(fmt.Sprintf("\n  Error: %s", m.err.Error()))
-		return fmt.Sprintf("%s\n%s\n%s", title, sep, body)
-	}
-
-	if m.notIntegrated {
-		body := fmt.Sprintf(
-			"\n  %s integration coming soon.\n\n  %s\n  %s",
-			theme.LabelStyle.Render(m.service),
-			theme.DimStyle.Render("This panel will show a list of all"),
-			theme.DimStyle.Render(fmt.Sprintf("%s instances in your account.", m.service)),
-		)
-		return fmt.Sprintf("%s\n%s\n%s", title, sep, body)
-	}
-
-	if len(m.resources) == 0 {
-		body := theme.DimStyle.Render("\n  No resources found in this account")
-		return fmt.Sprintf("%s\n%s\n%s", title, sep, body)
-	}
-
-	// Count line for total
-	countText := fmt.Sprintf("  %d item(s)", len(m.resources))
-	if m.refreshing {
-		countText += "  ↻"
-	}
-	countLine := theme.DimStyle.Render(countText)
-
-	// Build resource list
 	var lines []string
-	availableWidth := m.width - 8 // padding + borders
-
-	for i, r := range m.resources {
+	for i, s := range m.services {
 		cursor := "  "
-		nameStyle := theme.NormalItemStyle
-		if i == m.cursor {
+		if i == m.dropdownCursor {
 			cursor = theme.SelectedItemStyle.Render("> ")
+		}
+
+		nameStyle := theme.NormalItemStyle
+		if i == m.dropdownCursor {
 			nameStyle = theme.SelectedItemStyle
 		}
 
-		name := nameStyle.Render(r.Name)
-		summary := theme.DimStyle.Render(truncateRunes(r.Summary, availableWidth-utf8.RuneCountInString(r.Name)-4))
-		line := fmt.Sprintf("%s%s  %s", cursor, name, summary)
-		lines = append(lines, zone.Mark(ResourceItemZoneID(i), line))
+		label := nameStyle.Render(s.Name)
+		if !s.Integrated {
+			label = theme.DimStyle.Render(s.Name + " (coming soon)")
+			if i == m.dropdownCursor {
+				label = theme.SelectedItemStyle.Render(s.Name) + theme.DimStyle.Render(" (coming soon)")
+			}
+		}
+
+		// Mark current service with a bullet
+		current := "  "
+		if s.Name == m.service {
+			current = theme.TitleStyle.Render("● ")
+		}
+
+		lines = append(lines, fmt.Sprintf("%s%s%s", cursor, current, label))
 	}
 
-	// Apply scroll window to list if too long
-	visibleHeight := maxHeight - 4 // title + sep + count + help
+	// Pad to maxHeight
+	for len(lines) < maxHeight {
+		lines = append(lines, "")
+	}
+	if len(lines) > maxHeight {
+		lines = lines[:maxHeight]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// viewResourceList renders the left pane: resource list items without outer border.
+func (m Model) viewResourceList(width, height int) []string {
+	lines := make([]string, 0, height)
+
+	if m.service == "" {
+		lines = append(lines, theme.DimStyle.Render(" No service"))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
+	}
+
+	if m.loading {
+		lines = append(lines, fmt.Sprintf(" %s", m.spinner.View()))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
+	}
+
+	if m.err != nil {
+		lines = append(lines, theme.ErrorStyle.Render(" Error"))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
+	}
+
+	if m.notIntegrated {
+		lines = append(lines, theme.DimStyle.Render(" Coming soon"))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
+	}
+
+	if len(m.resources) == 0 {
+		lines = append(lines, theme.DimStyle.Render(" No resources"))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
+	}
+
+	// Resource items
+	availableWidth := width - 4
+	if availableWidth < 5 {
+		availableWidth = 5
+	}
+	visibleHeight := height
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
+
+	// Build visual lines: resource items + optional separator between managed/unmanaged.
+	// visualLines holds rendered strings; visualToRes maps visual index → resource index
+	// (-1 for separator lines that aren't selectable).
+	hasUnmanaged := m.managedIDs != nil && m.managedCount > 0 && m.managedCount < len(m.resources)
+
+	type visualLine struct {
+		text  string
+		resID int // resource index, or -1 for separator lines
+	}
+	var vLines []visualLine
+
+	for i, r := range m.resources {
+		// Insert separator before first unmanaged item
+		if hasUnmanaged && i == m.managedCount {
+			separatorLabel := "unmanaged"
+			if m.service != "Workers" {
+				separatorLabel = "unbound"
+			}
+			vLines = append(vLines, visualLine{text: "", resID: -1})
+			vLines = append(vLines, visualLine{
+				text:  theme.DimStyle.Render(" " + separatorLabel),
+				resID: -1,
+			})
+		}
+
+		cursor := " "
+		nameStyle := theme.NormalItemStyle
+		if m.IsManaged(r.ID) {
+			nameStyle = theme.NormalItemStyle // white for managed
+		} else if m.managedIDs != nil {
+			nameStyle = theme.DimStyle // dim/gray for unmanaged
+		}
+
+		if i == m.cursor {
+			cursor = theme.SelectedItemStyle.Render(">")
+			nameStyle = theme.SelectedItemStyle
+		}
+
+		name := nameStyle.Render(truncateRunes(r.Name, availableWidth))
+		line := fmt.Sprintf("%s%s", cursor, name)
+		vLines = append(vLines, visualLine{
+			text:  zone.Mark(ResourceItemZoneID(i), line),
+			resID: i,
+		})
+	}
+
+	// Find the visual index of the cursor's resource to anchor scrolling
+	cursorVisIdx := 0
+	for vi, vl := range vLines {
+		if vl.resID == m.cursor {
+			cursorVisIdx = vi
+			break
+		}
+	}
+
+	// Scroll window anchored on the cursor's visual position
 	startIdx := 0
-	if m.cursor >= visibleHeight {
-		startIdx = m.cursor - visibleHeight + 1
+	if cursorVisIdx >= visibleHeight {
+		startIdx = cursorVisIdx - visibleHeight + 1
 	}
 	endIdx := startIdx + visibleHeight
-	if endIdx > len(lines) {
-		endIdx = len(lines)
+	if endIdx > len(vLines) {
+		endIdx = len(vLines)
 	}
-	visibleLines := lines[startIdx:endIdx]
-
-	helpText := "  enter detail  |  esc back"
-	if isDeletableService(m.service) {
-		helpText = "  enter detail  |  d delete  |  esc back"
+	for _, vl := range vLines[startIdx:endIdx] {
+		lines = append(lines, vl.text)
 	}
-	help := theme.DimStyle.Render(helpText)
 
-	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s",
-		title, sep, countLine,
-		strings.Join(visibleLines, "\n"),
-		help)
+	// Pad to height
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
 }
 
-func (m Model) viewDetail(maxHeight int) string {
+// viewResourceDetail renders the right pane: resource detail content without outer border.
+func (m Model) viewResourceDetail(width, height int) []string {
+	lines := make([]string, 0, height)
+
+	// When no detail is loaded (list mode), show a hint
+	if m.mode == viewList || m.detail == nil && !m.detailLoading && m.detailErr == nil {
+		hint := theme.DimStyle.Render(" Select a resource")
+		if m.mode == viewDetail && m.detailLoading {
+			hint = fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading..."))
+		}
+		lines = append(lines, hint)
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
+	}
+
 	if m.detailLoading {
-		title := fmt.Sprintf("  %s %s", m.spinner.View(), theme.DimStyle.Render("Loading details..."))
-		return title
+		lines = append(lines, fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading details...")))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
 	}
 
 	if m.detailErr != nil {
-		title := theme.TitleStyle.Render(fmt.Sprintf("  %s", m.service))
-		body := theme.ErrorStyle.Render(fmt.Sprintf("\n  Error: %s", m.detailErr.Error()))
-		return fmt.Sprintf("%s\n%s", title, body)
-	}
-
-	if m.detail == nil {
-		return theme.DimStyle.Render("  No data")
+		lines = append(lines, theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s", m.detailErr.Error())))
+		for len(lines) < height {
+			lines = append(lines, "")
+		}
+		return lines
 	}
 
 	d := m.detail
-	title := theme.DimStyle.Render(fmt.Sprintf("  %s ", m.service)) + theme.TitleStyle.Render(d.Name) + copyIcon()
-	sepWidth := m.width - 6
+
+	// Title + copy icon
+	title := theme.DimStyle.Render(fmt.Sprintf(" %s ", m.service)) + theme.TitleStyle.Render(d.Name) + copyIcon()
+	sepWidth := width - 3
 	if sepWidth < 0 {
 		sepWidth = 0
 	}
 	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
-		fmt.Sprintf(" %s", strings.Repeat("─", sepWidth)))
+		strings.Repeat("─", sepWidth))
 
-	// Track which allLines indices are copyable: index → raw text to copy
+	// Track which allLines indices are copyable
 	copyLineMap := make(map[int]string)
+	copyLineMap[0] = d.Name // title line
 
-	// Title is line 0, always copyable (resource name)
-	copyLineMap[0] = d.Name
+	allLines := []string{title, sep}
 
-	var fieldLines []string
 	for _, f := range d.Fields {
-		label := theme.LabelStyle.Render(fmt.Sprintf("  %-16s", f.Label))
+		label := theme.LabelStyle.Render(fmt.Sprintf(" %-16s", f.Label))
 		value := theme.ValueStyle.Render(f.Value)
 		line := fmt.Sprintf("%s %s", label, value)
 		if isCopyableLabel(f.Label) {
 			line += copyIcon()
-			// Field lines start at allLines index 2 (title=0, sep=1)
-			copyLineMap[2+len(fieldLines)] = f.Value
+			copyLineMap[len(allLines)] = f.Value
 		}
-		fieldLines = append(fieldLines, line)
+		allLines = append(allLines, line)
 	}
 
-	// For D1, split layout: SQL console on left, schema on right
+	// For D1 with active console, use the special D1 split layout
 	if m.service == "D1" && m.d1Active {
-		return m.viewDetailWithD1(maxHeight, title, sep, fieldLines, copyLineMap)
+		return m.viewResourceDetailD1(width, height, title, sep, allLines, copyLineMap)
 	}
 
-	// Standard layout for all services (including Workers)
-	help := "\n" + theme.DimStyle.Render("  esc/backspace back  |  j/k scroll")
-
-	allLines := []string{title, sep}
-	allLines = append(allLines, fieldLines...)
-
-	// Append ExtraContent (e.g. D1 schema diagram) if present
+	// Append ExtraContent if present
 	if d.ExtraContent != "" {
 		extraLines := strings.Split(d.ExtraContent, "\n")
 		for _, el := range extraLines {
@@ -925,9 +1270,8 @@ func (m Model) viewDetail(maxHeight int) string {
 		}
 	}
 
-	allLines = append(allLines, help)
-
-	visibleHeight := maxHeight
+	// Scroll
+	visibleHeight := height
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
@@ -944,61 +1288,73 @@ func (m Model) viewDetail(maxHeight int) string {
 		endIdx = len(allLines)
 	}
 
-	// Register copy targets for visible lines only
+	// Register copy targets for visible lines
 	m.registerCopyTargets(copyLineMap, offset, endIdx)
 
-	visible := allLines[offset:endIdx]
+	lines = allLines[offset:endIdx]
 
-	return strings.Join(visible, "\n")
+	// Pad to height
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
 }
 
-// viewDetailWithD1 renders the D1 detail layout:
-// - Top: title + separator + compact metadata (2 rows)
-// - Bottom: left (SQL console) | right (schema pane)
-func (m Model) viewDetailWithD1(maxHeight int, title, sep string, fieldLines []string, copyLineMap map[int]string) string {
-	// -- Top region: title + sep + compact metadata --
-	// Render metadata as 2 compact rows instead of 7 individual lines
+// viewResourceDetailD1 renders the right pane for D1 with the SQL console split.
+func (m Model) viewResourceDetailD1(width, height int, title, sep string, topFieldLines []string, copyLineMap map[int]string) []string {
+	// Compact metadata at top
 	topLines := []string{title, sep}
 	topLines = append(topLines, m.renderD1CompactFields(copyLineMap)...)
 
 	metaHeight := len(topLines)
 
 	// Separator between metadata and the split pane
-	panesSepWidth := m.width - 6
+	panesSepWidth := width - 3
 	if panesSepWidth < 0 {
 		panesSepWidth = 0
 	}
 	panesSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
-		fmt.Sprintf(" %s", strings.Repeat("─", panesSepWidth)))
+		strings.Repeat("─", panesSepWidth))
 	topLines = append(topLines, panesSep)
 	metaHeight++
 
-	// -- Bottom region: left/right split --
-	paneHeight := maxHeight - metaHeight
+	// Bottom region: left/right split for SQL console and schema
+	paneHeight := height - metaHeight
 	if paneHeight < 5 {
 		paneHeight = 5
 	}
 
-	// Calculate widths: ~50/50 split within the available detail panel width
-	innerWidth := m.width - 4 // subtract border chars
-	if innerWidth < 20 {
-		innerWidth = 20
-	}
-	leftWidth := innerWidth / 2
-	rightWidth := innerWidth - leftWidth - 1 // -1 for the vertical divider
+	halfWidth := width / 2
+	leftWidth := halfWidth
+	rightWidth := width - halfWidth - 1 // -1 for divider
 
 	leftPane := m.renderD1SQLConsole(leftWidth, paneHeight)
 	rightPane := m.renderD1SchemaPane(rightWidth, paneHeight)
 
-	// Join left and right with a vertical divider
 	divider := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render("│")
 	splitPane := joinSideBySide(leftPane, rightPane, divider, leftWidth, paneHeight)
 
-	// Register copy targets for the top metadata lines (always visible, no scroll)
+	// Register copy targets for metadata lines
 	m.registerCopyTargets(copyLineMap, 0, len(topLines))
 
-	return strings.Join(topLines, "\n") + "\n" + splitPane
+	result := strings.Join(topLines, "\n") + "\n" + splitPane
+	lines := strings.Split(result, "\n")
+
+	// Pad to height
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
 }
+
+// (old viewList, viewDetail, viewDetailWithD1 methods removed — replaced by
+// viewResourceList, viewResourceDetail, viewResourceDetailD1 in the dual-pane layout)
 
 // renderD1CompactFields renders metadata as 2 compact rows.
 // copyLineMap is populated with the topLines index → text for copyable values.

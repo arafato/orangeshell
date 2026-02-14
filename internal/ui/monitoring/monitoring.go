@@ -726,7 +726,14 @@ func (m Model) viewDualPane() string {
 	}
 	separator := strings.Join(sepLines, "\n")
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftView, separator, rightView)
+	result := lipgloss.JoinHorizontal(lipgloss.Top, leftView, separator, rightView)
+
+	// Truncate to exact contentHeight to prevent overflow from lipgloss padding
+	lines := strings.Split(result, "\n")
+	if len(lines) > contentHeight {
+		lines = lines[:contentHeight]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // --- Left pane: Worker tree ---

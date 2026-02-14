@@ -362,6 +362,8 @@ func parseBindings(bindings []safeBinding) []BindingInfo {
 		case "queue":
 			bi.TypeDisplay = "Queue"
 			bi.Detail = b.QueueName
+			bi.NavService = "Queues"
+			bi.NavResource = b.QueueName
 		case "hyperdrive":
 			bi.TypeDisplay = "Hyperdrive"
 			bi.Detail = b.ID

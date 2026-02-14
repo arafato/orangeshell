@@ -1205,7 +1205,7 @@ func (m *Model) adjustScroll() {
 
 // View renders the wrangler view.
 func (m Model) View() string {
-	contentHeight := m.height - 4 // border + title + separator
+	contentHeight := m.height - 2 // border top + bottom
 	if contentHeight < 1 {
 		contentHeight = 1
 	}

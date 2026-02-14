@@ -1279,7 +1279,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "ctrl+n":
-			if m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
+			if m.activeTab == tabbar.TabOperations && m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
 				if m.wrangler.IsOnProjectList() {
 					// Monorepo view: create resources only
 					m.showBindings = true
@@ -1312,7 +1312,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "d":
 			// Delete focused environment shortcut (project-level only)
-			if m.viewState == ViewWrangler && !m.wrangler.IsOnProjectList() &&
+			if m.activeTab == tabbar.TabOperations && m.viewState == ViewWrangler && !m.wrangler.IsOnProjectList() &&
 				!m.wrangler.IsDirBrowserActive() && !m.wrangler.CmdRunning() &&
 				!m.wrangler.InsideBox() &&
 				m.wrangler.HasConfig() {

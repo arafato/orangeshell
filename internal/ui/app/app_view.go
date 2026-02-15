@@ -95,6 +95,8 @@ func (m Model) renderTabContent() string {
 		return m.renderResourcesTab()
 	case tabbar.TabConfiguration:
 		return m.renderConfigurationTab()
+	case tabbar.TabAI:
+		return m.renderAITab()
 	}
 	return ""
 }
@@ -149,6 +151,11 @@ func (m Model) renderConfigurationTab() string {
 	}
 	// Unified configuration tab
 	return m.configView.View()
+}
+
+// renderAITab renders the AI tab content.
+func (m Model) renderAITab() string {
+	return m.aiTab.View()
 }
 
 // renderPlaceholderTab renders a centered placeholder message for tabs that are not yet implemented.
@@ -238,7 +245,7 @@ type helpEntry struct {
 func (m Model) renderHelp() string {
 	// Tab navigation hint — always first.
 	entries := []helpEntry{
-		{"1-4", "tabs"},
+		{"1-5", "tabs"},
 	}
 
 	switch m.activeTab {
@@ -250,6 +257,8 @@ func (m Model) renderHelp() string {
 		entries = append(entries, m.renderResourcesHelp()...)
 	case tabbar.TabConfiguration:
 		entries = append(entries, m.renderConfigurationHelp()...)
+	case tabbar.TabAI:
+		entries = append(entries, m.renderAIHelp()...)
 	}
 
 	var parts []string
@@ -440,4 +449,14 @@ func (m Model) renderMonitoringHelp() []helpEntry {
 		}
 	}
 	return nil
+}
+
+// renderAIHelp returns the context-sensitive help entries for the AI tab.
+func (m Model) renderAIHelp() []helpEntry {
+	aiHelp := m.aiTab.HelpEntries()
+	entries := make([]helpEntry, len(aiHelp))
+	for i, h := range aiHelp {
+		entries[i] = helpEntry{key: h.Key, desc: h.Desc}
+	}
+	return entries
 }

@@ -20,6 +20,7 @@ const (
 	TabMonitoring                 // Live tail grid
 	TabResources                  // Service list + detail
 	TabConfiguration              // Env vars, triggers, bindings, environments
+	TabAI                         // AI-powered log analysis
 	tabCount                      // sentinel — must be last
 )
 
@@ -37,6 +38,8 @@ func (t TabID) Label() string {
 		return "Resources"
 	case TabConfiguration:
 		return "Configuration"
+	case TabAI:
+		return "AI"
 	}
 	return "?"
 }

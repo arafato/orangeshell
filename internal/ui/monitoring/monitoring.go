@@ -342,6 +342,35 @@ func (m Model) AllGridPaneScripts() []string {
 	return names
 }
 
+// GridPaneInfo holds exportable information about a grid pane for use by the AI context panel.
+type GridPaneInfo struct {
+	ScriptName string
+	IsDev      bool
+	DevKind    string // "local" or "remote" (only set for dev panes)
+	Active     bool
+	LineCount  int
+	Lines      []svc.TailLine // copy of the log lines
+}
+
+// GridPanes returns info about all grid panes (for the AI context panel).
+func (m Model) GridPanes() []GridPaneInfo {
+	result := make([]GridPaneInfo, len(m.gridPanes))
+	for i, p := range m.gridPanes {
+		// Copy lines to avoid data races
+		lines := make([]svc.TailLine, len(p.Lines))
+		copy(lines, p.Lines)
+		result[i] = GridPaneInfo{
+			ScriptName: p.ScriptName,
+			IsDev:      p.IsDev,
+			DevKind:    p.DevKind,
+			Active:     p.Active || p.Connected || p.Connecting,
+			LineCount:  len(p.Lines),
+			Lines:      lines,
+		}
+	}
+	return result
+}
+
 // --- Backward-compat API (used by app layer) ---
 
 // StartSingleTail adds a worker to the grid and focuses it (backward compat).

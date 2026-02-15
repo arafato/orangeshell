@@ -17,6 +17,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/config"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
+	uiai "github.com/oarafat/orangeshell/internal/ui/ai"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
@@ -231,6 +232,9 @@ type Model struct {
 	// Configuration tab (unified model)
 	configView uiconfig.Model
 
+	// AI tab model
+	aiTab uiai.Model
+
 	// Legacy: Environment variables view (kept for Operations tab cross-nav)
 	envvarsView             envvars.Model
 	envVarsFromResourceList bool // true when env vars view was opened from the Resources launcher
@@ -270,6 +274,7 @@ func NewModel(cfg *config.Config, scanDir string) Model {
 		wrangler:   uiwrangler.New(),
 		monitoring: monitoring.New(),
 		configView: uiconfig.New(),
+		aiTab:      uiai.New(),
 		phase:      phase,
 		viewState:  ViewWrangler, // wrangler is the home screen
 		activeTab:  tabbar.TabOperations,
@@ -371,6 +376,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.client = msg.client
 		m.phase = PhaseDashboard
 		m.layout()
+
+		// Load AI settings from config
+		m.aiTab.LoadConfig(m.cfg)
 
 		// Build header account tabs from the full accounts list
 		headerAccounts := make([]header.Account, len(msg.accounts))
@@ -956,6 +964,72 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// AI tab messages
+	case uiai.AIConfigSaveMsg:
+		m.cfg.AIProvider = msg.Provider
+		m.cfg.AIModelPreset = msg.ModelPreset
+		_ = m.cfg.Save()
+		return m, nil
+
+	case uiai.AIProvisionRequestMsg:
+		m.aiTab.SetDeploying(true)
+		return m, m.provisionAIWorker()
+
+	case uiai.AIDeprovisionRequestMsg:
+		m.aiTab.SetDeploying(true)
+		return m, m.deprovisionAIWorker()
+
+	case aiProvisionDoneMsg:
+		m.aiTab.SetDeploying(false)
+		if msg.Err != nil {
+			m.aiTab.SetDeployError(msg.Err.Error())
+		} else {
+			m.aiTab.SetDeployError("")
+			m.aiTab.SetWorkerURL(msg.WorkerURL)
+			m.aiTab.SetWorkerSecret(msg.Secret)
+			m.cfg.AIWorkerURL = msg.WorkerURL
+			m.cfg.AIWorkerSecret = msg.Secret
+			m.cfg.AIProvider = config.AIProviderWorkersAI
+			_ = m.cfg.Save()
+			m.setToast("AI Worker deployed successfully")
+		}
+		return m, nil
+
+	case aiDeprovisionDoneMsg:
+		m.aiTab.SetDeploying(false)
+		if msg.Err != nil {
+			m.aiTab.SetDeployError(msg.Err.Error())
+		} else {
+			m.aiTab.SetDeployError("")
+			m.aiTab.SetWorkerURL("")
+			m.cfg.AIWorkerURL = ""
+			m.cfg.AIWorkerSecret = ""
+			_ = m.cfg.Save()
+			m.setToast("AI Worker removed")
+		}
+		return m, nil
+
+	case uiai.AIChatSendMsg:
+		// User pressed enter in the chat input — start streaming AI response
+		if !m.aiTab.IsProvisioned() {
+			return m, nil
+		}
+		return m, m.startAIChatStream(msg.UserMessage)
+
+	case aiStreamBatchMsg:
+		// First chunk arrived — deliver it and start reading more
+		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.firstChunk})
+		return m, readNextAIChunk(msg.ch)
+
+	case aiStreamContinueMsg:
+		// Subsequent chunk — deliver and continue reading
+		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.chunk})
+		return m, readNextAIChunk(msg.ch)
+
+	case uiai.AIChatNewConversationMsg:
+		m.aiTab.NewConversation()
+		return m, nil
+
 	case uiwrangler.LoadConfigPathMsg:
 		if m.wrangler.DirBrowserActiveMode() == uiwrangler.DirBrowserModeCreate {
 			// User chose a directory to create a new project in
@@ -1246,7 +1320,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.viewState == ViewEnvVars {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
-			case "ctrl+h", "ctrl+l", "1", "2", "3", "4":
+			case "ctrl+h", "ctrl+l", "1", "2", "3", "4", "5":
 				// Let global shortcuts and tab-switch keys fall through
 			default:
 				return m.updateEnvVars(msg)
@@ -1260,7 +1334,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.viewState == ViewTriggers {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
-			case "ctrl+h", "ctrl+l", "1", "2", "3", "4":
+			case "ctrl+h", "ctrl+l", "1", "2", "3", "4", "5":
 				// Let global shortcuts and tab-switch keys fall through
 			default:
 				return m.updateTriggers(msg)
@@ -1350,7 +1424,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Number keys switch top-level tabs — but only when not in a text input context
 		// (dir browser folder creation, D1 SQL console, etc.).
-		case "1", "2", "3", "4":
+		case "1", "2", "3", "4", "5":
 			if !m.isTextInputActive() {
 				switch msg.String() {
 				case "1":
@@ -1361,12 +1435,21 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeTab = tabbar.TabResources
 				case "4":
 					m.activeTab = tabbar.TabConfiguration
+				case "5":
+					m.activeTab = tabbar.TabAI
 				}
 				cmd := m.ensureViewStateForTab()
 				return m, cmd
 			}
 
 		case "q":
+			// AI tab: only quit from settings or context pane (not chat — q is a typeable char)
+			if m.activeTab == tabbar.TabAI {
+				if m.aiTab.CurrentMode() == uiai.ModeSettings || m.aiTab.Focus() == uiai.FocusContext {
+					return m, tea.Quit
+				}
+				break // fall through to AI tab Update to type 'q' in chat
+			}
 			// Monitoring tab: quit only when idle (no active tail).
 			if m.activeTab == tabbar.TabMonitoring {
 				if !m.monitoring.IsActive() {
@@ -1570,6 +1653,12 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
 			m.configView, cmd = m.configView.Update(msg)
 		}
+	case tabbar.TabAI:
+		// Refresh context sources before routing (keeps line counts up to date)
+		if _, isKey := msg.(tea.KeyMsg); isKey {
+			m.refreshAIContextSources()
+		}
+		m.aiTab, cmd = m.aiTab.Update(msg)
 	}
 	return m, cmd
 }
@@ -1603,6 +1692,10 @@ func (m Model) isTextInputActive() bool {
 	}
 	// Config view text inputs (env var add/edit, triggers custom, env name add)
 	if m.activeTab == tabbar.TabConfiguration && m.configView.IsTextInputActive() {
+		return true
+	}
+	// AI tab chat input is active when the chat pane is focused
+	if m.activeTab == tabbar.TabAI && m.aiTab.IsTextInputActive() {
 		return true
 	}
 	return false
@@ -1655,6 +1748,9 @@ func (m *Model) ensureViewStateForTab() tea.Cmd {
 	case tabbar.TabMonitoring:
 		// Rebuild the worker tree from wrangler data so the left pane is up to date.
 		m.refreshMonitoringWorkerTree()
+	case tabbar.TabAI:
+		// Refresh context sources from monitoring grid panes
+		m.refreshAIContextSources()
 	}
 	return nil
 }
@@ -1750,6 +1846,7 @@ func (m *Model) layout() {
 	m.wrangler.SetSize(contentWidth, contentHeight)
 	m.monitoring.SetSize(contentWidth, contentHeight)
 	m.configView.SetSize(contentWidth, contentHeight)
+	m.aiTab.SetSize(contentWidth, contentHeight)
 	// Detail content starts after: header(1) + tab bar(3) + top border(1) = 5 rows from top of terminal
 	m.detail.SetYOffset(headerHeight + tabBarHeight + 1)
 }

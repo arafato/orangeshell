@@ -19,6 +19,24 @@ const (
 	AuthMethodNone     AuthMethod = ""
 )
 
+// AIProvider identifies the AI backend.
+type AIProvider string
+
+const (
+	AIProviderNone      AIProvider = ""
+	AIProviderWorkersAI AIProvider = "workers_ai"
+	// AIProviderAnthropic AIProvider = "anthropic" // future
+)
+
+// AIModelPreset identifies a Workers AI model tier.
+type AIModelPreset string
+
+const (
+	AIModelFast     AIModelPreset = "fast"     // llama-3.1-8b-instruct-fast
+	AIModelBalanced AIModelPreset = "balanced" // llama-3.3-70b-instruct-fp8-fast (default)
+	AIModelDeep     AIModelPreset = "deep"     // deepseek-r1-distill-qwen-32b
+)
+
 // Config holds all persistent configuration for orangeshell.
 type Config struct {
 	// Auth settings
@@ -33,6 +51,12 @@ type Config struct {
 	OAuthRefreshToken string    `toml:"oauth_refresh_token,omitempty"`
 	OAuthExpiresAt    time.Time `toml:"oauth_expires_at,omitempty"`
 	OAuthScopes       []string  `toml:"oauth_scopes,omitempty"`
+
+	// AI settings
+	AIProvider     AIProvider    `toml:"ai_provider,omitempty"`
+	AIModelPreset  AIModelPreset `toml:"ai_model_preset,omitempty"`
+	AIWorkerURL    string        `toml:"ai_worker_url,omitempty"`
+	AIWorkerSecret string        `toml:"ai_worker_secret,omitempty"`
 }
 
 // configDir returns the path to ~/.orangeshell/

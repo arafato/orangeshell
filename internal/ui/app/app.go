@@ -431,15 +431,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		m.detail.SetResources(msg.Resources, msg.Err, msg.NotIntegrated)
+		previewCmd := m.detail.SetResources(msg.Resources, msg.Err, msg.NotIntegrated)
 		// Update managed resource highlighting
 		m.updateManagedResources()
+		// Sync viewState: auto-preview switches detail model to viewDetail
+		if m.detail.InDetailView() {
+			m.viewState = ViewServiceDetail
+		}
 		// Update search items after loading
 		if msg.Err == nil {
 			m.search.SetItems(m.registry.AllSearchItems())
 		}
+		var cmds []tea.Cmd
+		if previewCmd != nil {
+			cmds = append(cmds, previewCmd, m.detail.SpinnerInit())
+		}
 		if indexCmd != nil {
-			return m, indexCmd
+			cmds = append(cmds, indexCmd)
+		}
+		if len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 
@@ -504,11 +515,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.enrichDetailWithBoundWorkers(msg.Detail, msg.ServiceName, msg.ResourceID)
 		}
 		m.detail.SetDetail(msg.Detail, msg.Err)
-		// If this is a D1 detail, initialize the SQL console and load schema async
+		// D1 console initialization is deferred to interactive mode (EnterInteractiveMsg).
+		// However, load the schema in preview mode so it's visible in the read-only detail view.
 		if msg.Err == nil && msg.ServiceName == "D1" && msg.Detail != nil {
-			inputCmd := m.detail.InitD1Console(msg.ResourceID)
+			m.detail.PreviewD1Schema(msg.ResourceID)
 			schemaCmd := m.loadD1Schema(msg.ResourceID)
-			return m, tea.Batch(inputCmd, schemaCmd, m.detail.SpinnerInit())
+			return m, tea.Batch(schemaCmd, m.detail.SpinnerInit())
+		}
+		return m, nil
+
+	case detail.EnterInteractiveMsg:
+		// User entered interactive mode on a ReadWrite service — initialize interactive features.
+		if msg.Mode == detail.ReadWrite && msg.ServiceName == "D1" && msg.ResourceID != "" {
+			// Only init D1 console if not already active for this database
+			if !m.detail.D1Active() || m.detail.D1DatabaseID() != msg.ResourceID {
+				inputCmd := m.detail.InitD1Console(msg.ResourceID)
+				// InitD1Console preserves schema if already loaded for this DB;
+				// only re-fetch if schema is not yet available.
+				cmds := []tea.Cmd{inputCmd}
+				if m.detail.IsLoading() {
+					cmds = append(cmds, m.loadD1Schema(msg.ResourceID), m.detail.SpinnerInit())
+				}
+				return m, tea.Batch(cmds...)
+			}
 		}
 		return m, nil
 
@@ -1244,9 +1273,9 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activeTab == tabbar.TabConfiguration {
 				return m, tea.Quit
 			}
-			// Resources tab: quit unless D1 console is actively focused
+			// Resources tab: quit unless D1 console is interactively focused
 			if m.activeTab == tabbar.TabResources {
-				if m.viewState == ViewServiceDetail && m.detail.D1Active() && m.detail.Focus() == detail.FocusDetail {
+				if m.detail.D1Active() && m.detail.Interacting() && m.detail.Focus() == detail.FocusDetail {
 					break // let it fall through to detail's Update
 				}
 				return m, tea.Quit
@@ -1258,8 +1287,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.viewState == ViewServiceList {
 				return m, tea.Quit
 			}
-			// In detail view, only quit if D1 console is not focused
-			if m.viewState == ViewServiceDetail && !m.detail.D1Active() {
+			// In detail view, only quit if D1 console is not interactively focused
+			if m.viewState == ViewServiceDetail && !(m.detail.D1Active() && m.detail.Interacting()) {
 				return m, tea.Quit
 			}
 		case "ctrl+h":
@@ -1459,7 +1488,8 @@ func (m Model) isTextInputActive() bool {
 	if m.viewState == ViewWrangler && m.wrangler.CmdRunning() {
 		return true
 	}
-	if m.viewState == ViewServiceDetail && m.detail.D1Active() && m.detail.Focus() == detail.FocusDetail {
+	// D1 console only blocks tab switching when in interactive mode
+	if m.detail.D1Active() && m.detail.Interacting() && m.detail.Focus() == detail.FocusDetail {
 		return true
 	}
 	return false

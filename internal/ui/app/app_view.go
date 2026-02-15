@@ -329,31 +329,31 @@ func (m Model) renderResourcesHelp() []helpEntry {
 
 	switch m.detail.Focus() {
 	case detail.FocusList:
+		// Preview mode — list pane focused, detail auto-previews on cursor movement
 		entries := []helpEntry{
 			{"s", "service"},
 			{"j/k", "navigate"},
-			{"enter", "detail"},
+		}
+		if m.detail.InDetailView() && m.detail.ActiveServiceMode() == detail.ReadWrite {
+			entries = append(entries, helpEntry{"enter", "interact"})
 		}
 		if s := m.registry.Get(m.detail.Service()); s != nil {
 			if _, ok := s.(svc.Deleter); ok {
 				entries = append(entries, helpEntry{"d", "delete"})
 			}
 		}
-		if m.detail.InDetailView() {
-			entries = append(entries, helpEntry{"tab", "detail pane"})
-		}
 		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 		return entries
 	case detail.FocusDetail:
+		// Interactive mode — detail pane focused for scrolling/editing
 		entries := []helpEntry{
-			{"s", "service"},
 			{"esc", "back"},
 			{"j/k", "scroll"},
 		}
 		if m.detail.IsWorkersDetail() {
 			entries = append(entries, helpEntry{"t", "tail"})
 		}
-		entries = append(entries, helpEntry{"tab", "list pane"}, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 		return entries
 	}
 

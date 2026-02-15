@@ -36,10 +36,19 @@ const (
 	FocusDetail                    // Right pane (resource detail)
 )
 
+// DetailMode describes the interactivity level of a service's detail view.
+type DetailMode int
+
+const (
+	ReadOnly  DetailMode = iota // Detail view supports scrolling only (Workers, KV, R2, Queues)
+	ReadWrite                   // Detail view has interactive elements (D1 SQL console, future KV editor)
+)
+
 // ServiceEntry describes a service available in the dropdown selector.
 type ServiceEntry struct {
-	Name       string // e.g. "Workers", "KV", "R2"
-	Integrated bool   // false for "coming soon" services
+	Name       string     // e.g. "Workers", "KV", "R2"
+	Integrated bool       // false for "coming soon" services
+	Mode       DetailMode // ReadOnly or ReadWrite — determines interactive capabilities
 }
 
 // SelectServiceMsg is emitted when the user selects a service from the dropdown.
@@ -127,6 +136,15 @@ type (
 		Err        error
 	}
 
+	// EnterInteractiveMsg is emitted when the user enters interactive mode on a
+	// ReadWrite service's detail view. The app layer handles this to initialize
+	// service-specific interactive features (e.g. D1 SQL console).
+	EnterInteractiveMsg struct {
+		ServiceName string
+		ResourceID  string
+		Mode        DetailMode
+	}
+
 	// CopyToClipboardMsg requests the app to copy text to the system clipboard.
 	CopyToClipboardMsg struct {
 		Text string
@@ -150,7 +168,8 @@ type Model struct {
 	mode    viewMode
 
 	// Dual-pane layout
-	focus DetailFocus // which pane has keyboard focus
+	focus       DetailFocus // which pane has keyboard focus
+	interacting bool        // true when in interactive mode (detail pane engaged for scrolling/editing)
 
 	// Service dropdown
 	services       []ServiceEntry // available services for the dropdown
@@ -346,6 +365,27 @@ func (m Model) Focus() DetailFocus {
 	return m.focus
 }
 
+// Interacting returns whether the detail pane is in interactive mode
+// (user pressed enter/tab to engage with the detail view for scrolling or editing).
+func (m Model) Interacting() bool {
+	return m.interacting
+}
+
+// ActiveServiceMode returns the DetailMode for the currently selected service.
+func (m Model) ActiveServiceMode() DetailMode {
+	return m.activeServiceMode()
+}
+
+// activeServiceMode returns the DetailMode for the currently selected service.
+func (m Model) activeServiceMode() DetailMode {
+	for _, s := range m.services {
+		if s.Name == m.service {
+			return s.Mode
+		}
+	}
+	return ReadOnly
+}
+
 // SetFocusList switches keyboard focus to the left (list) pane.
 func (m *Model) SetFocusList() {
 	m.focus = FocusList
@@ -398,6 +438,7 @@ func (m *Model) SetService(name string) tea.Cmd {
 	m.notIntegrated = false
 	m.managedIDs = nil
 	m.managedCount = 0
+	m.interacting = false
 
 	return func() tea.Msg {
 		return LoadResourcesMsg{ServiceName: name}
@@ -406,9 +447,10 @@ func (m *Model) SetService(name string) tea.Cmd {
 
 // SetServiceWithCache updates which service to display, showing cached data immediately
 // while a background refresh is triggered. If no cache is available, falls back to loading state.
-func (m *Model) SetServiceWithCache(name string, cached []service.Resource) tea.Cmd {
+// Returns (refreshCmd, previewCmd) — caller should batch both.
+func (m *Model) SetServiceWithCache(name string, cached []service.Resource) (tea.Cmd, tea.Cmd) {
 	if name == m.service {
-		return nil
+		return nil, nil
 	}
 	m.service = name
 	m.mode = viewList
@@ -420,6 +462,11 @@ func (m *Model) SetServiceWithCache(name string, cached []service.Resource) tea.
 	m.err = nil
 	m.managedIDs = nil
 	m.managedCount = 0
+	m.interacting = false
+
+	refreshCmd := tea.Cmd(func() tea.Msg {
+		return LoadResourcesMsg{ServiceName: name}
+	})
 
 	if cached != nil {
 		// Show cached data immediately, mark as refreshing
@@ -427,24 +474,35 @@ func (m *Model) SetServiceWithCache(name string, cached []service.Resource) tea.
 		m.cursor = 0
 		m.loading = false
 		m.refreshing = true
-	} else {
-		// No cache — show loading spinner
-		m.resources = nil
-		m.cursor = 0
-		m.loading = true
-		m.refreshing = false
+
+		// Auto-preview first resource
+		var previewCmd tea.Cmd
+		if len(cached) > 0 {
+			m.mode = viewDetail
+			r := cached[0]
+			m.detailLoading = true
+			m.detailID = r.ID
+			previewCmd = func() tea.Msg {
+				return LoadDetailMsg{ServiceName: name, ResourceID: r.ID}
+			}
+		}
+		return refreshCmd, previewCmd
 	}
 
-	return func() tea.Msg {
-		return LoadResourcesMsg{ServiceName: name}
-	}
+	// No cache — show loading spinner
+	m.resources = nil
+	m.cursor = 0
+	m.loading = true
+	m.refreshing = false
+	return refreshCmd, nil
 }
 
 // SetServiceFresh updates which service to display using cached data that is
 // known to be fresh (within CacheTTL). No background refresh is triggered.
-func (m *Model) SetServiceFresh(name string, cached []service.Resource) {
+// Returns a Cmd to auto-preview the first resource (if any).
+func (m *Model) SetServiceFresh(name string, cached []service.Resource) tea.Cmd {
 	if name == m.service {
-		return
+		return nil
 	}
 	m.service = name
 	m.mode = viewList
@@ -460,16 +518,45 @@ func (m *Model) SetServiceFresh(name string, cached []service.Resource) {
 	m.cursor = 0
 	m.loading = false
 	m.refreshing = false
+	m.interacting = false
+
+	// Auto-preview first resource
+	if len(cached) > 0 {
+		m.mode = viewDetail
+		r := cached[0]
+		m.detailLoading = true
+		m.detailID = r.ID
+		return func() tea.Msg {
+			return LoadDetailMsg{ServiceName: name, ResourceID: r.ID}
+		}
+	}
+	return nil
 }
 
 // SetResources is called when resources have been loaded.
-func (m *Model) SetResources(resources []service.Resource, err error, notIntegrated bool) {
+// Returns a Cmd to auto-preview the first resource (if any).
+func (m *Model) SetResources(resources []service.Resource, err error, notIntegrated bool) tea.Cmd {
 	m.loading = false
 	m.refreshing = false
 	m.resources = resources
 	m.err = err
 	m.cursor = 0
 	m.notIntegrated = notIntegrated
+
+	// Auto-preview: switch to detail view and load first resource
+	if err == nil && !notIntegrated && len(resources) > 0 {
+		m.mode = viewDetail
+		r := resources[0]
+		m.detailLoading = true
+		m.detailErr = nil
+		m.detail = nil
+		m.detailID = r.ID
+		m.scrollOffset = 0
+		return func() tea.Msg {
+			return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
+		}
+	}
+	return nil
 }
 
 // RefreshResources updates the resource list from a background refresh.
@@ -532,9 +619,10 @@ func (m Model) ResourceDetail() *service.ResourceDetail {
 	return m.detail
 }
 
-// InDetailView returns true if the detail panel is in the detail drill-down view.
+// InDetailView returns true if the detail panel is in the detail view
+// (either auto-preview is loading or detail data is available).
 func (m Model) InDetailView() bool {
-	return m.mode == viewDetail && m.detail != nil
+	return m.mode == viewDetail && (m.detail != nil || m.detailLoading)
 }
 
 // BackToList resets the detail panel from detail view back to list view.
@@ -547,19 +635,34 @@ func (m *Model) BackToList() {
 	m.detailID = ""
 	m.detailLoading = false
 	m.scrollOffset = 0
+	m.interacting = false
 }
 
 // --- D1 SQL Console helpers ---
 
+// PreviewD1Schema sets up the D1 database ID and marks the schema as loading,
+// without initializing the interactive SQL console. Used in preview mode so the
+// schema is visible in the read-only detail view.
+func (m *Model) PreviewD1Schema(databaseID string) {
+	m.d1DatabaseID = databaseID
+	m.d1SchemaTables = nil
+	m.d1SchemaErr = ""
+	m.d1SchemaLoading = true
+}
+
 // InitD1Console initializes the D1 SQL console for a database.
+// Preserves schema data if it was already loaded in preview mode for the same database.
 func (m *Model) InitD1Console(databaseID string) tea.Cmd {
+	preserveSchema := m.d1DatabaseID == databaseID && len(m.d1SchemaTables) > 0
 	m.d1Active = true
 	m.d1DatabaseID = databaseID
 	m.d1Output = nil
 	m.d1Querying = false
-	m.d1SchemaTables = nil
-	m.d1SchemaErr = ""
-	m.d1SchemaLoading = true
+	if !preserveSchema {
+		m.d1SchemaTables = nil
+		m.d1SchemaErr = ""
+		m.d1SchemaLoading = true
+	}
 
 	ti := textinput.New()
 	ti.Prompt = "sql> "
@@ -657,7 +760,7 @@ func (m *Model) UpdateSpinner(msg tea.Msg) tea.Cmd {
 
 // SelectedResource returns the currently highlighted resource, if any.
 func (m Model) SelectedResource() *service.Resource {
-	if m.mode == viewList && len(m.resources) > 0 && m.cursor < len(m.resources) {
+	if len(m.resources) > 0 && m.cursor < len(m.resources) {
 		return &m.resources[m.cursor]
 	}
 	return nil
@@ -670,25 +773,28 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if mouseMsg.Button == tea.MouseButtonLeft && mouseMsg.Action == tea.MouseActionRelease {
 			// Check resource list item clicks (list mode only)
 			if !m.dropdownOpen && len(m.resources) > 0 {
-				for i, r := range m.resources {
+				for i := range m.resources {
 					if z := zone.Get(ResourceItemZoneID(i)); z != nil && z.InBounds(mouseMsg) {
 						if i == m.cursor && m.focus == FocusList {
-							// Already selected — drill into detail
-							m.mode = viewDetail
-							m.focus = FocusDetail
-							m.detailLoading = true
-							m.detailErr = nil
-							m.detail = nil
-							m.detailID = r.ID
-							m.scrollOffset = 0
-							return m, func() tea.Msg {
-								return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
+							// Already selected — enter interactive mode (ReadWrite only)
+							if m.activeServiceMode() == ReadWrite {
+								m.interacting = true
+								m.focus = FocusDetail
+								m.scrollOffset = 0
+								if m.detail != nil {
+									svc := m.service
+									resID := m.detailID
+									return m, func() tea.Msg {
+										return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite}
+									}
+								}
 							}
+							return m, nil
 						}
-						// Select the item
+						// Select the item and auto-preview
 						m.cursor = i
 						m.focus = FocusList
-						return m, nil
+						return m, m.autoPreview()
 					}
 				}
 			}
@@ -715,7 +821,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	// When D1 console is active, forward all messages to the textinput for cursor blink
-	if m.d1Active && m.mode == viewDetail && m.focus == FocusDetail {
+	if m.d1Active && m.mode == viewDetail && m.focus == FocusDetail && m.interacting {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			return m.updateD1(msg)
@@ -740,11 +846,28 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// 'tab' switches focus between panes (only when in detail view)
-		if msg.String() == "tab" && m.mode == viewDetail {
+		// 'tab' switches focus between panes (only for ReadWrite services in detail view).
+		// From list: enters interactive mode (same as enter).
+		// From detail: exits interactive mode back to list.
+		// ReadOnly services don't support interactive mode, so tab is a no-op.
+		if msg.String() == "tab" && m.mode == viewDetail && m.activeServiceMode() == ReadWrite {
 			if m.focus == FocusList {
-				m.focus = FocusDetail
+				// Enter interactive mode
+				if len(m.resources) > 0 && m.cursor < len(m.resources) {
+					m.interacting = true
+					m.focus = FocusDetail
+					m.scrollOffset = 0
+					if m.detail != nil {
+						svc := m.service
+						resID := m.detailID
+						return m, func() tea.Msg {
+							return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite}
+						}
+					}
+				}
 			} else {
+				// Exit interactive mode
+				m.interacting = false
 				m.focus = FocusList
 			}
 			return m, nil
@@ -769,24 +892,28 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
+			return m, m.autoPreview()
 		}
 	case "down", "j":
 		if m.cursor < len(m.resources)-1 {
 			m.cursor++
+			return m, m.autoPreview()
 		}
 	case "enter":
-		if len(m.resources) > 0 && m.cursor < len(m.resources) {
-			r := m.resources[m.cursor]
-			m.mode = viewDetail
+		// Switch to interactive mode — only for ReadWrite services (e.g. D1 SQL console).
+		// ReadOnly services (Workers, KV, R2, Queues) have preview-only detail.
+		if m.activeServiceMode() == ReadWrite && len(m.resources) > 0 && m.cursor < len(m.resources) && m.mode == viewDetail {
+			m.interacting = true
 			m.focus = FocusDetail
-			m.detailLoading = true
-			m.detailErr = nil
-			m.detail = nil
-			m.detailID = r.ID
 			m.scrollOffset = 0
-			return m, func() tea.Msg {
-				return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
+			if m.detail != nil {
+				svc := m.service
+				resID := m.detailID
+				return m, func() tea.Msg {
+					return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite}
+				}
 			}
+			return m, nil
 		}
 	case "d":
 		// Delete resource — only for deletable services (not Workers)
@@ -802,6 +929,37 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// autoPreview emits a LoadDetailMsg for the currently highlighted resource
+// if it differs from the already-loaded detail (staleness check).
+// Also switches to viewDetail mode so the right pane shows the detail.
+func (m *Model) autoPreview() tea.Cmd {
+	if len(m.resources) == 0 || m.cursor >= len(m.resources) {
+		return nil
+	}
+	r := m.resources[m.cursor]
+	m.mode = viewDetail
+
+	// Staleness check: if we already have detail for this resource, skip re-fetch
+	if r.ID == m.detailID && (m.detail != nil || m.detailLoading) {
+		return nil
+	}
+
+	m.detailLoading = true
+	m.detailErr = nil
+	m.detail = nil
+	m.detailID = r.ID
+	m.scrollOffset = 0
+	// Clear stale D1 schema when previewing a different resource
+	if m.service == "D1" {
+		m.d1SchemaTables = nil
+		m.d1SchemaErr = ""
+		m.d1SchemaLoading = false
+	}
+	return func() tea.Msg {
+		return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
+	}
 }
 
 // updateDropdown handles key events when the service dropdown is open.
@@ -843,7 +1001,8 @@ func isDeletableService(name string) bool {
 func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "backspace":
-		// In dual-pane: switch focus to list pane, keep detail visible
+		// Exit interactive mode and return focus to list pane
+		m.interacting = false
 		m.focus = FocusList
 		return m, nil
 	case "t":
@@ -874,7 +1033,8 @@ func (m Model) updateDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 func (m Model) updateD1(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
-		// Switch focus to list pane (dual-pane navigation)
+		// Exit interactive mode, switch focus to list pane
+		m.interacting = false
 		m.focus = FocusList
 		return m, nil
 	case tea.KeyEnter:
@@ -966,8 +1126,9 @@ func (m Model) View() string {
 		paneHeight = 1
 	}
 
-	// Calculate pane widths: left ~25%, right ~75%, minus 1 for divider, minus 2 for border
-	innerWidth := m.width - 4 // border takes 2 chars on each side
+	// Calculate pane widths: left ~25%, right ~75%.
+	// Outer border takes 2 chars on each side. Right pane has its own rounded border (2 chars).
+	innerWidth := m.width - 4 // outer border takes 2 chars on each side
 	if innerWidth < 10 {
 		innerWidth = 10
 	}
@@ -975,14 +1136,40 @@ func (m Model) View() string {
 	if leftWidth < 15 {
 		leftWidth = 15
 	}
-	rightWidth := innerWidth - leftWidth - 1 // -1 for divider column
+	rightOuterWidth := innerWidth - leftWidth // total width for right pane including its border
+
+	// Right pane inner dimensions (inside its rounded border)
+	rightInnerWidth := rightOuterWidth - 2
+	if rightInnerWidth < 5 {
+		rightInnerWidth = 5
+	}
+	rightInnerHeight := paneHeight - 2
+	if rightInnerHeight < 1 {
+		rightInnerHeight = 1
+	}
 
 	leftPane := m.viewResourceList(leftWidth, paneHeight)
-	rightPane := m.viewResourceDetail(rightWidth, paneHeight)
+	rightPaneLines := m.viewResourceDetail(rightInnerWidth, rightInnerHeight)
 
-	// Join panes side by side with a vertical divider
-	divider := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render("│")
-	dualPane := joinSideBySide(leftPane, rightPane, divider, leftWidth, paneHeight)
+	// Render right pane inside a rounded border box.
+	// Orange border when in interactive mode, dark gray otherwise.
+	rightBorderColor := theme.ColorDarkGray
+	if m.focus == FocusDetail && m.interacting {
+		rightBorderColor = theme.ColorOrange
+	}
+	rightContent := strings.Join(rightPaneLines, "\n")
+	rightBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(rightBorderColor).
+		Width(rightInnerWidth).
+		Height(rightInnerHeight).
+		Render(rightContent)
+
+	// Split the rendered right box back into lines for side-by-side join
+	rightBoxLines := strings.Split(rightBox, "\n")
+
+	// Join left pane and right box side by side (no divider — the border IS the separator)
+	dualPane := joinSideBySideNoDivider(leftPane, rightBoxLines, leftWidth, paneHeight)
 
 	content := dropdownLine + "\n" + dualPane
 	contentLines := strings.Split(content, "\n")
@@ -1200,11 +1387,11 @@ func (m Model) viewResourceList(width, height int) []string {
 func (m Model) viewResourceDetail(width, height int) []string {
 	lines := make([]string, 0, height)
 
-	// When no detail is loaded (list mode), show a hint
-	if m.mode == viewList || m.detail == nil && !m.detailLoading && m.detailErr == nil {
+	// When no detail is loaded yet, show context-appropriate hint or loading spinner
+	if m.detail == nil && !m.detailLoading && m.detailErr == nil {
 		hint := theme.DimStyle.Render(" Select a resource")
-		if m.mode == viewDetail && m.detailLoading {
-			hint = fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading..."))
+		if len(m.resources) == 0 {
+			hint = "" // no resources, keep pane empty
 		}
 		lines = append(lines, hint)
 		for len(lines) < height {
@@ -1248,18 +1435,43 @@ func (m Model) viewResourceDetail(width, height int) []string {
 
 	for _, f := range d.Fields {
 		label := theme.LabelStyle.Render(fmt.Sprintf(" %-16s", f.Label))
-		value := theme.ValueStyle.Render(f.Value)
-		line := fmt.Sprintf("%s %s", label, value)
-		if isCopyableLabel(f.Label) {
-			line += copyIcon()
-			copyLineMap[len(allLines)] = f.Value
+		// Split multi-line values (e.g. Worker bindings) into separate visual lines.
+		// First line gets the label; continuation lines are indented to align under the value.
+		valueLines := strings.Split(f.Value, "\n")
+		for vi, vl := range valueLines {
+			if vi == 0 {
+				line := fmt.Sprintf("%s %s", label, theme.ValueStyle.Render(vl))
+				if isCopyableLabel(f.Label) {
+					line += copyIcon()
+					copyLineMap[len(allLines)] = f.Value
+				}
+				allLines = append(allLines, line)
+			} else {
+				// Continuation: 1 leading space + 16 label chars + 1 space = 18 char indent
+				indent := strings.Repeat(" ", 18)
+				allLines = append(allLines, indent+theme.ValueStyle.Render(vl))
+			}
 		}
-		allLines = append(allLines, line)
 	}
 
 	// For D1 with active console, use the special D1 split layout
 	if m.service == "D1" && m.d1Active {
 		return m.viewResourceDetailD1(width, height, title, sep, allLines, copyLineMap)
+	}
+
+	// For D1 in preview mode, render schema below fields (read-only)
+	if m.service == "D1" && !m.d1Active {
+		schemaSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
+			strings.Repeat("─", sepWidth))
+		allLines = append(allLines, "", schemaSep)
+		if m.d1SchemaLoading {
+			allLines = append(allLines, fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading schema...")))
+		} else if m.d1SchemaErr != "" {
+			allLines = append(allLines, theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s", m.d1SchemaErr)))
+		} else if len(m.d1SchemaTables) > 0 {
+			allLines = append(allLines, " "+theme.D1SchemaTitleStyle.Render("Schema"))
+			allLines = append(allLines, m.renderSchemaStyled(m.d1SchemaTables)...)
+		}
 	}
 
 	// Append ExtraContent if present
@@ -1632,6 +1844,28 @@ func joinSideBySide(left, right []string, divider string, leftWidth, height int)
 			l = l + strings.Repeat(" ", leftWidth-visLen)
 		}
 		result = append(result, l+divider+r)
+	}
+	return strings.Join(result, "\n")
+}
+
+// joinSideBySideNoDivider joins left pane lines and a pre-rendered right box
+// side by side without an explicit divider (the right box's border serves as separator).
+func joinSideBySideNoDivider(left []string, right []string, leftWidth, height int) string {
+	var result []string
+	for i := 0; i < height; i++ {
+		l := ""
+		if i < len(left) {
+			l = left[i]
+		}
+		r := ""
+		if i < len(right) {
+			r = right[i]
+		}
+		visLen := runeWidth(l)
+		if visLen < leftWidth {
+			l = l + strings.Repeat(" ", leftWidth-visLen)
+		}
+		result = append(result, l+r)
 	}
 	return strings.Join(result, "\n")
 }

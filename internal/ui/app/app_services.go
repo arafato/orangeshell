@@ -40,17 +40,24 @@ func (m *Model) navigateToService(name string) tea.Cmd {
 	if entry != nil {
 		if !m.registry.IsCacheStale(name) {
 			// Cache is fresh — show it without a background refresh
-			m.detail.SetServiceFresh(name, entry.Resources)
+			previewCmd := m.detail.SetServiceFresh(name, entry.Resources)
 			m.updateManagedResources()
+			if previewCmd != nil {
+				return tea.Batch(previewCmd, m.detail.SpinnerInit())
+			}
 			return nil
 		}
 		// Cache is stale — show it and trigger a background refresh
-		cmd := m.detail.SetServiceWithCache(name, entry.Resources)
+		refreshCmd, previewCmd := m.detail.SetServiceWithCache(name, entry.Resources)
 		m.updateManagedResources()
-		if m.detail.IsLoading() {
-			return tea.Batch(cmd, m.detail.SpinnerInit())
+		cmds := []tea.Cmd{refreshCmd}
+		if previewCmd != nil {
+			cmds = append(cmds, previewCmd)
 		}
-		return cmd
+		if m.detail.IsLoading() {
+			cmds = append(cmds, m.detail.SpinnerInit())
+		}
+		return tea.Batch(cmds...)
 	}
 	// No cache at all — show loading spinner
 	m.detail.SetService(name)
@@ -188,13 +195,13 @@ func (m *Model) registerServices(accountID string) {
 
 	// Populate the Resources tab service dropdown
 	m.detail.SetServices([]detail.ServiceEntry{
-		{Name: "Workers", Integrated: true},
-		{Name: "KV", Integrated: true},
-		{Name: "R2", Integrated: true},
-		{Name: "D1", Integrated: true},
-		{Name: "Queues", Integrated: true},
-		{Name: "Pages", Integrated: false},
-		{Name: "Hyperdrive", Integrated: false},
+		{Name: "Workers", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "KV", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "R2", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "D1", Integrated: true, Mode: detail.ReadWrite},
+		{Name: "Queues", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "Pages", Integrated: false, Mode: detail.ReadOnly},
+		{Name: "Hyperdrive", Integrated: false, Mode: detail.ReadOnly},
 	})
 }
 
@@ -233,8 +240,9 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 		m.viewState = ViewServiceList // drop back to list on account switch
 
 		entry := m.registry.GetCache(serviceName)
+		var previewCmd tea.Cmd
 		if entry != nil {
-			m.detail.SetServiceWithCache(serviceName, entry.Resources)
+			_, previewCmd = m.detail.SetServiceWithCache(serviceName, entry.Resources)
 		} else {
 			m.detail.SetService(serviceName)
 		}
@@ -242,7 +250,11 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 		loadCmd := tea.Cmd(func() tea.Msg {
 			return detail.LoadResourcesMsg{ServiceName: serviceName}
 		})
-		return tea.Batch(loadCmd, m.detail.SpinnerInit(), deployCmd)
+		cmds := []tea.Cmd{loadCmd, m.detail.SpinnerInit(), deployCmd}
+		if previewCmd != nil {
+			cmds = append(cmds, previewCmd)
+		}
+		return tea.Batch(cmds...)
 	}
 
 	return deployCmd
@@ -258,12 +270,13 @@ func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
 	var loadCmd tea.Cmd
 	entry := m.registry.GetCache(serviceName)
 	if entry != nil {
-		loadCmd = m.detail.SetServiceWithCache(serviceName, entry.Resources)
+		loadCmd, _ = m.detail.SetServiceWithCache(serviceName, entry.Resources)
 	} else {
 		loadCmd = m.detail.SetService(serviceName)
 	}
 
 	// Switch detail panel directly to detail view and load the specific resource
+	// (overrides auto-preview — we want this specific resource, not the first one)
 	m.detail.NavigateToDetail(resourceID)
 	detailCmd := m.loadResourceDetail(serviceName, resourceID)
 

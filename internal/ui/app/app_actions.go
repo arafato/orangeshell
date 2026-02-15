@@ -612,7 +612,8 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		if workerName == "" {
 			return nil
 		}
-		// Stop any running wrangler command first
+		// Stop any running wrangler command first (including dev sessions)
+		m.cleanupDevSession()
 		m.stopWranglerRunner()
 		// Start tail on Monitoring tab
 		m.tailSource = "monitoring"
@@ -626,9 +627,27 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	if item.Action == "wrangler_dev" || item.Action == "wrangler_dev --remote" {
 		action := strings.TrimPrefix(item.Action, "wrangler_")
 		envName := m.wrangler.FocusedEnvName()
+
+		// Create a dev session for monitoring tab integration
+		scriptName := m.wrangler.FocusedScriptName()
+		devKind := "local"
+		if action == "dev --remote" {
+			devKind = "remote"
+		}
+		dsName := devScriptName(scriptName)
+		m.devSessions = append(m.devSessions, devSession{
+			ScriptName:  dsName,
+			ProjectName: m.wrangler.FocusedProjectName(),
+			EnvName:     envName,
+			DevKind:     devKind,
+		})
+		m.monitoring.AddDevToGrid(dsName, devKind)
+		m.refreshMonitoringWorkerTree()
+
 		return m.startWranglerCmdWithArgs(action, envName, []string{"--show-interactive-dev-session=false"})
 	}
 	if item.Action == "wrangler_stop_dev" {
+		m.cleanupDevSession()
 		m.wrangler.StopDevServer()
 		m.stopWranglerRunner()
 		return nil

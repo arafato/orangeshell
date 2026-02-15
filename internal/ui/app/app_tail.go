@@ -149,15 +149,18 @@ func (m *Model) stopGridTail(scriptName string) {
 }
 
 // stopAllGridTails stops all grid tail sessions and marks all panes as stopped.
+// Dev panes are not affected — they have no API session and remain active.
 func (m *Model) stopAllGridTails() {
 	sessions := m.parallelTailSessions
 	client := m.client
 	m.parallelTailSessions = nil
 	m.parallelTailActive = false
 
-	// Mark all grid panes as stopped
+	// Mark all non-dev grid panes as stopped
 	for _, script := range m.monitoring.AllGridPaneScripts() {
-		m.monitoring.GridSetStopped(script)
+		if !m.isDevWorker(script) {
+			m.monitoring.GridSetStopped(script)
+		}
 	}
 
 	if len(sessions) > 0 {

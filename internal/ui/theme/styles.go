@@ -13,6 +13,7 @@ var (
 	ColorBgLight   = lipgloss.Color("#222240")
 	ColorGreen     = lipgloss.Color("#73D216")
 	ColorYellow    = lipgloss.Color("#EDD400")
+	ColorYellowDim = lipgloss.Color("#8B7500") // dim yellow for unfocused dev pane borders
 	ColorRed       = lipgloss.Color("#EF2929")
 	ColorBlue      = lipgloss.Color("#729FCF")
 )

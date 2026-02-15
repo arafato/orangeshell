@@ -190,7 +190,8 @@ type Model struct {
 	wranglerVersionRunner *wcfg.Runner // separate runner for background version fetches
 
 	// Monitoring tab model (live tail sessions)
-	monitoring monitoring.Model
+	monitoring  monitoring.Model
+	devSessions []devSession // active wrangler dev sessions (for monitoring tab dev tailing)
 
 	// Active tail session (nil when no tail is running)
 	tailSession *svc.TailSession
@@ -846,6 +847,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// New monitoring dual-pane messages
 	case monitoring.TailAddMsg:
 		// User pressed 'a' on a worker in the tree — add to grid and start tail
+		if m.isDevWorker(msg.ScriptName) {
+			// Dev worker: output is already being piped. Just ensure it's in the grid.
+			if ds := m.findDevSession(msg.ScriptName); ds != nil {
+				m.monitoring.AddDevToGrid(ds.ScriptName, ds.DevKind)
+			}
+			return m, nil
+		}
 		if m.client == nil {
 			return m, nil
 		}
@@ -856,11 +864,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case monitoring.TailRemoveMsg:
 		// User pressed 'd' on a worker in the tree — stop tail and remove from grid
+		if m.isDevWorker(msg.ScriptName) {
+			// Dev worker: remove from grid but don't stop the dev process.
+			// Output continues flowing to CmdPane. User can re-add via 'a'.
+			m.monitoring.RemoveFromGrid(msg.ScriptName)
+			return m, nil
+		}
 		m.stopGridTail(msg.ScriptName)
 		m.monitoring.RemoveFromGrid(msg.ScriptName)
 		return m, nil
 
 	case monitoring.TailToggleMsg:
+		if m.isDevWorker(msg.ScriptName) {
+			// Dev panes can't be toggled — they're always active while process runs
+			return m, nil
+		}
 		if m.client == nil {
 			return m, nil
 		}
@@ -880,12 +898,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Start {
-			// Start tails for all stopped grid panes
+			// Start tails for all stopped grid panes (skip dev panes — always active)
 			m.parallelTailActive = true
 			accountID := m.registry.ActiveAccountID()
 			var cmds []tea.Cmd
 			for _, script := range m.monitoring.AllGridPaneScripts() {
-				if !m.hasGridTailSession(script) {
+				if !m.hasGridTailSession(script) && !m.isDevWorker(script) {
 					cmds = append(cmds, m.startGridTailCmd(accountID, script))
 				}
 			}
@@ -894,7 +912,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Stop all grid tails
+		// Stop all grid tails (dev panes are unaffected — no API session to stop)
 		m.stopAllGridTails()
 		return m, nil
 
@@ -970,19 +988,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case uiwrangler.CmdOutputMsg:
 		m.wrangler.AppendCmdOutput(msg.Line)
+
+		// If this is a dev command, also pipe output to the monitoring grid
+		if wcfg.IsDevAction(m.wranglerRunnerAction) && len(m.devSessions) > 0 {
+			ds := &m.devSessions[0]
+			tailLine := parseDevOutputLine(msg.Line)
+			m.monitoring.GridAppendLines(ds.ScriptName, []svc.TailLine{tailLine})
+
+			// Check for port announcement (e.g. "Ready on http://localhost:8787")
+			if port := extractDevPort(msg.Line.Text); port != "" && ds.Port == "" {
+				ds.Port = port
+				m.refreshMonitoringWorkerTree()
+			}
+		}
+
 		return m, waitForWranglerOutput(m.wranglerRunner)
 
 	case uiwrangler.CmdDoneMsg:
 		// Drain any remaining lines before finishing
+		isDevCmd := wcfg.IsDevAction(m.wranglerRunnerAction)
 		if m.wranglerRunner != nil {
 			for line := range m.wranglerRunner.LinesCh() {
 				m.wrangler.AppendCmdOutput(line)
+				// Also pipe drained dev lines to monitoring grid
+				if isDevCmd && len(m.devSessions) > 0 {
+					tailLine := parseDevOutputLine(line)
+					m.monitoring.GridAppendLines(m.devSessions[0].ScriptName, []svc.TailLine{tailLine})
+				}
 			}
 		}
 		m.wrangler.FinishCommand(msg.Result)
 		action := m.wranglerRunnerAction
 		m.wranglerRunner = nil
 		m.wranglerRunnerAction = ""
+
+		// If this was a dev action, clean up dev monitoring state
+		if isDevCmd {
+			m.cleanupDevSession()
+		}
 
 		// After mutating commands, immediately refresh stale data
 		if isMutatingAction(action) && msg.Result.ExitCode == 0 {
@@ -1511,7 +1554,7 @@ func (m Model) isTextInputActive() bool {
 	if m.viewState == ViewWrangler && m.wrangler.IsDirBrowserActive() {
 		return true
 	}
-	if m.viewState == ViewWrangler && m.wrangler.CmdRunning() {
+	if m.viewState == ViewWrangler && m.wrangler.CmdRunning() && !wcfg.IsDevAction(m.wranglerRunnerAction) {
 		return true
 	}
 	// D1 console only blocks tab switching when in interactive mode
@@ -1581,7 +1624,7 @@ func (m *Model) ensureViewStateForTab() tea.Cmd {
 // or when wrangler config changes.
 func (m *Model) refreshMonitoringWorkerTree() {
 	workers := m.wrangler.WorkerList()
-	if len(workers) == 0 {
+	if len(workers) == 0 && len(m.devSessions) == 0 {
 		m.monitoring.SetWorkerTree(nil)
 		return
 	}
@@ -1620,6 +1663,25 @@ func (m *Model) refreshMonitoringWorkerTree() {
 				ProjectName: w.ProjectName,
 				ScriptName:  w.ScriptName,
 				EnvName:     w.EnvName,
+			})
+		}
+	}
+
+	// Append dev session entries below a separator
+	if len(m.devSessions) > 0 {
+		tree = append(tree, monitoring.WorkerTreeEntry{
+			ProjectName: "Dev Mode Sessions",
+			IsHeader:    true,
+			IsDev:       true,
+		})
+		for _, ds := range m.devSessions {
+			tree = append(tree, monitoring.WorkerTreeEntry{
+				ProjectName: ds.ProjectName,
+				ScriptName:  ds.ScriptName,
+				EnvName:     ds.EnvName,
+				IsDev:       true,
+				DevKind:     ds.DevKind,
+				DevPort:     ds.Port,
 			})
 		}
 	}

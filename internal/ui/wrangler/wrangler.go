@@ -577,6 +577,28 @@ func (m *Model) StopDevServer() {
 	m.cmdPane.FinishWithMessage("Stopped", false)
 }
 
+// FocusedScriptName returns the resolved script name for the currently focused environment.
+// Used when starting wrangler dev to identify which worker is being dev'd.
+func (m Model) FocusedScriptName() string {
+	cfg := m.Config()
+	if cfg == nil {
+		return ""
+	}
+	envName := m.FocusedEnvName()
+	return cfg.ResolvedEnvName(envName)
+}
+
+// FocusedProjectName returns the project name for the currently focused project.
+func (m Model) FocusedProjectName() string {
+	if m.IsMonorepo() && m.activeProject >= 0 && m.activeProject < len(m.projects) {
+		return m.projects[m.activeProject].box.Name
+	}
+	if m.config != nil {
+		return m.config.Name
+	}
+	return ""
+}
+
 // WorkerInfo describes a single worker resolved from a wrangler config.
 // Used by the Monitoring tab to build the worker tree.
 type WorkerInfo struct {

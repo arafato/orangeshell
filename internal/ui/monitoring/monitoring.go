@@ -72,6 +72,9 @@ type WorkerTreeEntry struct {
 	ScriptName  string // resolved worker name (empty for headers)
 	EnvName     string // environment name (e.g. "default", "staging")
 	IsHeader    bool   // true for project group headers (non-selectable)
+	IsDev       bool   // true for dev-mode entries (wrangler dev sessions)
+	DevKind     string // "local" or "remote" (only set when IsDev is true)
+	DevPort     string // e.g. "8787" — extracted from wrangler dev output
 }
 
 // --- Tail pane (grid) ---
@@ -86,6 +89,8 @@ type TailPane struct {
 	Active     bool // true if tail is running (or starting)
 	Error      string
 	SessionID  string
+	IsDev      bool   // true for dev-mode panes (wrangler dev output)
+	DevKind    string // "local" or "remote"
 }
 
 func (p *TailPane) appendLines(lines []svc.TailLine) {
@@ -194,6 +199,24 @@ func (m *Model) AddToGrid(scriptName, url string) {
 		URL:        url,
 		Connecting: true,
 		Active:     true,
+	})
+}
+
+// AddDevToGrid adds a dev-mode worker to the tail grid.
+// Dev panes are immediately "connected" since output comes from the process pipe,
+// not from a Cloudflare WebSocket tail.
+func (m *Model) AddDevToGrid(scriptName, devKind string) {
+	for _, p := range m.gridPanes {
+		if p.ScriptName == scriptName {
+			return
+		}
+	}
+	m.gridPanes = append(m.gridPanes, TailPane{
+		ScriptName: scriptName,
+		Active:     true,
+		Connected:  true, // no WebSocket connect phase for dev panes
+		IsDev:      true,
+		DevKind:    devKind,
 	})
 }
 
@@ -751,12 +774,56 @@ func (m Model) viewWorkerTree(width, height int) string {
 	// Render tree entries
 	for i, entry := range m.workerTree {
 		if entry.IsHeader {
-			// Project group header
-			headerStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorOrange)
-			line := " " + headerStyle.Render(truncateStr(entry.ProjectName, innerWidth-1))
+			if entry.IsDev {
+				// Dev mode section: dashed separator + yellow header
+				sepLine := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).
+					Render(strings.Repeat("─", innerWidth))
+				lines = append(lines, " "+sepLine)
+				devHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorYellow)
+				lines = append(lines, " "+devHeaderStyle.Render(truncateStr(entry.ProjectName, innerWidth-1)))
+			} else {
+				// Project group header
+				headerStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorOrange)
+				line := " " + headerStyle.Render(truncateStr(entry.ProjectName, innerWidth-1))
+				lines = append(lines, line)
+			}
+		} else if entry.IsDev {
+			// Dev worker item with badge
+			cursor := "  "
+			nameStyle := lipgloss.NewStyle().Foreground(theme.ColorWhite)
+			if i == m.treeCursor && m.focusPane == FocusLeft {
+				cursor = lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true).Render("> ")
+				nameStyle = lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true)
+			}
+
+			// Grid indicator
+			indicator := " "
+			if m.IsInGrid(entry.ScriptName) {
+				indicator = lipgloss.NewStyle().Foreground(theme.ColorGreen).Render("●")
+			}
+
+			// Display name (strip "dev:" prefix for display)
+			displayName := strings.TrimPrefix(entry.ScriptName, "dev:")
+			name := truncateStr(displayName, innerWidth-18) // room for badge + port
+
+			// Dev badge
+			badge := "[dev]"
+			if entry.DevKind == "remote" {
+				badge = "[dev-remote]"
+			}
+			badgeStyle := lipgloss.NewStyle().Foreground(theme.ColorYellow)
+
+			// Port suffix
+			portSuffix := ""
+			if entry.DevPort != "" {
+				portSuffix = " " + theme.DimStyle.Render(":"+entry.DevPort)
+			}
+
+			line := fmt.Sprintf(" %s%s %s %s%s", cursor, indicator,
+				nameStyle.Render(name), badgeStyle.Render(badge), portSuffix)
 			lines = append(lines, line)
 		} else {
-			// Worker item
+			// Regular worker item
 			cursor := "  "
 			nameStyle := lipgloss.NewStyle().Foreground(theme.ColorWhite)
 			if i == m.treeCursor && m.focusPane == FocusLeft {
@@ -952,8 +1019,30 @@ func (m Model) renderGridPane(pane *TailPane, width, height int, focused bool) s
 		statusIcon = lipgloss.NewStyle().Foreground(theme.ColorGray).Render("○")
 	}
 
-	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorOrange)
-	header := fmt.Sprintf(" %s %s", statusIcon, nameStyle.Render(truncateStr(pane.ScriptName, innerWidth-3)))
+	// Header: name + optional dev badge
+	nameColor := theme.ColorOrange
+	if pane.IsDev {
+		nameColor = theme.ColorYellow
+	}
+	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(nameColor)
+
+	// Display name (strip "dev:" prefix for dev panes)
+	displayName := pane.ScriptName
+	if pane.IsDev {
+		displayName = strings.TrimPrefix(displayName, "dev:")
+	}
+
+	header := fmt.Sprintf(" %s %s", statusIcon, nameStyle.Render(truncateStr(displayName, innerWidth-3)))
+
+	// Dev badge (LOCAL/REMOTE pill)
+	if pane.IsDev {
+		badgeText := "LOCAL"
+		if pane.DevKind == "remote" {
+			badgeText = "REMOTE"
+		}
+		badgeStyle := lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true)
+		header += " " + badgeStyle.Render(badgeText)
+	}
 
 	sepWidth := width - 4
 	if sepWidth < 0 {
@@ -1011,7 +1100,14 @@ func (m Model) renderGridPane(pane *TailPane, width, height int, focused bool) s
 		Width(width-2). // subtract border chars
 		Padding(0, 0)
 
-	if focused {
+	if pane.IsDev {
+		// Dev panes use yellow borders
+		if focused {
+			boxStyle = boxStyle.BorderForeground(theme.ColorYellow)
+		} else {
+			boxStyle = boxStyle.BorderForeground(theme.ColorYellowDim)
+		}
+	} else if focused {
 		boxStyle = boxStyle.BorderForeground(theme.ColorOrange)
 	} else {
 		boxStyle = boxStyle.BorderForeground(theme.ColorDarkGray)

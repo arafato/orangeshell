@@ -63,6 +63,14 @@ Browse Workers, KV Namespaces, R2 Buckets, D1 Databases, and Queues from a unifi
 
 Switch between Cloudflare accounts instantly with `[` / `]`. Deployment data is cached per-account for instant restore when switching back.
 
+### AI-powered log analysis
+
+The AI tab (`5`) connects to Workers AI to analyze your live logs. Select active tail sessions as context, ask questions, and get root-cause analysis — including cross-worker correlation for distributed architectures. On first use, orangeshell deploys a small proxy Worker to your account (no API keys needed). Choose between three model presets: Fast (8B), Balanced (70B), or Deep (32B reasoning).
+
+### Dev mode tailing
+
+When running `wrangler dev` or `wrangler dev --remote`, the dev worker appears in the Monitoring tab with a yellow `[dev]` badge. Logs stream into the tail grid alongside production tails. Press `c` on a dev entry to fire a cron trigger against the local dev server.
+
 ### D1 SQL console
 
 Run SQL queries against D1 databases directly from the detail view. Schema is auto-loaded and refreshed after mutations.

@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
+	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/envvars"
@@ -572,6 +573,7 @@ func (m *Model) handleBindingsMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.showBindings = false
 		if msg.ConfigPath != "" {
 			m.reloadWranglerConfig(msg.ConfigPath, "Binding added")
+			m.configView.ReloadConfig()
 		}
 		// If a resource was created, refresh the corresponding service cache
 		if msg.ResourceType != "" {
@@ -595,6 +597,17 @@ func (m *Model) handleEnvPopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, m.createEnvCmd(msg.ConfigPath, msg.EnvName), true
 
 	case envpopup.CreateEnvDoneMsg:
+		if msg.Err != nil {
+			m.configView.SetError(fmt.Sprintf("Failed to create environment: %v", msg.Err))
+		} else {
+			configPath := m.configView.ConfigPath()
+			if configPath != "" {
+				m.reloadWranglerConfig(configPath, "Environment added. Deploy to apply.")
+				m.configView.ReloadConfig()
+				return *m, toastTick(), true
+			}
+		}
+		// Also forward to legacy popup
 		var cmd tea.Cmd
 		m.envPopup, cmd = m.envPopup.Update(msg)
 		return *m, cmd, true
@@ -603,9 +616,20 @@ func (m *Model) handleEnvPopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, m.deleteEnvCmd(msg.ConfigPath, msg.EnvName), true
 
 	case envpopup.DeleteEnvDoneMsg:
-		var cmd tea.Cmd
-		m.envPopup, cmd = m.envPopup.Update(msg)
-		return *m, cmd, true
+		if msg.Err != nil {
+			m.configView.SetError(fmt.Sprintf("Failed to delete environment: %v", msg.Err))
+		} else {
+			configPath := m.configView.ConfigPath()
+			if configPath != "" {
+				m.reloadWranglerConfig(configPath, "Environment deleted. Deploy to apply.")
+				m.configView.ReloadConfig()
+				return *m, toastTick(), true
+			}
+		}
+		// Also forward to legacy popup
+		var cmd2 tea.Cmd
+		m.envPopup, cmd2 = m.envPopup.Update(msg)
+		return *m, cmd2, true
 
 	case envpopup.DoneMsg:
 		m.showEnvPopup = false
@@ -615,6 +639,7 @@ func (m *Model) handleEnvPopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 				toastMsg = "Environment deleted"
 			}
 			m.reloadWranglerConfig(msg.ConfigPath, toastMsg)
+			m.configView.ReloadConfig()
 		}
 		return *m, nil, true
 	}
@@ -718,11 +743,40 @@ func (m *Model) handleEnvVarsMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, m.removeVarCmd(msg.ConfigPath, msg.EnvName, msg.VarName), true
 
 	case envvars.SetVarDoneMsg:
+		if msg.Err != nil {
+			// Error — reset config model mode, show error
+			m.configView.SetError(fmt.Sprintf("Failed to set var: %v", msg.Err))
+		} else {
+			// Success — reload config and show toast
+			configPath := m.configView.ConfigPath()
+			if configPath != "" {
+				if cfg := m.reloadWranglerConfig(configPath, "Variable saved. Deploy to apply."); cfg != nil {
+					vars := m.buildEnvVarsList(configPath, cfg)
+					m.envvarsView.SetVars(vars)
+				}
+				m.configView.ReloadConfig()
+				return *m, toastTick(), true
+			}
+		}
+		// Also forward to legacy view
 		var cmd tea.Cmd
 		m.envvarsView, cmd = m.envvarsView.Update(msg)
 		return *m, cmd, true
 
 	case envvars.DeleteVarDoneMsg:
+		if msg.Err != nil {
+			m.configView.SetError(fmt.Sprintf("Failed to delete var: %v", msg.Err))
+		} else {
+			configPath := m.configView.ConfigPath()
+			if configPath != "" {
+				if cfg := m.reloadWranglerConfig(configPath, "Variable deleted. Deploy to apply."); cfg != nil {
+					vars := m.buildEnvVarsList(configPath, cfg)
+					m.envvarsView.SetVars(vars)
+				}
+				m.configView.ReloadConfig()
+				return *m, toastTick(), true
+			}
+		}
 		var cmd tea.Cmd
 		m.envvarsView, cmd = m.envvarsView.Update(msg)
 		return *m, cmd, true
@@ -730,10 +784,10 @@ func (m *Model) handleEnvVarsMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	case envvars.DoneMsg:
 		if msg.ConfigPath != "" {
 			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Variable saved. Deploy to apply."); cfg != nil {
-				// Rebuild the envvars list with fresh data
 				vars := m.buildEnvVarsList(msg.ConfigPath, cfg)
 				m.envvarsView.SetVars(vars)
 			}
+			m.configView.ReloadConfig()
 		}
 		return *m, toastTick(), true
 	}
@@ -763,22 +817,109 @@ func (m *Model) handleTriggersMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, m.removeCronCmd(msg.ConfigPath, msg.Cron), true
 
 	case uitriggers.AddCronDoneMsg:
+		if msg.Err != nil {
+			m.configView.SetError(fmt.Sprintf("Failed to add trigger: %v", msg.Err))
+		} else {
+			configPath := m.configView.ConfigPath()
+			if configPath != "" {
+				if cfg := m.reloadWranglerConfig(configPath, "Trigger added. Deploy to apply."); cfg != nil {
+					m.triggersView.SetCrons(cfg.CronTriggers())
+				}
+				m.configView.ReloadConfig()
+				return *m, toastTick(), true
+			}
+		}
+		// Also forward to legacy view
 		var cmd tea.Cmd
 		m.triggersView, cmd = m.triggersView.Update(msg)
 		return *m, cmd, true
 
 	case uitriggers.DeleteCronDoneMsg:
-		var cmd tea.Cmd
-		m.triggersView, cmd = m.triggersView.Update(msg)
-		return *m, cmd, true
+		if msg.Err != nil {
+			m.configView.SetError(fmt.Sprintf("Failed to delete trigger: %v", msg.Err))
+		} else {
+			configPath := m.configView.ConfigPath()
+			if configPath != "" {
+				if cfg := m.reloadWranglerConfig(configPath, "Trigger deleted. Deploy to apply."); cfg != nil {
+					m.triggersView.SetCrons(cfg.CronTriggers())
+				}
+				m.configView.ReloadConfig()
+				return *m, toastTick(), true
+			}
+		}
+		// Also forward to legacy view
+		var cmd2 tea.Cmd
+		m.triggersView, cmd2 = m.triggersView.Update(msg)
+		return *m, cmd2, true
 
 	case uitriggers.DoneMsg:
 		if msg.ConfigPath != "" {
 			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Trigger saved. Deploy to apply."); cfg != nil {
 				m.triggersView.SetCrons(cfg.CronTriggers())
 			}
+			// Also refresh the unified config view
+			m.configView.ReloadConfig()
 		}
 		return *m, toastTick(), true
+	}
+	return *m, nil, false
+}
+
+// removeBindingForConfigCmd removes a binding and returns uiconfig.DeleteBindingDoneMsg.
+func (m Model) removeBindingForConfigCmd(configPath, envName, bindingName, bindingType string) tea.Cmd {
+	return func() tea.Msg {
+		err := wcfg.RemoveBinding(configPath, envName, bindingName, bindingType)
+		return uiconfig.DeleteBindingDoneMsg{Err: err}
+	}
+}
+
+// --- Configuration tab (unified model) helpers ---
+
+// syncConfigProjects builds the project list from the wrangler model and
+// updates the config view. Call this before switching to the Configuration tab.
+func (m *Model) syncConfigProjects() {
+	projects := m.wrangler.ProjectConfigs()
+	entries := make([]uiconfig.ProjectEntry, 0, len(projects))
+	for _, p := range projects {
+		if p.Config == nil {
+			continue
+		}
+		entries = append(entries, uiconfig.ProjectEntry{
+			Name:       p.Config.Name,
+			ConfigPath: p.ConfigPath,
+			Config:     p.Config,
+		})
+	}
+	m.configView.SetProjects(entries)
+}
+
+// handleConfigViewMsg handles messages emitted by the config view's categories.
+func (m *Model) handleConfigViewMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
+	switch msg := msg.(type) {
+	// --- Bindings: open wizard ---
+	case uiconfig.OpenBindingsWizardMsg:
+		m.showBindings = true
+		m.bindingsPopup = bindings.NewProject(msg.ConfigPath, msg.EnvName, msg.WorkerName)
+		return *m, nil, true
+
+	// --- Bindings: delete ---
+	case uiconfig.DeleteBindingMsg:
+		return *m, m.removeBindingForConfigCmd(msg.ConfigPath, msg.EnvName, msg.BindingName, msg.BindingType), true
+
+	case uiconfig.DeleteBindingDoneMsg:
+		if msg.Err != nil {
+			m.setToast(fmt.Sprintf("Failed to remove binding: %v", msg.Err))
+			m.configView.ReloadConfig()
+			return *m, toastTick(), true
+		}
+		m.reloadWranglerConfig(m.configView.ConfigPath(), "Binding removed")
+		m.configView.ReloadConfig()
+		m.registry.SetBindingIndex(nil)
+		return *m, toastTick(), true
+
+	// --- Navigate to resource (from bindings) ---
+	case uiconfig.NavigateToResourceMsg:
+		return *m, m.navigateTo(msg.ServiceName, msg.ResourceID), true
 	}
 	return *m, nil, false
 }

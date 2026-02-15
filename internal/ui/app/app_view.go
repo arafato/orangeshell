@@ -134,22 +134,21 @@ func (m Model) renderResourcesTab() string {
 	return m.renderPlaceholderTab("Resources", "Press ctrl+l to browse services")
 }
 
-// renderConfigurationTab renders the Configuration tab content (env vars, triggers).
+// renderConfigurationTab renders the Configuration tab content.
 func (m Model) renderConfigurationTab() string {
 	contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
+	// Legacy views (opened from Operations tab via ShowEnvVarsMsg/ShowTriggersMsg)
 	switch m.viewState {
 	case ViewEnvVars:
 		return m.envvarsView.View(m.width, contentHeight)
 	case ViewTriggers:
 		return m.triggersView.View(m.width, contentHeight)
-	case ViewServiceList:
-		// Env Variables / Triggers project list (shown via detail model)
-		return m.detail.View()
 	}
-	return m.renderPlaceholderTab("Configuration", "Press ctrl+l to open env vars or triggers")
+	// Unified configuration tab
+	return m.configView.View()
 }
 
 // renderPlaceholderTab renders a centered placeholder message for tabs that are not yet implemented.
@@ -369,6 +368,7 @@ func (m Model) renderResourcesHelp() []helpEntry {
 
 // renderConfigurationHelp returns the context-sensitive help entries for the Configuration tab.
 func (m Model) renderConfigurationHelp() []helpEntry {
+	// Legacy views
 	switch m.viewState {
 	case ViewEnvVars:
 		return []helpEntry{
@@ -384,22 +384,14 @@ func (m Model) renderConfigurationHelp() []helpEntry {
 			{"d", "delete"},
 			{"ctrl+h", "home"},
 		}
-	case ViewServiceList:
-		return []helpEntry{
-			{"ctrl+h", "home"},
-			{"ctrl+l", "resources"},
-			{"enter", "detail"},
-			{"[/]", "accounts"},
-			{"q", "quit"},
-		}
 	}
-	// Placeholder state
-	return []helpEntry{
-		{"ctrl+l", "resources"},
-		{"ctrl+k", "search"},
-		{"[/]", "accounts"},
-		{"q", "quit"},
+	// Unified config tab — delegate to config model
+	cfgHelp := m.configView.HelpEntries()
+	entries := make([]helpEntry, len(cfgHelp))
+	for i, h := range cfgHelp {
+		entries[i] = helpEntry{key: h.Key, desc: h.Desc}
 	}
+	return entries
 }
 
 // renderMonitoringHelp returns the context-sensitive help entries for the Monitoring tab.

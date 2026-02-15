@@ -18,6 +18,7 @@ import (
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
+	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/deployallpopup"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
@@ -220,11 +221,14 @@ type Model struct {
 	showRemoveProjectPopup bool
 	removeProjectPopup     removeprojectpopup.Model
 
-	// Environment variables view
+	// Configuration tab (unified model)
+	configView uiconfig.Model
+
+	// Legacy: Environment variables view (kept for Operations tab cross-nav)
 	envvarsView             envvars.Model
 	envVarsFromResourceList bool // true when env vars view was opened from the Resources launcher
 
-	// Cron triggers view
+	// Legacy: Cron triggers view (kept for Operations tab cross-nav)
 	triggersView             uitriggers.Model
 	triggersFromResourceList bool // true when triggers view was opened from the Resources launcher
 
@@ -258,6 +262,7 @@ func NewModel(cfg *config.Config, scanDir string) Model {
 		search:     search.New(),
 		wrangler:   uiwrangler.New(),
 		monitoring: monitoring.New(),
+		configView: uiconfig.New(),
 		phase:      phase,
 		viewState:  ViewWrangler, // wrangler is the home screen
 		activeTab:  tabbar.TabOperations,
@@ -335,6 +340,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(*Model).handleRemoveProjectMsg,
 		(*Model).handleEnvVarsMsg,
 		(*Model).handleTriggersMsg,
+		(*Model).handleConfigViewMsg,
 		(*Model).handleDeployAllMsg,
 	}
 	for _, h := range handlers {
@@ -949,12 +955,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.ShowEnvVarsMsg:
-		m.envVarsFromResourceList = false
-		return m, m.openEnvVarsView(msg.ConfigPath, msg.EnvName, msg.ProjectName)
+		m.syncConfigProjects()
+		m.configView.SelectProjectByPath(msg.ConfigPath)
+		m.configView.SetCategory(uiconfig.CategoryEnvVars)
+		m.activeTab = tabbar.TabConfiguration
+		return m, nil
 
 	case uiwrangler.ShowTriggersMsg:
-		m.triggersFromResourceList = false
-		return m, m.openTriggersView(msg.ConfigPath, msg.ProjectName)
+		m.syncConfigProjects()
+		m.configView.SelectProjectByPath(msg.ConfigPath)
+		m.configView.SetCategory(uiconfig.CategoryTriggers)
+		m.activeTab = tabbar.TabConfiguration
+		return m, nil
 
 	case uiwrangler.CmdOutputMsg:
 		m.wrangler.AppendCmdOutput(msg.Line)
@@ -1010,10 +1022,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.ServiceName == "Env Variables" {
-			return m, m.navigateToEnvVarsList()
+			m.syncConfigProjects()
+			m.configView.SetCategory(uiconfig.CategoryEnvVars)
+			m.activeTab = tabbar.TabConfiguration
+			return m, nil
 		}
 		if msg.ServiceName == "Triggers" {
-			return m, m.navigateToTriggersList()
+			m.syncConfigProjects()
+			m.configView.SetCategory(uiconfig.CategoryTriggers)
+			m.activeTab = tabbar.TabConfiguration
+			return m, nil
 		}
 		return m, m.navigateToService(msg.ServiceName)
 
@@ -1141,7 +1159,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateActions(msg)
 	}
 
-	// If envvars view is active, route key events there (but let global shortcuts through)
+	// If envvars view is active (legacy, opened from Operations tab), route key events there
 	if m.viewState == ViewEnvVars {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
@@ -1155,7 +1173,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// If triggers view is active, route key events there (but let global shortcuts through)
+	// If triggers view is active (legacy, opened from Operations tab), route key events there
 	if m.viewState == ViewTriggers {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
@@ -1227,9 +1245,15 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Forward mouse events to the config view on Configuration tab
+		if m.activeTab == tabbar.TabConfiguration && m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
+			var cmd tea.Cmd
+			m.configView, cmd = m.configView.Update(msg)
+			return m, cmd
+		}
+
 		// Forward mouse events to the detail panel when it's visible (for copy-on-click + list clicks)
 		if m.activeTab == tabbar.TabResources ||
-			(m.activeTab == tabbar.TabConfiguration && m.viewState == ViewServiceList) ||
 			(m.activeTab == tabbar.TabOperations && (m.viewState == ViewServiceList || m.viewState == ViewServiceDetail)) {
 			var cmd tea.Cmd
 			m.detail, cmd = m.detail.Update(msg)
@@ -1268,8 +1292,12 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// If tail is active, q is not quit — fall through.
 				break
 			}
-			// Configuration tab: quit from project list or placeholder.
-			// When in ViewEnvVars/ViewTriggers, q is intercepted by their key handlers above.
+			// Configuration tab: quit unless in legacy ViewEnvVars/ViewTriggers.
+			// The config model's own Update handles q → tea.Quit for its categories.
+			if m.activeTab == tabbar.TabConfiguration && m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
+				// Let it fall through to the config model's Update below
+				break
+			}
 			if m.activeTab == tabbar.TabConfiguration {
 				return m, tea.Quit
 			}
@@ -1334,12 +1362,12 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.bindingsPopup = bindings.NewMonorepo()
 					return m, nil
 				} else if m.wrangler.HasConfig() {
-					// Project view: create or assign existing resources
+					// Navigate to Configuration tab → Bindings
+					m.syncConfigProjects()
 					configPath := m.wrangler.ConfigPath()
-					envName := m.wrangler.FocusedEnvName()
-					workerName := m.wrangler.FocusedWorkerName()
-					m.showBindings = true
-					m.bindingsPopup = bindings.NewProject(configPath, envName, workerName)
+					m.configView.SelectProjectByPath(configPath)
+					m.configView.SetCategory(uiconfig.CategoryBindings)
+					m.activeTab = tabbar.TabConfiguration
 					return m, nil
 				}
 			}
@@ -1404,13 +1432,16 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 
+			// Esc on Configuration tab — let the config model handle it
+			// (dropdown close, mode cancel, etc.)
+			if m.activeTab == tabbar.TabConfiguration && m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
+				// Fall through to the config model's Update below
+				break
+			}
+
 			// Esc at the app level handles view-state navigation back
 			switch m.viewState {
 			case ViewServiceList:
-				if m.activeTab == tabbar.TabConfiguration {
-					// On Configuration tab: list is the root — Esc does nothing
-					return m, nil
-				}
 				// Fallback: go home
 				m.activeTab = tabbar.TabOperations
 				m.viewState = ViewWrangler
@@ -1452,14 +1483,9 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tabbar.TabConfiguration:
-		switch m.viewState {
-		case ViewEnvVars:
-			m.envvarsView, cmd = m.envvarsView.Update(msg)
-		case ViewTriggers:
-			m.triggersView, cmd = m.triggersView.Update(msg)
-		case ViewServiceList:
-			// Env Variables / Triggers project list (via detail model)
-			m.detail, cmd = m.detail.Update(msg)
+		// Route to the unified config model (unless in legacy ViewEnvVars/ViewTriggers)
+		if m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
+			m.configView, cmd = m.configView.Update(msg)
 		}
 	}
 	return m, cmd
@@ -1490,6 +1516,10 @@ func (m Model) isTextInputActive() bool {
 	}
 	// D1 console only blocks tab switching when in interactive mode
 	if m.detail.D1Active() && m.detail.Interacting() && m.detail.Focus() == detail.FocusDetail {
+		return true
+	}
+	// Config view text inputs (env var add/edit, triggers custom, env name add)
+	if m.activeTab == tabbar.TabConfiguration && m.configView.IsTextInputActive() {
 		return true
 	}
 	return false
@@ -1533,8 +1563,12 @@ func (m *Model) ensureViewStateForTab() tea.Cmd {
 			return m.buildBindingIndexCmd()
 		}
 	case tabbar.TabConfiguration:
-		// Env vars, triggers, and service list (project picker) are valid.
-		// Anything else (e.g. ViewServiceDetail, ViewWrangler) shows placeholder.
+		// Ensure the config view has up-to-date projects
+		m.syncConfigProjects()
+		// Reset viewState if it was from another tab (e.g. ViewServiceDetail)
+		if m.viewState == ViewServiceDetail || m.viewState == ViewWrangler || m.viewState == ViewServiceList {
+			m.viewState = ViewWrangler // config tab manages its own state internally
+		}
 	case tabbar.TabMonitoring:
 		// Rebuild the worker tree from wrangler data so the left pane is up to date.
 		m.refreshMonitoringWorkerTree()
@@ -1613,6 +1647,7 @@ func (m *Model) layout() {
 	m.detail.SetSize(contentWidth, contentHeight)
 	m.wrangler.SetSize(contentWidth, contentHeight)
 	m.monitoring.SetSize(contentWidth, contentHeight)
+	m.configView.SetSize(contentWidth, contentHeight)
 	// Detail content starts after: header(1) + tab bar(3) + top border(1) = 5 rows from top of terminal
 	m.detail.SetYOffset(headerHeight + tabBarHeight + 1)
 }

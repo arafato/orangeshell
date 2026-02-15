@@ -60,6 +60,8 @@ func (b Binding) NavService() string {
 		return "D1"
 	case "service":
 		return "Workers"
+	case "queue_producer", "queue_consumer":
+		return "Queues"
 	default:
 		return ""
 	}

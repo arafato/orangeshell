@@ -70,8 +70,13 @@ func (s *QueueService) List() ([]Resource, error) {
 	return resources, nil
 }
 
-// Get fetches detail for a single queue.
+// Get fetches detail for a single queue. The id parameter may be a queue UUID
+// or a queue name (wrangler bindings store the name). If it's a name, this method
+// resolves it to the UUID via the cache or by listing queues.
 func (s *QueueService) Get(id string) (*ResourceDetail, error) {
+	// Try to resolve the id — it might be a name rather than a UUID.
+	id = s.resolveQueueID(id)
+
 	s.mu.Lock()
 	raw, hasCached := s.cachedRaw[id]
 	s.mu.Unlock()
@@ -137,6 +142,38 @@ func (s *QueueService) Delete(ctx context.Context, id string) error {
 	delete(s.cachedRaw, id)
 	s.mu.Unlock()
 	return nil
+}
+
+// resolveQueueID resolves a queue identifier that might be a name (from wrangler
+// bindings) to the actual queue UUID. Checks the cache first; if no match, fetches
+// the queue list to perform the resolution.
+func (s *QueueService) resolveQueueID(id string) string {
+	s.mu.Lock()
+	// Check if it's already a valid queue ID in the cache
+	if _, ok := s.cachedRaw[id]; ok {
+		s.mu.Unlock()
+		return id
+	}
+	// Check if it matches a queue name in the cache
+	for _, r := range s.cached {
+		if r.Name == id {
+			s.mu.Unlock()
+			return r.ID
+		}
+	}
+	s.mu.Unlock()
+
+	// Cache miss — list queues to resolve the name
+	resources, err := s.List()
+	if err != nil {
+		return id // best-effort: return as-is
+	}
+	for _, r := range resources {
+		if r.Name == id || r.ID == id {
+			return r.ID
+		}
+	}
+	return id
 }
 
 // SearchItems returns the cached list of queues for fuzzy search.

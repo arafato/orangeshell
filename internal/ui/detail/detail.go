@@ -193,6 +193,11 @@ type Model struct {
 	detailErr     error
 	detailID      string // resource ID being loaded for staleness checks
 
+	// Cross-tab navigation: when navigating to a specific resource via navigateTo(),
+	// this stores the target resource ID so the cursor can be positioned correctly
+	// once the resource list finishes loading (which may happen asynchronously).
+	pendingNavigateID string
+
 	// Service not yet integrated
 	notIntegrated bool
 
@@ -287,9 +292,12 @@ func (m *Model) SetManagedResources(ids map[string]bool) {
 		return
 	}
 
-	// Remember currently selected resource to restore cursor after sort
+	// Remember currently selected resource to restore cursor after sort.
+	// Prefer the pending navigate target if set (cross-tab navigation in flight).
 	var selectedID string
-	if m.cursor >= 0 && m.cursor < len(m.resources) {
+	if m.pendingNavigateID != "" {
+		selectedID = m.pendingNavigateID
+	} else if m.cursor >= 0 && m.cursor < len(m.resources) {
 		selectedID = m.resources[m.cursor].ID
 	}
 
@@ -318,11 +326,20 @@ func (m *Model) SetManagedResources(ids map[string]bool) {
 		}
 	}
 
-	// Restore cursor position
+	// Restore cursor position (match by ID, then fall back to Name for bindings
+	// that store a resource name rather than a UUID, e.g. Queues)
 	if selectedID != "" {
 		for i, r := range m.resources {
 			if r.ID == selectedID {
 				m.cursor = i
+				m.pendingNavigateID = "" // clear if it was the nav target
+				return
+			}
+		}
+		for i, r := range m.resources {
+			if r.Name == selectedID {
+				m.cursor = i
+				m.pendingNavigateID = "" // clear if it was the nav target
 				return
 			}
 		}
@@ -543,6 +560,13 @@ func (m *Model) SetResources(resources []service.Resource, err error, notIntegra
 	m.cursor = 0
 	m.notIntegrated = notIntegrated
 
+	// If a cross-tab navigation is pending, position cursor on the target resource
+	// and skip auto-preview (the detail is already loading for the target).
+	if m.pendingNavigateID != "" && err == nil && len(resources) > 0 {
+		m.applyCursorForPendingNavigate()
+		return nil
+	}
+
 	// Auto-preview: switch to detail view and load first resource
 	if err == nil && !notIntegrated && len(resources) > 0 {
 		m.mode = viewDetail
@@ -739,6 +763,37 @@ func (m *Model) NavigateToDetail(resourceID string) {
 	m.detail = nil
 	m.detailID = resourceID
 	m.scrollOffset = 0
+	m.pendingNavigateID = resourceID
+
+	// If we already have the resource list, position the cursor now.
+	m.applyCursorForPendingNavigate()
+}
+
+// applyCursorForPendingNavigate positions the list cursor on the resource
+// matching pendingNavigateID, then clears the pending ID.
+// Matches by ID first, then falls back to Name (some bindings like Queues
+// store the resource name rather than the UUID).
+func (m *Model) applyCursorForPendingNavigate() {
+	if m.pendingNavigateID == "" || len(m.resources) == 0 {
+		return
+	}
+	// Try matching by ID
+	for i, r := range m.resources {
+		if r.ID == m.pendingNavigateID {
+			m.cursor = i
+			m.pendingNavigateID = ""
+			return
+		}
+	}
+	// Fall back to matching by Name (some bindings store names, not UUIDs)
+	for i, r := range m.resources {
+		if r.Name == m.pendingNavigateID {
+			m.cursor = i
+			m.pendingNavigateID = ""
+			return
+		}
+	}
+	// Resource not found in list (may arrive after re-sort) — keep pending
 }
 
 // SpinnerInit returns the command to start the spinner ticking.
@@ -1471,7 +1526,12 @@ func (m Model) viewResourceDetail(width, height int) []string {
 		} else if len(m.d1SchemaTables) > 0 {
 			allLines = append(allLines, " "+theme.D1SchemaTitleStyle.Render("Schema"))
 			allLines = append(allLines, m.renderSchemaStyled(m.d1SchemaTables)...)
+		} else {
+			allLines = append(allLines, " "+theme.D1SchemaTitleStyle.Render("Schema"))
+			allLines = append(allLines, theme.DimStyle.Render(" No tables found"))
 		}
+		allLines = append(allLines, "")
+		allLines = append(allLines, theme.DimStyle.Render(" Press enter to open SQL console"))
 	}
 
 	// Append ExtraContent if present

@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/oarafat/orangeshell/internal/service"
+	"github.com/oarafat/orangeshell/internal/ui/confirmbox"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
 
@@ -348,6 +349,11 @@ func (m Model) View(termWidth, termHeight int) string {
 		popupWidth = 70
 	}
 
+	// Confirm step uses the shared confirmbox component.
+	if m.step == stepConfirm {
+		return m.viewConfirmBox(popupWidth)
+	}
+
 	title := m.title()
 	titleLine := theme.TitleStyle.Render(title)
 	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
@@ -363,9 +369,6 @@ func (m Model) View(termWidth, termHeight int) string {
 	case stepBlocked:
 		body = m.viewBlocked()
 		help = "  esc close  |  enter close"
-	case stepConfirm:
-		body = m.viewConfirm()
-		help = "  esc close  |  enter confirm  |  h/l select"
 	case stepDeleting:
 		body = m.viewDeleting()
 		help = ""
@@ -393,6 +396,43 @@ func (m Model) View(termWidth, termHeight int) string {
 		Render(content)
 
 	return popup
+}
+
+// viewConfirmBox renders the confirm step using the shared confirmbox component.
+func (m Model) viewConfirmBox(width int) string {
+	title := m.title()
+
+	var body []string
+	switch m.mode {
+	case ModeResource:
+		body = append(body,
+			theme.DimStyle.Render(fmt.Sprintf("  Delete %s resource %q?", m.serviceName, m.resourceName)),
+			"",
+			theme.DimStyle.Render("  This action cannot be undone."),
+		)
+	case ModeBindingDelete:
+		envLabel := m.envName
+		if envLabel == "" || envLabel == "default" {
+			envLabel = "default"
+		}
+		warningStyle := lipgloss.NewStyle().Foreground(theme.ColorRed)
+		body = append(body,
+			theme.DimStyle.Render(fmt.Sprintf("  Remove binding %q from %q?", m.bindingName, envLabel)),
+			"",
+			warningStyle.Render("  This modifies the local wrangler config."),
+			warningStyle.Render("  Run 'deploy' afterwards to apply the change"),
+			warningStyle.Render("  to Cloudflare."),
+		)
+	}
+
+	return confirmbox.Render(confirmbox.Params{
+		Title:    title,
+		Body:     body,
+		Width:    width,
+		Buttons:  confirmbox.ButtonsCursor,
+		Cursor:   m.confirmCursor,
+		HelpText: "  esc close  |  enter confirm  |  h/l select",
+	})
 }
 
 // --- Sub-views ---
@@ -427,53 +467,8 @@ func (m Model) viewBlocked() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) viewConfirm() string {
-	var lines []string
-
-	switch m.mode {
-	case ModeResource:
-		lines = append(lines, theme.DimStyle.Render(fmt.Sprintf("  Delete %s resource %q?",
-			m.serviceName, m.resourceName)))
-		lines = append(lines, "")
-		lines = append(lines, theme.DimStyle.Render("  This action cannot be undone."))
-
-	case ModeBindingDelete:
-		envLabel := m.envName
-		if envLabel == "" || envLabel == "default" {
-			envLabel = "default"
-		}
-		lines = append(lines, theme.DimStyle.Render(fmt.Sprintf("  Remove binding %q from %q?",
-			m.bindingName, envLabel)))
-		lines = append(lines, "")
-		warningStyle := lipgloss.NewStyle().Foreground(theme.ColorRed)
-		lines = append(lines, warningStyle.Render("  This modifies the local wrangler config."))
-		lines = append(lines, warningStyle.Render("  Run 'deploy' afterwards to apply the change"))
-		lines = append(lines, warningStyle.Render("  to Cloudflare."))
-	}
-
-	lines = append(lines, "")
-
-	// Buttons
-	noStyle := theme.DimStyle
-	yesStyle := theme.DimStyle
-	if m.confirmCursor == 0 {
-		noStyle = lipgloss.NewStyle().
-			Background(theme.ColorDarkGray).
-			Foreground(theme.ColorWhite).
-			Padding(0, 2)
-	} else {
-		yesStyle = lipgloss.NewStyle().
-			Background(theme.ColorRed).
-			Foreground(theme.ColorWhite).
-			Padding(0, 2)
-	}
-
-	noBtn := noStyle.Render("No")
-	yesBtn := yesStyle.Render("Yes")
-	lines = append(lines, fmt.Sprintf("  %s   %s", noBtn, yesBtn))
-
-	return strings.Join(lines, "\n")
-}
+// viewConfirm is no longer used — replaced by viewConfirmBox which delegates
+// to the shared confirmbox component.
 
 func (m Model) viewDeleting() string {
 	var label string

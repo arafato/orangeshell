@@ -270,6 +270,9 @@ func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
 	var loadCmd tea.Cmd
 	entry := m.registry.GetCache(serviceName)
 	if entry != nil {
+		// Some binding types (e.g. Queues) store a resource Name rather than a UUID
+		// as their ResourceID. Resolve the name to the real ID using the cache.
+		resourceID = m.resolveResourceID(entry.Resources, resourceID)
 		loadCmd, _ = m.detail.SetServiceWithCache(serviceName, entry.Resources)
 	} else {
 		loadCmd = m.detail.SetService(serviceName)
@@ -281,6 +284,25 @@ func (m *Model) navigateTo(serviceName, resourceID string) tea.Cmd {
 	detailCmd := m.loadResourceDetail(serviceName, resourceID)
 
 	return tea.Batch(loadCmd, detailCmd)
+}
+
+// resolveResourceID checks whether resourceID matches a resource by ID. If not,
+// it tries to match by Name (some bindings like Queues store the name, not the UUID).
+// Returns the resolved UUID if found, or the original string otherwise.
+func (m Model) resolveResourceID(resources []svc.Resource, resourceID string) string {
+	// First check if it already matches an ID directly
+	for _, r := range resources {
+		if r.ID == resourceID {
+			return resourceID
+		}
+	}
+	// Fall back to matching by Name
+	for _, r := range resources {
+		if r.Name == resourceID {
+			return r.ID
+		}
+	}
+	return resourceID
 }
 
 // --- D1 SQL console helpers ---

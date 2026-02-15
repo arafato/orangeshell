@@ -31,6 +31,9 @@ bin/
 # env file
 .env
 
+# nodejs
+node_modules
+
 structure.txt
 
 # Editor/IDE

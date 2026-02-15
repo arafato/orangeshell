@@ -58,6 +58,12 @@ type TailToggleAllMsg struct {
 	Start bool // true = start all, false = stop all
 }
 
+// DevCronTriggerMsg requests the app to trigger a cron handler on a dev worker
+// via the /cdn-cgi/handler/scheduled endpoint.
+type DevCronTriggerMsg struct {
+	ScriptName string // dev:worker-name
+}
+
 // TailStopMsg requests the app to stop the active single tail session (backward compat).
 type TailStopMsg struct{}
 
@@ -171,6 +177,15 @@ func (m *Model) SetWorkerTree(tree []WorkerTreeEntry) {
 // HasWorkerTree returns true if a worker tree is populated.
 func (m Model) HasWorkerTree() bool {
 	return len(m.workerTree) > 0
+}
+
+// CursorOnDev returns true if the tree cursor is on a dev-mode worker entry.
+func (m Model) CursorOnDev() bool {
+	if m.treeCursor >= 0 && m.treeCursor < len(m.workerTree) {
+		e := m.workerTree[m.treeCursor]
+		return e.IsDev && !e.IsHeader
+	}
+	return false
 }
 
 // Focus returns which pane currently has keyboard focus.
@@ -550,6 +565,16 @@ func (m Model) updateLeftPane(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if !entry.IsHeader && entry.ScriptName != "" && m.IsInGrid(entry.ScriptName) {
 				return m, func() tea.Msg {
 					return TailRemoveMsg{ScriptName: entry.ScriptName}
+				}
+			}
+		}
+	case "c":
+		// Trigger cron handler on focused dev worker
+		if m.treeCursor >= 0 && m.treeCursor < len(m.workerTree) {
+			entry := m.workerTree[m.treeCursor]
+			if entry.IsDev && !entry.IsHeader && entry.ScriptName != "" {
+				return m, func() tea.Msg {
+					return DevCronTriggerMsg{ScriptName: entry.ScriptName}
 				}
 			}
 		}

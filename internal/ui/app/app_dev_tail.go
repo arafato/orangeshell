@@ -1,6 +1,9 @@
 package app
 
 import (
+	"context"
+	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -132,4 +135,33 @@ func (m *Model) cleanupDevSession() {
 	}
 	m.devSessions = nil
 	m.refreshMonitoringWorkerTree()
+}
+
+// triggerDevCron fires an HTTP GET to the dev server's /cdn-cgi/handler/scheduled
+// endpoint to invoke the worker's scheduled() handler.
+func triggerDevCron(scriptName, port string) devCronTriggerDoneMsg {
+	url := fmt.Sprintf("http://localhost:%s/cdn-cgi/handler/scheduled", port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return devCronTriggerDoneMsg{ScriptName: scriptName, Err: err}
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return devCronTriggerDoneMsg{ScriptName: scriptName, Err: err}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return devCronTriggerDoneMsg{
+			ScriptName: scriptName,
+			Err:        fmt.Errorf("HTTP %d from scheduled handler", resp.StatusCode),
+		}
+	}
+
+	return devCronTriggerDoneMsg{ScriptName: scriptName}
 }

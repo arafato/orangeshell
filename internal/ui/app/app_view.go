@@ -412,10 +412,15 @@ func (m Model) renderMonitoringHelp() []helpEntry {
 			{"j/k", "navigate"},
 			{"a", "add"},
 			{"d", "remove"},
-			{"tab", "grid"},
-			{"esc", "back"},
 		}
-		entries = append(entries, helpEntry{"ctrl+h", "home"})
+		if m.monitoring.CursorOnDev() {
+			entries = append(entries, helpEntry{"c", "cron trigger"})
+		}
+		entries = append(entries,
+			helpEntry{"tab", "grid"},
+			helpEntry{"esc", "back"},
+			helpEntry{"ctrl+h", "home"},
+		)
 		return entries
 	case monitoring.FocusRight:
 		if m.monitoring.GridPaneCount() == 0 {

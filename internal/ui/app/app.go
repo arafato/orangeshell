@@ -152,6 +152,12 @@ type parallelTailSessionDoneMsg struct {
 	ScriptName string
 }
 
+// devCronTriggerDoneMsg carries the result of triggering a cron handler on a dev worker.
+type devCronTriggerDoneMsg struct {
+	ScriptName string
+	Err        error
+}
+
 // Model is the root Bubble Tea model that composes all UI components.
 type Model struct {
 	// Submodels
@@ -914,6 +920,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Stop all grid tails (dev panes are unaffected — no API session to stop)
 		m.stopAllGridTails()
+		return m, nil
+
+	case monitoring.DevCronTriggerMsg:
+		ds := m.findDevSession(msg.ScriptName)
+		if ds == nil || ds.Port == "" {
+			// No port yet — dev server hasn't announced it
+			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
+				Timestamp: time.Now(),
+				Level:     "warn",
+				Text:      "[orangeshell] Cannot trigger cron: dev server port not detected yet",
+			}})
+			return m, nil
+		}
+		// Fire the cron trigger request in the background
+		port := ds.Port
+		scriptName := msg.ScriptName
+		return m, func() tea.Msg {
+			return triggerDevCron(scriptName, port)
+		}
+
+	case devCronTriggerDoneMsg:
+		if msg.Err != nil {
+			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Text:      fmt.Sprintf("[orangeshell] Cron trigger failed: %v", msg.Err),
+			}})
+		} else {
+			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
+				Timestamp: time.Now(),
+				Level:     "system",
+				Text:      "[orangeshell] Cron trigger fired (scheduled handler invoked)",
+			}})
+		}
 		return m, nil
 
 	case uiwrangler.LoadConfigPathMsg:

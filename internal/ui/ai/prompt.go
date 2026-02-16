@@ -15,6 +15,7 @@ const systemPromptTemplate = `You are an expert Cloudflare Workers log analyst i
 - Trace request chains in distributed Worker architectures
 - Suggest concrete fixes based on error patterns
 - Explain Cloudflare-specific behaviors (subrequests, bindings, limits)
+- Read and understand Worker source code to correlate logs with code paths
 
 ## Instructions
 - Reference specific log lines by timestamp when explaining issues
@@ -22,65 +23,108 @@ const systemPromptTemplate = `You are an expert Cloudflare Workers log analyst i
 - Be concise but thorough — developers are debugging in a terminal
 - When you see error patterns, explain the likely root cause and suggest fixes
 - If you see binding-related errors (KV, D1, R2, Queues), explain the binding context
-- When analyzing logs from multiple workers, look for correlated events (same cf-ray, trace IDs, timestamps)`
+- When analyzing logs from multiple workers, look for correlated events (same cf-ray, trace IDs, timestamps)
+- When source code is provided, correlate error logs with specific code locations and suggest targeted fixes`
 
-// maxContextChars is the approximate character budget for log context.
+// maxContextChars is the approximate character budget for all context (logs + files).
 // Leaves room for system prompt, conversation history, and response.
 // ~120K chars ≈ 30K tokens, well within 128K context window.
 const maxContextChars = 120000
 
-// BuildSystemPrompt constructs the system prompt with context from selected log sources.
-func BuildSystemPrompt(sources []ContextSourceData) string {
-	if len(sources) == 0 {
+// maxFileContextChars is the maximum character budget for source file context.
+// Logs get the remainder of the overall budget.
+const maxFileContextChars = 40000
+
+// BuildSystemPrompt constructs the system prompt with context from selected
+// log sources and source files.
+func BuildSystemPrompt(sources []ContextSourceData, files []FileContextData) string {
+	hasLogs := len(sources) > 0
+	hasFiles := len(files) > 0
+
+	if !hasLogs && !hasFiles {
 		return systemPromptTemplate + "\n\nNo log context is currently selected. The user may ask general Cloudflare Workers questions."
 	}
 
 	var sb strings.Builder
 	sb.WriteString(systemPromptTemplate)
 
-	// Worker names
-	sb.WriteString("\n\n## Active Workers\n")
-	for _, s := range sources {
-		sb.WriteString(fmt.Sprintf("- %s", s.Name))
-		if s.IsDev {
-			sb.WriteString(" [dev mode]")
-		}
-		sb.WriteString("\n")
-	}
-
-	// Cross-worker analysis note
-	if len(sources) > 1 {
-		sb.WriteString("\n**Note:** Multiple workers are selected. Look for correlated events across workers ")
-		sb.WriteString("(e.g., requests from one worker triggering actions in another via Service Bindings, ")
-		sb.WriteString("Queues, or fetch calls).\n")
-	}
-
-	// Interleaved log context with smart truncation
-	sb.WriteString("\n## Log Context\n")
-	sb.WriteString("The following logs are from the selected workers, interleaved chronologically.\n\n")
-
-	totalLines := 0
-	for _, s := range sources {
-		totalLines += len(s.Lines)
-	}
-
-	if totalLines == 0 {
-		sb.WriteString("(No log lines captured yet — tailing is active but no events received)\n")
-	} else {
-		// Apply smart truncation if needed
-		truncatedSources := TruncateContext(sources, maxContextChars)
-		lines := InterleaveLines(truncatedSources)
-
-		sb.WriteString("```\n")
-		for _, line := range lines {
-			sb.WriteString(line)
+	// Worker names (from log sources)
+	if hasLogs {
+		sb.WriteString("\n\n## Active Workers\n")
+		for _, s := range sources {
+			sb.WriteString(fmt.Sprintf("- %s", s.Name))
+			if s.IsDev {
+				sb.WriteString(" [dev mode]")
+			}
 			sb.WriteString("\n")
 		}
-		sb.WriteString("```\n")
 
-		if totalLines > len(lines) {
-			sb.WriteString(fmt.Sprintf("\n(Showing most recent %d of %d total lines — older lines truncated to fit context window)\n",
-				len(lines), totalLines))
+		// Cross-worker analysis note
+		if len(sources) > 1 {
+			sb.WriteString("\n**Note:** Multiple workers are selected. Look for correlated events across workers ")
+			sb.WriteString("(e.g., requests from one worker triggering actions in another via Service Bindings, ")
+			sb.WriteString("Queues, or fetch calls).\n")
+		}
+	}
+
+	// Source files section
+	if hasFiles {
+		fileChars := 0
+		sb.WriteString("\n## Source Files\n")
+		sb.WriteString("The following source files are from the Worker project(s).\n\n")
+
+		for _, f := range files {
+			// Check file budget
+			entryChars := len(f.Path) + len(f.Content) + 30 // path + fences + overhead
+			if fileChars+entryChars > maxFileContextChars {
+				sb.WriteString("\n(Remaining files truncated to fit context window)\n")
+				break
+			}
+			fileChars += entryChars
+
+			sb.WriteString(fmt.Sprintf("### %s\n", f.Path))
+			sb.WriteString(fmt.Sprintf("```%s\n", f.Language))
+			sb.WriteString(f.Content)
+			if !strings.HasSuffix(f.Content, "\n") {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("```\n\n")
+		}
+	}
+
+	// Log context section
+	if hasLogs {
+		// Calculate log budget: total minus what files used
+		logBudget := maxContextChars
+		if hasFiles {
+			logBudget = maxContextChars - maxFileContextChars
+		}
+
+		sb.WriteString("\n## Log Context\n")
+		sb.WriteString("The following logs are from the selected workers, interleaved chronologically.\n\n")
+
+		totalLines := 0
+		for _, s := range sources {
+			totalLines += len(s.Lines)
+		}
+
+		if totalLines == 0 {
+			sb.WriteString("(No log lines captured yet — tailing is active but no events received)\n")
+		} else {
+			truncatedSources := TruncateContext(sources, logBudget)
+			lines := InterleaveLines(truncatedSources)
+
+			sb.WriteString("```\n")
+			for _, line := range lines {
+				sb.WriteString(line)
+				sb.WriteString("\n")
+			}
+			sb.WriteString("```\n")
+
+			if totalLines > len(lines) {
+				sb.WriteString(fmt.Sprintf("\n(Showing most recent %d of %d total lines — older lines truncated to fit context window)\n",
+					len(lines), totalLines))
+			}
 		}
 	}
 
@@ -127,6 +171,10 @@ func InterleaveLines(sources []ContextSourceData) []string {
 // It distributes the budget evenly across sources, keeping the most recent lines
 // from each source. Error lines are prioritized.
 func TruncateContext(sources []ContextSourceData, maxChars int) []ContextSourceData {
+	if len(sources) == 0 {
+		return sources
+	}
+
 	// First, check if we're within budget
 	totalChars := 0
 	for _, s := range sources {

@@ -23,12 +23,13 @@ const (
 
 // settingsModel holds the state for the Settings mode.
 type settingsModel struct {
-	section     settingsSection      // currently focused section
-	provider    config.AIProvider    // selected provider
-	modelPreset config.AIModelPreset // selected model preset
-	workerURL   string               // deployed worker URL (empty = not deployed)
-	deploying   bool                 // true while provisioning is in progress
-	deployError string               // last deploy error (empty = no error)
+	section        settingsSection      // currently focused section
+	provider       config.AIProvider    // selected provider
+	modelPreset    config.AIModelPreset // selected model preset
+	workerURL      string               // deployed worker URL (empty = not deployed)
+	deploying      bool                 // true while provisioning is in progress
+	deployError    string               // last deploy error (empty = no error)
+	deployProgress string               // current provisioning step (e.g. "Installing dependencies...")
 }
 
 func newSettingsModel() settingsModel {
@@ -203,7 +204,11 @@ func (s settingsModel) renderModel() string {
 
 func (s settingsModel) renderDeploy() string {
 	if s.deploying {
-		return lipgloss.NewStyle().Foreground(theme.ColorOrange).Render("  Deploying AI Worker...")
+		progress := "Deploying AI Worker..."
+		if s.deployProgress != "" {
+			progress = s.deployProgress
+		}
+		return lipgloss.NewStyle().Foreground(theme.ColorOrange).Render("  " + progress)
 	}
 	if s.deployError != "" {
 		return theme.ErrorStyle.Render(fmt.Sprintf("  Error: %s", s.deployError))

@@ -70,6 +70,12 @@ type errMsg struct {
 	err error
 }
 
+// SetProgramMsg carries the *tea.Program reference so the model can use p.Send()
+// from background goroutines (e.g., provisioning progress callbacks).
+type SetProgramMsg struct {
+	Program *tea.Program
+}
+
 // toastExpireMsg fires after the toast display duration to clear the toast.
 type toastExpireMsg struct{}
 
@@ -255,6 +261,10 @@ type Model struct {
 	// scanDir is the directory to scan for wrangler projects (from CLI arg).
 	// Empty means no auto-scan — show the empty-state menu immediately.
 	scanDir string
+
+	// program holds the *tea.Program reference for background goroutine → UI
+	// communication (e.g., AI provisioning progress callbacks).
+	program *tea.Program
 }
 
 // NewModel creates the root model. If config is already set up, skips to dashboard.
@@ -362,6 +372,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case SetProgramMsg:
+		m.program = msg.Program
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -711,6 +725,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wrangler.SetConfig(msg.Config, msg.Path, msg.Err)
 		// Refresh the monitoring worker tree in case we're on the Monitoring tab
 		m.refreshMonitoringWorkerTree()
+		// Refresh AI file sources so the context panel picks up new projects
+		m.refreshAIFileSources()
 		// Trigger deployment fetching for single-project environments
 		if msg.Err == nil && msg.Config != nil {
 			return m, m.fetchSingleProjectDeployments(msg.Config)
@@ -744,6 +760,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wrangler.SetProjects(msg.Projects, msg.RootName, msg.RootDir)
 		// Refresh the monitoring worker tree
 		m.refreshMonitoringWorkerTree()
+		// Refresh AI file sources so the context panel picks up new projects
+		m.refreshAIFileSources()
 		// Trigger deployment fetching for all projects
 		return m, m.fetchAllProjectDeployments()
 
@@ -979,8 +997,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.aiTab.SetDeploying(true)
 		return m, m.deprovisionAIWorker()
 
+	case aiProvisionProgressMsg:
+		m.aiTab.SetDeployProgress(msg.Status)
+		return m, nil
+
 	case aiProvisionDoneMsg:
 		m.aiTab.SetDeploying(false)
+		m.aiTab.SetDeployProgress("")
 		if msg.Err != nil {
 			m.aiTab.SetDeployError(msg.Err.Error())
 		} else {
@@ -1751,6 +1774,8 @@ func (m *Model) ensureViewStateForTab() tea.Cmd {
 	case tabbar.TabAI:
 		// Refresh context sources from monitoring grid panes
 		m.refreshAIContextSources()
+		// Refresh file sources from wrangler project directories
+		m.refreshAIFileSources()
 	}
 	return nil
 }

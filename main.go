@@ -55,6 +55,10 @@ func main() {
 		tea.WithMouseCellMotion(),
 	)
 
+	// Send the program reference to the model so it can be used for
+	// background goroutine → UI communication (e.g., provisioning progress).
+	go func() { p.Send(app.SetProgramMsg{Program: p}) }()
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running orangeshell: %v\n", err)
 		os.Exit(1)

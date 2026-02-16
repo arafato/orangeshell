@@ -98,6 +98,11 @@ func (m *Model) SetDeployError(err string) {
 	m.settings.deployError = err
 }
 
+// SetDeployProgress sets the current provisioning step text.
+func (m *Model) SetDeployProgress(status string) {
+	m.settings.deployProgress = status
+}
+
 // IsProvisioned returns true if the AI Worker has been deployed.
 func (m Model) IsProvisioned() bool {
 	return m.settings.workerURL != ""
@@ -148,9 +153,19 @@ func (m *Model) SetContextSources(sources []ContextSource) {
 	m.context.SetSources(sources)
 }
 
+// SetFileSources updates the available file sources (from wrangler projects).
+func (m *Model) SetFileSources(sources []FileSource) {
+	m.context.SetFileSources(sources)
+}
+
 // SelectedContextIDs returns the script IDs of selected context sources.
 func (m Model) SelectedContextIDs() []string {
 	return m.context.SelectedScriptIDs()
+}
+
+// SelectedFileSources returns the file sources that are toggled on.
+func (m Model) SelectedFileSources() []FileSource {
+	return m.context.SelectedFileSources()
 }
 
 // ConversationMessages returns the chat history formatted for the AI API.

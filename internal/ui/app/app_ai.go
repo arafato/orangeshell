@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -24,6 +25,11 @@ type aiDeprovisionDoneMsg struct {
 	Err error
 }
 
+// aiProvisionProgressMsg carries a progress step string from the provisioning pipeline.
+type aiProvisionProgressMsg struct {
+	Status string
+}
+
 // aiProvisionCfg builds the ProvisionConfig from the app's current config.
 func (m Model) aiProvisionCfg() uiai.ProvisionConfig {
 	pcfg := uiai.ProvisionConfig{
@@ -43,12 +49,16 @@ func (m Model) aiProvisionCfg() uiai.ProvisionConfig {
 
 // provisionAIWorker starts the AI Worker deployment flow:
 // download template → npm install → wrangler deploy → generate secret → wrangler secret put.
+// Progress messages are sent via p.Send() for real-time UI updates.
 func (m Model) provisionAIWorker() tea.Cmd {
 	pcfg := m.aiProvisionCfg()
+	prog := m.program // capture for goroutine
 	return func() tea.Msg {
 		ctx := context.Background()
 		result, err := uiai.Provision(ctx, pcfg, func(status string) {
-			_ = status // progress callbacks for future UI updates
+			if prog != nil {
+				prog.Send(aiProvisionProgressMsg{Status: status})
+			}
 		})
 		if err != nil {
 			return aiProvisionDoneMsg{Err: err}
@@ -113,7 +123,9 @@ func (m Model) gatherAIContext() []uiai.ContextSourceData {
 	return result
 }
 
-// refreshAIContextSources updates the AI tab's context sources from the monitoring grid.
+// refreshAIContextSources updates the AI tab's log context sources from the monitoring grid.
+// This is called on every key press in the AI tab to keep line counts current.
+// File sources are NOT refreshed here — use refreshAIFileSources() for that.
 func (m *Model) refreshAIContextSources() {
 	panes := m.monitoring.GridPanes()
 	sources := make([]uiai.ContextSource, len(panes))
@@ -141,6 +153,60 @@ func (m *Model) refreshAIContextSources() {
 	m.aiTab.SetContextSources(sources)
 }
 
+// refreshAIFileSources scans wrangler project directories for source files
+// and pushes them to the AI tab's context panel as file source toggles.
+func (m *Model) refreshAIFileSources() {
+	var fileSources []uiai.FileSource
+
+	if m.wrangler.IsMonorepo() {
+		for _, p := range m.wrangler.ProjectConfigs() {
+			if p.Config == nil {
+				continue
+			}
+			projectDir := filepath.Dir(p.ConfigPath)
+			summary := uiai.ScanProjectFiles(projectDir, p.Config.Main)
+			summary.ProjectName = p.Config.Name
+			fileSources = append(fileSources, uiai.FileSource{
+				ProjectName: p.Config.Name,
+				ProjectDir:  projectDir,
+				Summary:     summary,
+			})
+		}
+	} else if m.wrangler.HasConfig() {
+		cfg := m.wrangler.Config()
+		if cfg != nil {
+			projectDir := filepath.Dir(m.wrangler.ConfigPath())
+			summary := uiai.ScanProjectFiles(projectDir, cfg.Main)
+			summary.ProjectName = cfg.Name
+			fileSources = append(fileSources, uiai.FileSource{
+				ProjectName: cfg.Name,
+				ProjectDir:  projectDir,
+				Summary:     summary,
+			})
+		}
+	}
+
+	m.aiTab.SetFileSources(fileSources)
+}
+
+// gatherAIFileContext reads the contents of selected source files for the AI prompt.
+func (m Model) gatherAIFileContext() []uiai.FileContextData {
+	selectedFiles := m.aiTab.SelectedFileSources()
+	if len(selectedFiles) == 0 {
+		return nil
+	}
+
+	var result []uiai.FileContextData
+	for _, fs := range selectedFiles {
+		if fs.Summary == nil {
+			continue
+		}
+		files := uiai.ReadProjectFiles(fs.Summary)
+		result = append(result, files...)
+	}
+	return result
+}
+
 // startAIChatStream starts a streaming AI chat request using the Workers AI client.
 // It reads the streaming response channel and converts chunks into Bubble Tea messages.
 func (m Model) startAIChatStream(userMessage string) tea.Cmd {
@@ -148,9 +214,10 @@ func (m Model) startAIChatStream(userMessage string) tea.Cmd {
 	secret := m.aiTab.Secret()
 	preset := m.aiTab.ModelPreset()
 
-	// Build the system prompt with context from selected monitoring panes
+	// Build the system prompt with context from selected monitoring panes and source files
 	contextData := m.gatherAIContext()
-	systemPrompt := uiai.BuildSystemPrompt(contextData)
+	fileData := m.gatherAIFileContext()
+	systemPrompt := uiai.BuildSystemPrompt(contextData, fileData)
 
 	// Build the full message list: system + conversation history + new user message
 	messages := []uiai.ChatMessage{

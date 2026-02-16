@@ -5,6 +5,10 @@ A terminal UI for managing your Cloudflare Worker Projects — built around the 
 ![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go&logoColor=white)
 ![Cloudflare](https://img.shields.io/badge/Cloudflare-Developer%20Platform-F38020?style=flat&logo=cloudflare&logoColor=white)
 
+<p align="center">
+  <img src="assets/os-animated.gif" alt="Orangeshell demo" width="800">
+</p>
+
 ## Overview
 
 Orangeshell is a local-first project orchestrator that bridges the gap between your workspace organization and Cloudflare’s application developer platform.

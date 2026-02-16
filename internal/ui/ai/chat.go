@@ -151,6 +151,11 @@ func (c chatModel) update(msg tea.Msg, focused bool) (chatModel, tea.Cmd) {
 
 		// Scroll message history
 		case "pgup":
+			// Clamp from the scroll-to-bottom sentinel before applying delta.
+			// Without this, subtracting 10 from 999999 still renders at the bottom.
+			if maxEst := len(c.messages) * 30; c.scrollY > maxEst {
+				c.scrollY = maxEst
+			}
 			c.scrollY -= 10
 			if c.scrollY < 0 {
 				c.scrollY = 0

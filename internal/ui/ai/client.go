@@ -75,11 +75,16 @@ type WorkersAIClient struct {
 	Secret    string
 }
 
+// defaultMaxTokens is the max_tokens value sent to Workers AI.
+// The Workers AI default is 256, which is far too low for detailed analysis.
+const defaultMaxTokens = 4096
+
 // requestBody is the JSON body sent to the AI proxy Worker.
 type requestBody struct {
 	Model    string        `json:"model"`
 	Messages []ChatMessage `json:"messages"`
 	Stream   bool          `json:"stream"`
+	MaxTok   int           `json:"max_tokens,omitempty"`
 }
 
 // StreamResponse sends a chat completion request and returns a channel that yields
@@ -95,6 +100,7 @@ func (c *WorkersAIClient) StreamResponse(ctx context.Context, model string, mess
 			Model:    model,
 			Messages: messages,
 			Stream:   true,
+			MaxTok:   defaultMaxTokens,
 		}
 
 		jsonBody, err := json.Marshal(body)
@@ -131,7 +137,11 @@ func (c *WorkersAIClient) StreamResponse(ctx context.Context, model string, mess
 				if ctx.Err() != nil {
 					return // context cancelled, don't send error
 				}
-				// io.EOF is normal end of stream
+				// Report non-EOF stream errors so partial responses show an error
+				// instead of silently appearing complete.
+				if err.Error() != "EOF" {
+					ch <- fmt.Sprintf("\n\n[stream error: %v]", err)
+				}
 				return
 			}
 
@@ -168,6 +178,7 @@ func (c *WorkersAIClient) NonStreamResponse(ctx context.Context, model string, m
 		Model:    model,
 		Messages: messages,
 		Stream:   false,
+		MaxTok:   defaultMaxTokens,
 	}
 
 	jsonBody, err := json.Marshal(body)

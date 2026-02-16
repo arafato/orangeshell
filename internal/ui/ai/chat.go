@@ -7,6 +7,8 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/oarafat/orangeshell/internal/config"
@@ -276,11 +278,11 @@ func (c chatModel) renderMessages(w, h int, preset config.AIModelPreset) string 
 	// Append streaming response if active
 	if c.streaming && c.streamBuf != "" {
 		lines = append(lines, renderRoleBadge(RoleAssistant))
-		wrapped := wordWrap(c.streamBuf, w-2)
-		for _, line := range strings.Split(wrapped, "\n") {
-			lines = append(lines, lipgloss.NewStyle().Foreground(theme.ColorWhite).Render(line))
+		rendered := renderMarkdown(c.streamBuf, w-2)
+		for _, line := range strings.Split(rendered, "\n") {
+			lines = append(lines, line)
 		}
-		lines = append(lines, theme.DimStyle.Render("...")) // streaming indicator
+		lines = append(lines, theme.DimStyle.Render("▍")) // streaming cursor
 	} else if c.streaming {
 		lines = append(lines, theme.DimStyle.Render("Thinking..."))
 	}
@@ -326,14 +328,19 @@ func (c chatModel) renderSingleMessage(msg chatMsg, w int) []string {
 	var lines []string
 	lines = append(lines, renderRoleBadge(msg.role))
 
-	wrapped := wordWrap(msg.content, w-2)
-	style := lipgloss.NewStyle().Foreground(theme.ColorWhite)
-	if msg.role == RoleUser {
-		style = lipgloss.NewStyle().Foreground(theme.ColorBlue)
-	}
-
-	for _, line := range strings.Split(wrapped, "\n") {
-		lines = append(lines, style.Render(line))
+	if msg.role == RoleAssistant {
+		// Render assistant messages as markdown with syntax highlighting
+		rendered := renderMarkdown(msg.content, w-2)
+		for _, line := range strings.Split(rendered, "\n") {
+			lines = append(lines, line)
+		}
+	} else {
+		// User messages: plain blue text
+		wrapped := wordWrap(msg.content, w-2)
+		style := lipgloss.NewStyle().Foreground(theme.ColorBlue)
+		for _, line := range strings.Split(wrapped, "\n") {
+			lines = append(lines, style.Render(line))
+		}
 	}
 
 	return lines
@@ -416,9 +423,260 @@ func (c chatModel) renderInput(w int, focused bool) string {
 	return prompt + inputStyle.Render(display)
 }
 
+// --- Markdown rendering ---
+
+// renderMarkdown renders markdown text using glamour with a custom dark style
+// that matches the orangeshell color palette. Returns the rendered lines.
+// Falls back to plain word-wrapped text if glamour fails.
+func renderMarkdown(content string, width int) string {
+	if width <= 4 {
+		width = 80
+	}
+
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStyles(orangeShellStyle()),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return wordWrap(content, width)
+	}
+
+	rendered, err := r.Render(content)
+	if err != nil {
+		return wordWrap(content, width)
+	}
+
+	// glamour adds leading/trailing newlines from the Document block.
+	// Strip them since we manage vertical spacing ourselves.
+	rendered = strings.TrimRight(rendered, "\n")
+	rendered = strings.TrimLeft(rendered, "\n")
+
+	return rendered
+}
+
+// orangeShellStyle returns a glamour style config customized for our TUI.
+// Based on the dark style but with zero document margin (we control layout),
+// and orange-accented headings to match the orangeshell palette.
+func orangeShellStyle() ansi.StyleConfig {
+	return ansi.StyleConfig{
+		Document: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Color: stringPtr("#FAFAFA"),
+			},
+			Margin: uintPtr(0),
+		},
+		BlockQuote: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Color: stringPtr("#7D7D7D"),
+			},
+			Indent:      uintPtr(1),
+			IndentToken: stringPtr("│ "),
+		},
+		List: ansi.StyleList{
+			LevelIndent: 2,
+		},
+		Heading: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				BlockSuffix: "\n",
+				Color:       stringPtr("#F6821F"),
+				Bold:        boolPtr(true),
+			},
+		},
+		H1: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "# ",
+				Color:  stringPtr("#F6821F"),
+				Bold:   boolPtr(true),
+			},
+		},
+		H2: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "## ",
+				Color:  stringPtr("#F6821F"),
+				Bold:   boolPtr(true),
+			},
+		},
+		H3: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "### ",
+				Color:  stringPtr("#F6821F"),
+			},
+		},
+		H4: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "#### ",
+			},
+		},
+		H5: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "##### ",
+			},
+		},
+		H6: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix: "###### ",
+				Color:  stringPtr("#7D7D7D"),
+				Bold:   boolPtr(false),
+			},
+		},
+		Strikethrough: ansi.StylePrimitive{
+			CrossedOut: boolPtr(true),
+		},
+		Emph: ansi.StylePrimitive{
+			Italic: boolPtr(true),
+		},
+		Strong: ansi.StylePrimitive{
+			Bold: boolPtr(true),
+		},
+		HorizontalRule: ansi.StylePrimitive{
+			Color:  stringPtr("#3A3A3A"),
+			Format: "\n--------\n",
+		},
+		Item: ansi.StylePrimitive{
+			BlockPrefix: "• ",
+		},
+		Enumeration: ansi.StylePrimitive{
+			BlockPrefix: ". ",
+		},
+		Task: ansi.StyleTask{
+			StylePrimitive: ansi.StylePrimitive{},
+			Ticked:         "[✓] ",
+			Unticked:       "[ ] ",
+		},
+		Link: ansi.StylePrimitive{
+			Color:     stringPtr("#729FCF"),
+			Underline: boolPtr(true),
+		},
+		LinkText: ansi.StylePrimitive{
+			Color: stringPtr("#729FCF"),
+			Bold:  boolPtr(true),
+		},
+		Image: ansi.StylePrimitive{
+			Color:     stringPtr("#729FCF"),
+			Underline: boolPtr(true),
+		},
+		ImageText: ansi.StylePrimitive{
+			Color:  stringPtr("#7D7D7D"),
+			Format: "Image: {{.text}} →",
+		},
+		Code: ansi.StyleBlock{
+			StylePrimitive: ansi.StylePrimitive{
+				Prefix:          " ",
+				Suffix:          " ",
+				Color:           stringPtr("#F6821F"),
+				BackgroundColor: stringPtr("#2A2A2A"),
+			},
+		},
+		CodeBlock: ansi.StyleCodeBlock{
+			StyleBlock: ansi.StyleBlock{
+				StylePrimitive: ansi.StylePrimitive{
+					Color: stringPtr("#C4C4C4"),
+				},
+				Margin: uintPtr(1),
+			},
+			Chroma: &ansi.Chroma{
+				Text: ansi.StylePrimitive{
+					Color: stringPtr("#C4C4C4"),
+				},
+				Error: ansi.StylePrimitive{
+					Color:           stringPtr("#F1F1F1"),
+					BackgroundColor: stringPtr("#EF2929"),
+				},
+				Comment: ansi.StylePrimitive{
+					Color: stringPtr("#676767"),
+				},
+				CommentPreproc: ansi.StylePrimitive{
+					Color: stringPtr("#FF875F"),
+				},
+				Keyword: ansi.StylePrimitive{
+					Color: stringPtr("#729FCF"),
+				},
+				KeywordReserved: ansi.StylePrimitive{
+					Color: stringPtr("#FF5FD2"),
+				},
+				KeywordNamespace: ansi.StylePrimitive{
+					Color: stringPtr("#FF5F87"),
+				},
+				KeywordType: ansi.StylePrimitive{
+					Color: stringPtr("#6E6ED8"),
+				},
+				Operator: ansi.StylePrimitive{
+					Color: stringPtr("#EF8080"),
+				},
+				Punctuation: ansi.StylePrimitive{
+					Color: stringPtr("#E8E8A8"),
+				},
+				Name: ansi.StylePrimitive{
+					Color: stringPtr("#C4C4C4"),
+				},
+				NameBuiltin: ansi.StylePrimitive{
+					Color: stringPtr("#FF8EC7"),
+				},
+				NameTag: ansi.StylePrimitive{
+					Color: stringPtr("#B083EA"),
+				},
+				NameAttribute: ansi.StylePrimitive{
+					Color: stringPtr("#7A7AE6"),
+				},
+				NameClass: ansi.StylePrimitive{
+					Color:     stringPtr("#F1F1F1"),
+					Underline: boolPtr(true),
+					Bold:      boolPtr(true),
+				},
+				NameDecorator: ansi.StylePrimitive{
+					Color: stringPtr("#FFFF87"),
+				},
+				NameFunction: ansi.StylePrimitive{
+					Color: stringPtr("#73D216"),
+				},
+				LiteralNumber: ansi.StylePrimitive{
+					Color: stringPtr("#6EEFC0"),
+				},
+				LiteralString: ansi.StylePrimitive{
+					Color: stringPtr("#C69669"),
+				},
+				LiteralStringEscape: ansi.StylePrimitive{
+					Color: stringPtr("#AFFFD7"),
+				},
+				GenericDeleted: ansi.StylePrimitive{
+					Color: stringPtr("#EF2929"),
+				},
+				GenericEmph: ansi.StylePrimitive{
+					Italic: boolPtr(true),
+				},
+				GenericInserted: ansi.StylePrimitive{
+					Color: stringPtr("#73D216"),
+				},
+				GenericStrong: ansi.StylePrimitive{
+					Bold: boolPtr(true),
+				},
+				GenericSubheading: ansi.StylePrimitive{
+					Color: stringPtr("#7D7D7D"),
+				},
+				Background: ansi.StylePrimitive{
+					BackgroundColor: stringPtr("#2A2A2A"),
+				},
+			},
+		},
+		Table: ansi.StyleTable{
+			StyleBlock: ansi.StyleBlock{
+				StylePrimitive: ansi.StylePrimitive{},
+			},
+		},
+		DefinitionDescription: ansi.StylePrimitive{
+			BlockPrefix: "\n  ",
+		},
+	}
+}
+
+func boolPtr(b bool) *bool       { return &b }
+func stringPtr(s string) *string { return &s }
+func uintPtr(u uint) *uint       { return &u }
+
 // --- Helpers ---
 
 // wordWrap wraps text at word boundaries to fit within maxWidth.
+// Used for user messages and as a fallback when glamour fails.
 func wordWrap(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		maxWidth = 80

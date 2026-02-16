@@ -58,17 +58,6 @@ func devScriptName(scriptName string) string {
 	return "dev:" + scriptName
 }
 
-// devDisplayName returns the human-readable name for a dev script name
-// by stripping the "dev:" prefix.
-func devDisplayName(scriptName string) string {
-	return strings.TrimPrefix(scriptName, "dev:")
-}
-
-// isDevScriptName returns true if the script name has the dev prefix.
-func isDevScriptName(scriptName string) bool {
-	return strings.HasPrefix(scriptName, "dev:")
-}
-
 // parseDevOutputLine converts a wrangler dev OutputLine into a TailLine.
 // It classifies lines by content patterns to assign appropriate log levels.
 func parseDevOutputLine(ol wcfg.OutputLine) svc.TailLine {
@@ -253,11 +242,12 @@ func (m *Model) cleanupDevSessionByKey(key string) {
 	m.syncDevBadges()
 }
 
-// hasDevRunnerFor returns true if a dev server is running for the given project/env.
+// hasDevRunnerFor returns true if a dev server is active (running or failed) for the given project/env.
+// This controls whether the action menu shows "Stop Dev Server" vs "Dev (Local)"/"Dev (Remote)".
 func (m Model) hasDevRunnerFor(projectName, envName string) bool {
 	key := runnerKey(projectName, envName)
-	dr, ok := m.devRunners[key]
-	return ok && dr.runner != nil
+	_, ok := m.devRunners[key]
+	return ok
 }
 
 // hasCmdRunnerFor returns true if a command (deploy/delete) is running for the given project/env.
@@ -265,16 +255,6 @@ func (m Model) hasCmdRunnerFor(projectName, envName string) bool {
 	key := runnerKey(projectName, envName)
 	cr, ok := m.cmdRunners[key]
 	return ok && cr.runner != nil
-}
-
-// devRunnerStatus returns the dev status for a given project/env, or "" if none.
-func (m Model) devRunnerStatus(projectName, envName string) string {
-	key := runnerKey(projectName, envName)
-	dr, ok := m.devRunners[key]
-	if !ok {
-		return ""
-	}
-	return dr.status
 }
 
 // syncDevBadges updates the dev badge data on all env boxes and project boxes.

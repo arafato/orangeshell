@@ -13,19 +13,6 @@ import (
 
 // --- Runner lifecycle ---
 
-// stopDevRunner stops and removes a specific dev runner by key.
-func (m *Model) stopDevRunner(key string) {
-	if dr, ok := m.devRunners[key]; ok {
-		if dr.runner != nil {
-			dr.runner.Stop()
-		}
-		if dr.logFile != nil {
-			dr.logFile.Close()
-		}
-		delete(m.devRunners, key)
-	}
-}
-
 // stopCmdRunner stops and removes a specific command runner by key.
 func (m *Model) stopCmdRunner(key string) {
 	if cr, ok := m.cmdRunners[key]; ok {
@@ -43,9 +30,14 @@ func (m *Model) stopCmdRunner(key string) {
 func (m *Model) startDevServer(action, projectName, envName, configPath, scriptName string) tea.Cmd {
 	key := runnerKey(projectName, envName)
 
-	// Don't start if one is already running for this env
-	if _, ok := m.devRunners[key]; ok {
-		return nil
+	// If there's an existing dev runner for this env (failed or running), clean it up first
+	if dr, ok := m.devRunners[key]; ok {
+		if dr.runner != nil {
+			// Still running — don't start a second one
+			return nil
+		}
+		// Failed state — clean up before restarting
+		m.cleanupDevSessionByKey(key)
 	}
 
 	// Open log file
@@ -106,13 +98,17 @@ func (m *Model) startDevServer(action, projectName, envName, configPath, scriptN
 // --- Starting commands (deploy, delete, etc.) ---
 
 // startWranglerCmd creates a command runner for a short-lived wrangler command.
+// Uses the focused project's config path.
 func (m *Model) startWranglerCmd(action, envName string) tea.Cmd {
 	projectName := m.wrangler.FocusedProjectName()
-	return m.startWranglerCmdWithArgs(action, projectName, envName, nil)
+	configPath := m.wrangler.ConfigPath()
+	return m.startWranglerCmdWithArgs(action, projectName, envName, configPath, nil)
 }
 
 // startWranglerCmdWithArgs creates a command runner with extra arguments.
-func (m *Model) startWranglerCmdWithArgs(action, projectName, envName string, extraArgs []string) tea.Cmd {
+// The configPath must be provided explicitly so this works correctly even
+// if the focused project differs from the target project.
+func (m *Model) startWranglerCmdWithArgs(action, projectName, envName, configPath string, extraArgs []string) tea.Cmd {
 	key := runnerKey(projectName, envName)
 
 	// Don't start if a command is already running for this env
@@ -146,7 +142,7 @@ func (m *Model) startWranglerCmdWithArgs(action, projectName, envName string, ex
 
 	cmd := wcfg.Command{
 		Action:     action,
-		ConfigPath: m.wrangler.ConfigPath(),
+		ConfigPath: configPath,
 		EnvName:    envName,
 		ExtraArgs:  extraArgs,
 		AccountID:  m.registry.ActiveAccountID(),
@@ -250,7 +246,9 @@ func (m *Model) handleDevDone(key string, result wcfg.RunResult) tea.Cmd {
 		return nil
 	}
 
-	// Drain remaining lines
+	// Drain any remaining lines that arrived between the last read and
+	// CmdDoneMsg delivery. In practice LinesCh is already closed by the time
+	// we get here (readRunnerOutput drains it), so this is a safety net.
 	if dr.runner != nil {
 		for line := range dr.runner.LinesCh() {
 			writeDevLogLine(dr.logFile, line)
@@ -262,27 +260,32 @@ func (m *Model) handleDevDone(key string, result wcfg.RunResult) tea.Cmd {
 		}
 	}
 
-	// Mark as failed if non-zero exit and was still "starting"
+	// On failure: keep the session with "failed" status so the badge persists.
+	// The user can retry via the action menu (which calls cleanupDevSessionByKey first).
 	if result.ExitCode != 0 || result.Err != nil {
 		dr.status = "failed"
+		dr.runner = nil // mark as no longer running
 		errText := "exited"
 		if result.Err != nil {
 			errText = result.Err.Error()
-			// Truncate long error messages for badge display
 			if len(errText) > 40 {
 				errText = errText[:40] + "..."
 			}
 		}
 		dr.errMsg = errText
+		if dr.logFile != nil {
+			dr.logFile.Close()
+			dr.logFile = nil
+		}
 		m.syncDevBadges()
 
-		// Set error with log path hint
 		if dr.logPath != "" {
 			m.err = fmt.Errorf("dev server failed — see %s", dr.logPath)
 		}
+		return nil
 	}
 
-	// Clean up: remove from monitoring grid, runner map, session list
+	// Normal exit (exit code 0): clean up completely
 	m.cleanupDevSessionByKey(key)
 	return nil
 }
@@ -316,26 +319,41 @@ func (m *Model) handleCmdDone(key string, result wcfg.RunResult) tea.Cmd {
 // --- Active CmdPane management ---
 
 // refreshActiveCmdPane sets the wrangler view's active CmdPane based on the
-// currently focused project/env. Prioritizes active command runners, then
-// completed command runners with output.
+// currently focused project/env. Shows the CmdPane for active or recently
+// completed commands. Cleans up completed entries for non-focused envs.
 func (m *Model) refreshActiveCmdPane() {
 	projectName := m.wrangler.FocusedProjectName()
 	envName := m.wrangler.FocusedEnvName()
 	if projectName == "" || envName == "" {
 		m.wrangler.SetActiveCmdPane(nil)
+		// Clean up all completed cmdRunners since nothing is focused
+		m.cleanupCompletedCmdRunners("")
 		return
 	}
 
-	key := runnerKey(projectName, envName)
+	focusedKey := runnerKey(projectName, envName)
 
-	// Active command runner takes priority
-	if cr, ok := m.cmdRunners[key]; ok {
+	// Clean up completed cmdRunners for NON-focused envs (they've been seen)
+	m.cleanupCompletedCmdRunners(focusedKey)
+
+	// Show the CmdPane for the focused env if one exists
+	if cr, ok := m.cmdRunners[focusedKey]; ok {
 		m.wrangler.SetActiveCmdPane(&cr.cmdPane)
 		return
 	}
 
-	// No active runner for this env
+	// No runner for this env
 	m.wrangler.SetActiveCmdPane(nil)
+}
+
+// cleanupCompletedCmdRunners removes finished cmdRunner entries (runner == nil)
+// for all keys except exceptKey. This prevents memory accumulation.
+func (m *Model) cleanupCompletedCmdRunners(exceptKey string) {
+	for key, cr := range m.cmdRunners {
+		if key != exceptKey && cr.runner == nil {
+			delete(m.cmdRunners, key)
+		}
+	}
 }
 
 // --- Version fetching (unchanged — uses separate runner) ---

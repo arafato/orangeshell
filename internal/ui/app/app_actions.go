@@ -645,7 +645,8 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	if item.Action == "wrangler_delete" {
 		envName := m.wrangler.FocusedEnvName()
 		projectName := m.wrangler.FocusedProjectName()
-		return m.startWranglerCmdWithArgs("delete", projectName, envName, []string{"--force"})
+		configPath := m.wrangler.ConfigPath()
+		return m.startWranglerCmdWithArgs("delete", projectName, envName, configPath, []string{"--force"})
 	}
 
 	// Wrangler command actions

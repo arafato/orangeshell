@@ -1089,7 +1089,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case uiwrangler.DeployVersionMsg:
 		m.wrangler.CloseVersionPicker()
 		projectName := m.wrangler.FocusedProjectName()
-		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, []string{
+		configPath := m.wrangler.ConfigPath()
+		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, configPath, []string{
 			fmt.Sprintf("%s@100", msg.VersionID),
 			"-y",
 		})
@@ -1098,7 +1099,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wrangler.CloseVersionPicker()
 		pctB := 100 - msg.PercentageA
 		projectName := m.wrangler.FocusedProjectName()
-		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, []string{
+		configPath := m.wrangler.ConfigPath()
+		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, configPath, []string{
 			fmt.Sprintf("%s@%d", msg.VersionA, msg.PercentageA),
 			fmt.Sprintf("%s@%d", msg.VersionB, pctB),
 			"-y",

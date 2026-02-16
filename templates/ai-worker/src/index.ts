@@ -15,6 +15,7 @@ interface RequestBody {
   model: string;
   messages: ChatMessage[];
   stream?: boolean;
+  max_tokens?: number;
 }
 
 export default {
@@ -42,16 +43,20 @@ export default {
 
     try {
       const body = (await request.json()) as RequestBody;
-      const { model, messages, stream } = body;
+      const { model, messages, stream, max_tokens } = body;
 
       if (!model || !messages) {
         return new Response("Missing model or messages", { status: 400 });
       }
 
+      // Default to 4096 tokens if not specified (Workers AI default is 256, which is too low).
+      const tokens = max_tokens || 4096;
+
       if (stream) {
         const response = await env.AI.run(model as BaseAiTextGenerationModels, {
           messages,
           stream: true,
+          max_tokens: tokens,
         });
         return new Response(response as ReadableStream, {
           headers: {
@@ -65,6 +70,7 @@ export default {
 
       const result = await env.AI.run(model as BaseAiTextGenerationModels, {
         messages,
+        max_tokens: tokens,
       });
       return Response.json(result, {
         headers: { "Access-Control-Allow-Origin": "*" },

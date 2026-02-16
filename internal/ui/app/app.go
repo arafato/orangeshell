@@ -198,9 +198,9 @@ type Model struct {
 
 	// Wrangler project view
 	wrangler              uiwrangler.Model
-	wranglerRunner        *wcfg.Runner
-	wranglerRunnerAction  string       // action string of the running wrangler command (e.g. "deploy", "versions deploy")
-	wranglerVersionRunner *wcfg.Runner // separate runner for background version fetches
+	devRunners            map[string]*devRunner // keyed by "projectName:envName" — long-lived dev servers
+	cmdRunners            map[string]*cmdRunner // keyed by "projectName:envName" — short-lived commands (deploy, delete, etc.)
+	wranglerVersionRunner *wcfg.Runner          // separate runner for background version fetches
 
 	// Monitoring tab model (live tail sessions)
 	monitoring  monitoring.Model
@@ -292,6 +292,8 @@ func NewModel(cfg *config.Config, scanDir string) Model {
 		cfg:        cfg,
 		registry:   svc.NewRegistry(),
 		scanDir:    scanDir,
+		devRunners: make(map[string]*devRunner),
+		cmdRunners: make(map[string]*cmdRunner),
 	}
 
 	return m
@@ -1086,7 +1088,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case uiwrangler.DeployVersionMsg:
 		m.wrangler.CloseVersionPicker()
-		return m, m.startWranglerCmdWithArgs("versions deploy", msg.EnvName, []string{
+		projectName := m.wrangler.FocusedProjectName()
+		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, []string{
 			fmt.Sprintf("%s@100", msg.VersionID),
 			"-y",
 		})
@@ -1094,7 +1097,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case uiwrangler.GradualDeployMsg:
 		m.wrangler.CloseVersionPicker()
 		pctB := 100 - msg.PercentageA
-		return m, m.startWranglerCmdWithArgs("versions deploy", msg.EnvName, []string{
+		projectName := m.wrangler.FocusedProjectName()
+		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, []string{
 			fmt.Sprintf("%s@%d", msg.VersionA, msg.PercentageA),
 			fmt.Sprintf("%s@%d", msg.VersionB, pctB),
 			"-y",
@@ -1124,51 +1128,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uiwrangler.CmdOutputMsg:
-		m.wrangler.AppendCmdOutput(msg.Line)
-
-		// If this is a dev command, also pipe output to the monitoring grid
-		if wcfg.IsDevAction(m.wranglerRunnerAction) && len(m.devSessions) > 0 {
-			ds := &m.devSessions[0]
-			tailLine := parseDevOutputLine(msg.Line)
-			m.monitoring.GridAppendLines(ds.ScriptName, []svc.TailLine{tailLine})
-
-			// Check for port announcement (e.g. "Ready on http://localhost:8787")
-			if port := extractDevPort(msg.Line.Text); port != "" && ds.Port == "" {
-				ds.Port = port
-				m.refreshMonitoringWorkerTree()
-			}
+		if msg.IsDevCmd {
+			// Dev server output → monitoring grid + log file (no CmdPane)
+			m.handleDevOutput(msg.RunnerKey, msg.Line)
+		} else {
+			// Command output → CmdPane
+			m.handleCmdOutput(msg.RunnerKey, msg.Line)
 		}
-
-		return m, waitForWranglerOutput(m.wranglerRunner)
+		// Continue reading from the runner
+		return m, m.waitForRunnerOutput(msg.RunnerKey, msg.IsDevCmd)
 
 	case uiwrangler.CmdDoneMsg:
-		// Drain any remaining lines before finishing
-		isDevCmd := wcfg.IsDevAction(m.wranglerRunnerAction)
-		if m.wranglerRunner != nil {
-			for line := range m.wranglerRunner.LinesCh() {
-				m.wrangler.AppendCmdOutput(line)
-				// Also pipe drained dev lines to monitoring grid
-				if isDevCmd && len(m.devSessions) > 0 {
-					tailLine := parseDevOutputLine(line)
-					m.monitoring.GridAppendLines(m.devSessions[0].ScriptName, []svc.TailLine{tailLine})
-				}
-			}
+		if msg.IsDevCmd {
+			return m, m.handleDevDone(msg.RunnerKey, msg.Result)
 		}
-		m.wrangler.FinishCommand(msg.Result)
-		action := m.wranglerRunnerAction
-		m.wranglerRunner = nil
-		m.wranglerRunnerAction = ""
-
-		// If this was a dev action, clean up dev monitoring state
-		if isDevCmd {
-			m.cleanupDevSession()
-		}
-
-		// After mutating commands, immediately refresh stale data
-		if isMutatingAction(action) && msg.Result.ExitCode == 0 {
-			return m, m.refreshAfterMutation()
-		}
-		return m, nil
+		return m, m.handleCmdDone(msg.RunnerKey, msg.Result)
 
 	// Search messages
 	case search.NavigateMsg:
@@ -1657,6 +1631,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tabbar.TabOperations:
 		if m.viewState == ViewWrangler {
 			m.wrangler, cmd = m.wrangler.Update(msg)
+			// Refresh active CmdPane after navigation (env box change, project drill-in/out)
+			m.refreshActiveCmdPane()
 		}
 	case tabbar.TabMonitoring:
 		m.monitoring, cmd = m.monitoring.Update(msg)
@@ -1706,7 +1682,7 @@ func (m Model) isTextInputActive() bool {
 	if m.viewState == ViewWrangler && m.wrangler.IsDirBrowserActive() {
 		return true
 	}
-	if m.viewState == ViewWrangler && m.wrangler.CmdRunning() && !wcfg.IsDevAction(m.wranglerRunnerAction) {
+	if m.viewState == ViewWrangler && m.wrangler.CmdRunning() {
 		return true
 	}
 	// D1 console only blocks tab switching when in interactive mode
@@ -1737,6 +1713,9 @@ func (m *Model) ensureViewStateForTab() tea.Cmd {
 		if m.viewState != ViewWrangler {
 			m.viewState = ViewWrangler
 		}
+		// Refresh CmdPane + dev badges for the currently focused project/env
+		m.refreshActiveCmdPane()
+		m.syncDevBadges()
 	case tabbar.TabResources:
 		// Service list/detail are valid; anything else shows placeholder.
 		if m.detail.Service() == "" {

@@ -183,7 +183,12 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 			})
 		}
 
-		cmdRunning := m.wrangler.CmdRunning()
+		projectName := m.wrangler.FocusedProjectName()
+		// Per-env checks: is a command (deploy/delete) running for THIS env?
+		cmdRunning := m.hasCmdRunnerFor(projectName, envName)
+		// Is a dev server running for THIS env?
+		devRunning := m.hasDevRunnerFor(projectName, envName)
+
 		wranglerActions := []string{"deploy", "versions list", "deployments status"}
 		for _, action := range wranglerActions {
 			items = append(items, actions.Item{
@@ -195,12 +200,12 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 			})
 		}
 
-		// Dev server: show "Stop Dev Server" when running, otherwise show the two dev modes
-		runningAction := m.wrangler.RunningAction()
-		if wcfg.IsDevAction(runningAction) {
+		// Dev server: show "Stop Dev Server" when a dev server is running for THIS env,
+		// otherwise show the two dev modes
+		if devRunning {
 			items = append(items, actions.Item{
 				Label:       "Stop Dev Server",
-				Description: "Stop the running dev server",
+				Description: "Stop the running dev server for this environment",
 				Section:     "Commands",
 				Action:      "wrangler_stop_dev",
 			})
@@ -212,7 +217,6 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 					Description: wcfg.CommandDescription(action),
 					Section:     "Commands",
 					Action:      "wrangler_" + action,
-					Disabled:    cmdRunning,
 				})
 			}
 		}
@@ -612,10 +616,7 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		if workerName == "" {
 			return nil
 		}
-		// Stop any running wrangler command first (including dev sessions)
-		m.cleanupDevSession()
-		m.stopWranglerRunner()
-		// Start tail on Monitoring tab
+		// Start tail on Monitoring tab (no need to stop dev servers)
 		m.tailSource = "monitoring"
 		m.monitoring.StartSingleTail(workerName)
 		m.activeTab = tabbar.TabMonitoring
@@ -627,35 +628,24 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	if item.Action == "wrangler_dev" || item.Action == "wrangler_dev --remote" {
 		action := strings.TrimPrefix(item.Action, "wrangler_")
 		envName := m.wrangler.FocusedEnvName()
-
-		// Create a dev session for monitoring tab integration
+		projectName := m.wrangler.FocusedProjectName()
+		configPath := m.wrangler.ConfigPath()
 		scriptName := m.wrangler.FocusedScriptName()
-		devKind := "local"
-		if action == "dev --remote" {
-			devKind = "remote"
-		}
-		dsName := devScriptName(scriptName)
-		m.devSessions = append(m.devSessions, devSession{
-			ScriptName:  dsName,
-			ProjectName: m.wrangler.FocusedProjectName(),
-			EnvName:     envName,
-			DevKind:     devKind,
-		})
-		m.monitoring.AddDevToGrid(dsName, devKind)
-		m.refreshMonitoringWorkerTree()
 
-		return m.startWranglerCmdWithArgs(action, envName, []string{"--show-interactive-dev-session=false"})
+		return m.startDevServer(action, projectName, envName, configPath, scriptName)
 	}
 	if item.Action == "wrangler_stop_dev" {
-		m.cleanupDevSession()
-		m.wrangler.StopDevServer()
-		m.stopWranglerRunner()
+		projectName := m.wrangler.FocusedProjectName()
+		envName := m.wrangler.FocusedEnvName()
+		key := runnerKey(projectName, envName)
+		m.cleanupDevSessionByKey(key)
 		return nil
 	}
 
 	if item.Action == "wrangler_delete" {
 		envName := m.wrangler.FocusedEnvName()
-		return m.startWranglerCmdWithArgs("delete", envName, []string{"--force"})
+		projectName := m.wrangler.FocusedProjectName()
+		return m.startWranglerCmdWithArgs("delete", projectName, envName, []string{"--force"})
 	}
 
 	// Wrangler command actions

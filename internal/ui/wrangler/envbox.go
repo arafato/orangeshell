@@ -47,6 +47,12 @@ type EnvBox struct {
 	Deployment        *DeploymentDisplay // active deployment for this env
 	Subdomain         string             // account's workers.dev subdomain
 	DeploymentFetched bool               // true once API response received (distinguishes "not fetched" from "not deployed")
+
+	// Dev server status (set by app layer via syncDevBadges)
+	DevStatus string // "", "starting", "running", "failed"
+	DevKind   string // "local", "remote"
+	DevPort   string // e.g. "8787"
+	DevError  string // short error message for failed state
 }
 
 // NewEnvBox creates an EnvBox from a wrangler config, environment name, and index.
@@ -150,12 +156,31 @@ func (b EnvBox) IsEnvVarsSelected() bool {
 // focused: whether this box is the outer-focused box.
 // inside: whether the user is navigating inside this box (inner mode).
 func (b EnvBox) View(width int, focused, inside bool) string {
-	// Title line: env name
+	// Title line: env name + optional dev badge
 	envLabel := b.EnvName
 	if envLabel == "default" {
 		envLabel = "default"
 	}
 	title := theme.TitleStyle.Render(envLabel)
+
+	// Dev server status badge
+	switch b.DevStatus {
+	case "starting":
+		title += " " + lipgloss.NewStyle().Foreground(theme.ColorYellow).Render("starting dev...")
+	case "running":
+		badge := "[dev"
+		if b.DevPort != "" {
+			badge += ":" + b.DevPort
+		}
+		badge += "]"
+		title += " " + lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true).Render(badge)
+	case "failed":
+		errText := "[dev failed]"
+		if b.DevError != "" {
+			errText = "[dev failed: " + b.DevError + "]"
+		}
+		title += " " + theme.ErrorStyle.Render(errText)
+	}
 
 	// Worker name as a navigable item
 	var workerLine string

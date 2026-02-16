@@ -91,12 +91,16 @@ type ActionMsg struct {
 
 // CmdOutputMsg carries a line of output from a running wrangler command.
 type CmdOutputMsg struct {
-	Line wcfg.OutputLine
+	RunnerKey string // "projectName:envName" — identifies which runner produced this output
+	IsDevCmd  bool   // true for dev server output, false for deploy/delete/etc.
+	Line      wcfg.OutputLine
 }
 
 // CmdDoneMsg signals that a wrangler command has finished.
 type CmdDoneMsg struct {
-	Result wcfg.RunResult
+	RunnerKey string // "projectName:envName" — identifies which runner finished
+	IsDevCmd  bool   // true for dev server, false for deploy/delete/etc.
+	Result    wcfg.RunResult
 }
 
 // LoadConfigPathMsg is sent when the user enters a directory path to load a wrangler config from.
@@ -185,9 +189,10 @@ type Model struct {
 	showDirBrowser bool
 	dirBrowserMode DirBrowserMode // what the dir browser was opened for
 
-	// Command output pane (bottom split)
-	cmdPane CmdPane
-	spinner spinner.Model
+	// Command output pane (bottom split) — points to the active cmdRunner's pane.
+	// nil when the focused project/env has no running or recently completed command.
+	activeCmdPane *CmdPane
+	spinner       spinner.Model
 
 	// Version picker overlay
 	showVersionPicker bool
@@ -209,7 +214,6 @@ func New() Model {
 	s.Style = lipgloss.NewStyle().Foreground(theme.ColorOrange)
 	return Model{
 		configLoading: true, // loading until SetConfig is called
-		cmdPane:       NewCmdPane(),
 		spinner:       s,
 		activeProject: -1,
 	}
@@ -561,20 +565,27 @@ func (m Model) InsideBox() bool {
 }
 
 // CmdRunning returns whether a wrangler command is currently executing.
+// Checks the active CmdPane for the focused project/env.
 func (m Model) CmdRunning() bool {
-	return m.cmdPane.IsRunning()
+	if m.activeCmdPane != nil {
+		return m.activeCmdPane.IsRunning()
+	}
+	return false
 }
 
 // RunningAction returns the action string of the currently running command.
 // Returns "" if no command is running.
 func (m Model) RunningAction() string {
-	return m.cmdPane.Action()
+	if m.activeCmdPane != nil {
+		return m.activeCmdPane.Action()
+	}
+	return ""
 }
 
-// StopDevServer marks the dev server as stopped with a clean message.
-// The caller (app.go) should also call stopWranglerRunner() to kill the process.
-func (m *Model) StopDevServer() {
-	m.cmdPane.FinishWithMessage("Stopped", false)
+// SetActiveCmdPane sets the CmdPane to display for the currently focused project/env.
+// Pass nil to hide the command pane.
+func (m *Model) SetActiveCmdPane(pane *CmdPane) {
+	m.activeCmdPane = pane
 }
 
 // FocusedScriptName returns the resolved script name for the currently focused environment.
@@ -597,6 +608,51 @@ func (m Model) FocusedProjectName() string {
 		return m.config.Name
 	}
 	return ""
+}
+
+// DevBadge holds dev server status information for display in project/env boxes.
+type DevBadge struct {
+	Kind   string // "local" or "remote"
+	Port   string // e.g. "8787"
+	Status string // "starting", "running", "failed"
+}
+
+// EnvBoxCount returns the number of env boxes in the current view.
+func (m Model) EnvBoxCount() int {
+	return len(m.envBoxes)
+}
+
+// EnvBoxAt returns a pointer to the env box at the given index, or nil if out of range.
+func (m *Model) EnvBoxAt(i int) *EnvBox {
+	if i < 0 || i >= len(m.envBoxes) {
+		return nil
+	}
+	return &m.envBoxes[i]
+}
+
+// UpdateDevBadges updates the dev badge data on all project boxes in the monorepo list.
+// The badgeFn function is called for each project/env pair to get the badge data.
+func (m *Model) UpdateDevBadges(badgeFn func(projectName, envName string) DevBadge) {
+	for i := range m.projects {
+		entry := &m.projects[i]
+		if entry.config == nil {
+			continue
+		}
+		if entry.box.DevBadges == nil {
+			entry.box.DevBadges = make(map[string]DevBadge)
+		}
+		// Clear old badges for this project
+		for k := range entry.box.DevBadges {
+			delete(entry.box.DevBadges, k)
+		}
+		// Set new badges
+		for _, envName := range entry.config.EnvNames() {
+			badge := badgeFn(entry.box.Name, envName)
+			if badge.Status != "" {
+				entry.box.DevBadges[envName] = badge
+			}
+		}
+	}
 }
 
 // WorkerInfo describes a single worker resolved from a wrangler config.
@@ -713,20 +769,9 @@ func (m Model) FocusedWorkerName() string {
 	return m.config.ResolvedEnvName(envName)
 }
 
-// StartCommand prepares the cmd pane for a new command execution.
-func (m *Model) StartCommand(action, envName string) {
-	m.cmdPane.StartCommand(action, envName)
-}
-
-// AppendCmdOutput adds a line to the command output pane.
-func (m *Model) AppendCmdOutput(line wcfg.OutputLine) {
-	m.cmdPane.AppendLine(line.Text, line.IsStderr, line.Timestamp)
-}
-
-// FinishCommand marks the current command as done.
-func (m *Model) FinishCommand(result wcfg.RunResult) {
-	m.cmdPane.Finish(result.ExitCode, result.Err)
-}
+// NOTE: StartCommand, AppendCmdOutput, FinishCommand have been removed.
+// The app layer now writes directly to the cmdRunner's CmdPane and sets
+// the active pane via SetActiveCmdPane().
 
 // SpinnerInit returns the command to start the spinner ticking.
 func (m Model) SpinnerInit() tea.Cmd {
@@ -735,7 +780,7 @@ func (m Model) SpinnerInit() tea.Cmd {
 
 // IsLoading returns whether the spinner should be running.
 func (m Model) IsLoading() bool {
-	return m.configLoading || m.cmdPane.IsRunning() || (m.showVersionPicker && m.versionPicker.IsLoading())
+	return m.configLoading || m.CmdRunning() || (m.showVersionPicker && m.versionPicker.IsLoading())
 }
 
 // ShowVersionPicker opens the version picker overlay in the given mode.
@@ -885,7 +930,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m.updateDirBrowser(msg)
 		}
 		// Handle cmd pane scroll keys when pane is active
-		if m.cmdPane.IsActive() {
+		if m.activeCmdPane != nil && m.activeCmdPane.IsActive() {
 			if handled := m.updateCmdPaneScroll(msg); handled {
 				return m, nil
 			}
@@ -943,7 +988,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		// Handle "t" key — emit TailStartMsg for the app to route to Monitoring tab.
 		// Block when a wrangler command is running.
 		if msg.String() == "t" {
-			if !m.cmdPane.IsRunning() {
+			if !m.CmdRunning() {
 				workerName := m.FocusedWorkerName()
 				if workerName != "" {
 					return m, func() tea.Msg { return TailStartMsg{ScriptName: workerName} }
@@ -1074,15 +1119,18 @@ func (m *Model) adjustProjectScroll() {
 // updateCmdPaneScroll handles scroll keys for the command output pane.
 // Returns true if the key was consumed.
 func (m *Model) updateCmdPaneScroll(msg tea.KeyMsg) bool {
+	if m.activeCmdPane == nil {
+		return false
+	}
 	switch msg.String() {
 	case "pgup":
-		m.cmdPane.ScrollUp(5)
+		m.activeCmdPane.ScrollUp(5)
 		return true
 	case "pgdown":
-		m.cmdPane.ScrollDown(5)
+		m.activeCmdPane.ScrollDown(5)
 		return true
 	case "end":
-		m.cmdPane.ScrollToBottom()
+		m.activeCmdPane.ScrollToBottom()
 		return true
 	}
 	return false
@@ -1302,7 +1350,7 @@ func (m Model) View() string {
 	cmdPaneHeight := 0
 	envPaneHeight := contentHeight
 
-	if m.cmdPane.IsActive() {
+	if m.activeCmdPane != nil && m.activeCmdPane.IsActive() {
 		// Wrangler command output pane
 		cmdPaneHeight = contentHeight * 35 / 100
 		if cmdPaneHeight < 6 {
@@ -1406,7 +1454,7 @@ func (m Model) View() string {
 	if cmdPaneHeight > 0 {
 		// Split view: env boxes on top, command output pane on bottom
 		envContent := strings.Join(visible, "\n")
-		cmdContent := m.cmdPane.View(cmdPaneHeight, m.width-4, m.spinner.View())
+		cmdContent := m.activeCmdPane.View(cmdPaneHeight, m.width-4, m.spinner.View())
 		content = envContent + "\n" + cmdContent
 	} else {
 		content = strings.Join(visible, "\n")

@@ -38,6 +38,7 @@ type ProjectBox struct {
 	DeploymentFetched map[string]bool               // envName -> true once API responded
 	Subdomain         string                        // account's workers.dev subdomain
 	Index             int                           // position in the projects slice (for zone IDs)
+	DevBadges         map[string]DevBadge           // envName -> dev server badge (set by app layer)
 }
 
 // View renders the project box.
@@ -105,10 +106,29 @@ func (b ProjectBox) renderEnvSection(envName string) string {
 	// Environment label
 	envLabel := theme.LabelStyle.Render(envName)
 
+	// Dev badge (if dev server is running for this env)
+	devBadgeStr := ""
+	if badge, ok := b.DevBadges[envName]; ok && badge.Status != "" {
+		switch badge.Status {
+		case "starting":
+			devBadgeStr = " " + lipgloss.NewStyle().Foreground(theme.ColorYellow).Render("starting...")
+		case "running":
+			tag := "[dev"
+			if badge.Port != "" {
+				tag += ":" + badge.Port
+			}
+			tag += "]"
+			devBadgeStr = " " + lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true).Render(tag)
+		case "failed":
+			devBadgeStr = " " + theme.ErrorStyle.Render("[dev failed]")
+		}
+	}
+
 	// Worker line with nav arrow
-	workerLine := fmt.Sprintf("  %s  %s %s",
+	workerLine := fmt.Sprintf("  %s  %s%s %s",
 		theme.DimStyle.Render(fmt.Sprintf("%-9s", "Worker")),
 		theme.ValueStyle.Render(workerName),
+		devBadgeStr,
 		theme.ActionNavArrowStyle.Render("\u2192"))
 
 	// URL line (clickable) — only shown when the worker is actually deployed

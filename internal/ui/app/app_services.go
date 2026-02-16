@@ -211,10 +211,13 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	// Stop any active tail session and wrangler command
 	m.stopTail()
 	m.stopAllParallelTails()
-	m.cleanupDevSession()
+	m.cleanupAllDevSessions()
+	// Stop all command runners
+	for key := range m.cmdRunners {
+		m.stopCmdRunner(key)
+	}
 	m.monitoring.Clear()
 	m.detail.ClearD1()
-	m.stopWranglerRunner()
 	m.wrangler.ClearVersionCache()
 	m.wrangler.CloseVersionPicker()
 

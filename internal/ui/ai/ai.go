@@ -206,13 +206,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.focus = FocusContext
 			}
 			return m, nil
-		case "s":
-			// Enter settings if: (a) context pane is focused, or (b) chat input is empty
-			if m.focus != FocusChat || m.chat.input == "" {
-				m.mode = ModeSettings
-				return m, nil
-			}
-			// If chat has text, fall through to chat model (type 's' in input)
+		case "ctrl+s":
+			m.mode = ModeSettings
+			return m, nil
 		}
 	}
 
@@ -322,7 +318,7 @@ func (m Model) HelpEntries() []HelpEntry {
 				HelpEntry{"j/k", "navigate"},
 				HelpEntry{"space", "toggle"},
 				HelpEntry{"a/n", "all/none"},
-				HelpEntry{"s", "settings"},
+				HelpEntry{"ctrl+s", "settings"},
 			)
 		}
 		if m.focus == FocusChat {
@@ -330,6 +326,7 @@ func (m Model) HelpEntries() []HelpEntry {
 				HelpEntry{"enter", "send"},
 				HelpEntry{"ctrl+n", "new chat"},
 				HelpEntry{"pgup/dn", "scroll"},
+				HelpEntry{"ctrl+s", "settings"},
 			)
 		}
 		entries = append(entries, HelpEntry{"ctrl+h", "home"})

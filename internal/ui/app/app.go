@@ -201,6 +201,8 @@ type Model struct {
 	devRunners            map[string]*devRunner // keyed by "projectName:envName" — long-lived dev servers
 	cmdRunners            map[string]*cmdRunner // keyed by "projectName:envName" — short-lived commands (deploy, delete, etc.)
 	wranglerVersionRunner *wcfg.Runner          // separate runner for background version fetches
+	vhVersionRunner       *wcfg.Runner          // version history: wrangler versions list (Resources tab)
+	vhDeploymentRunner    *wcfg.Runner          // version history: wrangler deployments list (Resources tab)
 
 	// Monitoring tab model (live tail sessions)
 	monitoring  monitoring.Model
@@ -262,6 +264,9 @@ type Model struct {
 	// Empty means no auto-scan — show the empty-state menu immediately.
 	scanDir string
 
+	// Workers Builds API client (lazy-initialized, raw HTTP)
+	buildsClient *api.BuildsClient
+
 	// program holds the *tea.Program reference for background goroutine → UI
 	// communication (e.g., AI provisioning progress callbacks).
 	program *tea.Program
@@ -317,6 +322,26 @@ func (m Model) Init() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 	return nil
+}
+
+// getBuildsClient lazily creates the Workers Builds API client.
+func (m *Model) getBuildsClient() *api.BuildsClient {
+	if m.buildsClient != nil {
+		return m.buildsClient
+	}
+	accountID := m.registry.ActiveAccountID()
+	var authEmail, authKey, authToken string
+	switch m.cfg.AuthMethod {
+	case config.AuthMethodAPIKey:
+		authEmail = m.cfg.Email
+		authKey = m.cfg.APIKey
+	case config.AuthMethodAPIToken:
+		authToken = m.cfg.APIToken
+	case config.AuthMethodOAuth:
+		authToken = m.cfg.OAuthAccessToken
+	}
+	m.buildsClient = api.NewBuildsClient(accountID, authEmail, authKey, authToken)
+	return m.buildsClient
 }
 
 // initDashboardCmd authenticates and fetches account info.
@@ -559,6 +584,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			schemaCmd := m.loadD1Schema(msg.ResourceID)
 			return m, tea.Batch(schemaCmd, m.detail.SpinnerInit())
 		}
+		// Workers: trigger version history fetch if needed
+		if scriptName := m.detail.NeedsVersionHistory(); scriptName != "" {
+			m.detail.StartVersionHistoryLoad(scriptName)
+			return m, m.fetchVersionHistory(scriptName)
+		}
+		return m, nil
+
+	case detail.VersionHistoryLoadedMsg:
+		m.detail.SetVersionHistory(msg.ScriptName, msg.Entries, msg.Err)
+		// Always try to enrich with builds API data — Workers Builds uses
+		// `wrangler deploy` internally so the version source may say "wrangler"
+		// even for CI-deployed versions.
+		if msg.Err == nil && len(msg.Entries) > 0 {
+			return m, m.fetchBuildsForVersionHistory(msg.ScriptName)
+		}
+		return m, nil
+
+	case detail.BuildsEnrichedMsg:
+		m.detail.SetBuildsEnriched(msg.ScriptName, msg.Entries)
+		return m, nil
+
+	case detail.FetchBuildLogMsg:
+		return m, tea.Batch(m.fetchBuildLog(msg.BuildUUID, msg.Entry), m.detail.SpinnerInit())
+
+	case detail.BuildLogLoadedMsg:
+		m.detail.SetBuildLog(msg.BuildUUID, msg.Lines, msg.Err, msg.Entry)
 		return m, nil
 
 	case detail.EnterInteractiveMsg:

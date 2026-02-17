@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	svc "github.com/oarafat/orangeshell/internal/service"
+	"github.com/oarafat/orangeshell/internal/ui/detail"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
@@ -420,4 +421,189 @@ func (m *Model) openVersionPicker(mode uiwrangler.PickerMode, envName string) te
 		return nil
 	}
 	return m.fetchWranglerVersions(envName)
+}
+
+// --- Version History (Resources tab — Workers detail view) ---
+
+// fetchVersionHistory runs `wrangler versions list --name <script> --json` and
+// `wrangler deployments list --name <script> --json` in parallel, merges the
+// results, and returns a detail.VersionHistoryLoadedMsg.
+func (m *Model) fetchVersionHistory(scriptName string) tea.Cmd {
+	// Cancel any in-flight version history fetches
+	if m.vhVersionRunner != nil {
+		m.vhVersionRunner.Stop()
+	}
+	if m.vhDeploymentRunner != nil {
+		m.vhDeploymentRunner.Stop()
+	}
+
+	accountID := m.registry.ActiveAccountID()
+
+	versionRunner := wcfg.NewRunner()
+	deployRunner := wcfg.NewRunner()
+	m.vhVersionRunner = versionRunner
+	m.vhDeploymentRunner = deployRunner
+
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Start both commands
+		versionCmd := wcfg.Command{
+			Action:    "versions list",
+			ExtraArgs: []string{"--name", scriptName, "--json"},
+			AccountID: accountID,
+		}
+		deployCmd := wcfg.Command{
+			Action:    "deployments list",
+			ExtraArgs: []string{"--name", scriptName, "--json"},
+			AccountID: accountID,
+		}
+
+		if err := versionRunner.Start(ctx, versionCmd); err != nil {
+			return detail.VersionHistoryLoadedMsg{
+				ScriptName: scriptName,
+				Err:        fmt.Errorf("failed to start versions list: %w", err),
+			}
+		}
+		if err := deployRunner.Start(ctx, deployCmd); err != nil {
+			versionRunner.Stop()
+			return detail.VersionHistoryLoadedMsg{
+				ScriptName: scriptName,
+				Err:        fmt.Errorf("failed to start deployments list: %w", err),
+			}
+		}
+
+		// Collect stdout from both runners in parallel via goroutines
+		type result struct {
+			json string
+			err  error
+		}
+		versionCh := make(chan result, 1)
+		deployCh := make(chan result, 1)
+
+		collectJSON := func(r *wcfg.Runner, ch chan<- result, label string) {
+			var buf strings.Builder
+			for line := range r.LinesCh() {
+				if !line.IsStderr {
+					buf.WriteString(line.Text)
+					buf.WriteByte('\n')
+				}
+			}
+			res := <-r.DoneCh()
+			if res.Err != nil && res.ExitCode != 0 {
+				ch <- result{err: fmt.Errorf("wrangler %s failed (exit %d)", label, res.ExitCode)}
+				return
+			}
+			ch <- result{json: buf.String()}
+		}
+
+		go collectJSON(versionRunner, versionCh, "versions list")
+		go collectJSON(deployRunner, deployCh, "deployments list")
+
+		vResult := <-versionCh
+		dResult := <-deployCh
+
+		if vResult.err != nil {
+			return detail.VersionHistoryLoadedMsg{ScriptName: scriptName, Err: vResult.err}
+		}
+		if dResult.err != nil {
+			return detail.VersionHistoryLoadedMsg{ScriptName: scriptName, Err: dResult.err}
+		}
+
+		// Parse
+		versions, err := wcfg.ParseVersionsJSON([]byte(vResult.json))
+		if err != nil {
+			return detail.VersionHistoryLoadedMsg{ScriptName: scriptName, Err: fmt.Errorf("parse versions: %w", err)}
+		}
+		deployments, err := wcfg.ParseDeploymentsJSON([]byte(dResult.json))
+		if err != nil {
+			return detail.VersionHistoryLoadedMsg{ScriptName: scriptName, Err: fmt.Errorf("parse deployments: %w", err)}
+		}
+
+		// Merge
+		entries := wcfg.BuildVersionHistory(versions, deployments)
+
+		return detail.VersionHistoryLoadedMsg{
+			ScriptName: scriptName,
+			Entries:    entries,
+		}
+	}
+}
+
+// fetchBuildsForVersionHistory uses the Workers Builds API to fetch build
+// metadata for CI-deployed versions and enriches the version history entries.
+func (m *Model) fetchBuildsForVersionHistory(scriptName string) tea.Cmd {
+	client := m.getBuildsClient()
+	entries := m.detail.VersionHistory()
+
+	// Send ALL version IDs — we can't know which have builds from the
+	// wrangler source alone (Workers Builds uses wrangler deploy internally).
+	versionIDs := make([]string, len(entries))
+	for i, e := range entries {
+		versionIDs[i] = e.VersionID
+	}
+
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		buildsByVersion, err := client.GetBuildsByVersionIDs(ctx, versionIDs)
+		if err != nil {
+			// Non-fatal: version history still shows, just without git metadata.
+			// Don't propagate the error — the table is already visible.
+			return detail.BuildsEnrichedMsg{ScriptName: scriptName, Entries: entries}
+		}
+
+		// Convert api.BuildResult → wrangler.BuildInfo
+		builds := make(map[string]wcfg.BuildInfo)
+		for versionID, br := range buildsByVersion {
+			builds[versionID] = wcfg.BuildInfo{
+				BuildUUID:     br.BuildUUID,
+				BuildOutcome:  br.BuildOutcome,
+				Branch:        br.BuildTriggerMetadata.Branch,
+				CommitHash:    br.BuildTriggerMetadata.CommitHash,
+				CommitMessage: br.BuildTriggerMetadata.CommitMessage,
+				Author:        br.BuildTriggerMetadata.Author,
+				RepoName:      br.BuildTriggerMetadata.RepoName,
+				ProviderType:  br.BuildTriggerMetadata.ProviderType,
+			}
+		}
+
+		// Enrich entries in place
+		wcfg.EnrichWithBuilds(entries, builds)
+
+		return detail.BuildsEnrichedMsg{
+			ScriptName: scriptName,
+			Entries:    entries,
+		}
+	}
+}
+
+// fetchBuildLog fetches the build log for a specific build UUID.
+func (m *Model) fetchBuildLog(buildUUID string, entry wcfg.VersionHistoryEntry) tea.Cmd {
+	client := m.getBuildsClient()
+
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		logLines, err := client.GetBuildLog(ctx, buildUUID)
+		if err != nil {
+			return detail.BuildLogLoadedMsg{
+				BuildUUID: buildUUID,
+				Err:       err,
+				Entry:     entry,
+			}
+		}
+
+		// Convert api.LogLine → plain strings
+		lines := make([]string, len(logLines))
+		for i, l := range logLines {
+			lines[i] = l.Message
+		}
+
+		return detail.BuildLogLoadedMsg{
+			BuildUUID: buildUUID,
+			Lines:     lines,
+			Entry:     entry,
+		}
+	}
 }

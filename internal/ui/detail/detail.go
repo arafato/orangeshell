@@ -966,7 +966,7 @@ func (m Model) SpinnerInit() tea.Cmd {
 
 // IsLoading returns whether the detail panel is in a loading state (spinner should run).
 func (m Model) IsLoading() bool {
-	return m.loading || m.detailLoading || m.d1SchemaLoading || m.d1Querying
+	return m.loading || m.detailLoading || m.d1SchemaLoading || m.d1Querying || m.versionHistoryLoading || m.buildLogLoading
 }
 
 // UpdateSpinner forwards a message to the embedded spinner and returns the updated model + cmd.

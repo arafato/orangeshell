@@ -2146,6 +2146,8 @@ func truncateRunes(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
+	// Collapse newlines to spaces (for multi-line commit messages)
+	s = strings.ReplaceAll(s, "\n", " ")
 	runeCount := utf8.RuneCountInString(s)
 	if runeCount <= maxLen {
 		return s
@@ -2156,6 +2158,16 @@ func truncateRunes(s string, maxLen int) string {
 	}
 	runes := []rune(s)
 	return string(runes[:maxLen-3]) + "..."
+}
+
+// padRight pads a plain string to exactly width runes using spaces.
+// Use this BEFORE applying ANSI styles to ensure correct column alignment.
+func padRight(s string, width int) string {
+	n := utf8.RuneCountInString(s)
+	if n >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-n)
 }
 
 // --- Version History Rendering (Workers only) ---
@@ -2264,28 +2276,26 @@ func (m Model) renderVersionHistory(width int) []string {
 				))
 			}
 		} else if entry.IsLive {
-			// Live row — green text
-			row = fmt.Sprintf("%s%-*s %-*s %-*s %-*s %-*s",
-				greenPipe+" ",
-				colVersion, lipgloss.NewStyle().Foreground(theme.ColorGreen).Render(versionStr),
-				colSource, lipgloss.NewStyle().Foreground(theme.ColorGreen).Render(sourceStr),
-				colMsg, lipgloss.NewStyle().Foreground(theme.ColorGreen).Render(msgStr),
-				colAuthor, lipgloss.NewStyle().Foreground(theme.ColorGreen).Render(authorStr),
-				colWhen, lipgloss.NewStyle().Foreground(theme.ColorGreen).Render(whenStr),
-			)
+			// Live row — green text, pad before styling
+			greenStyle := lipgloss.NewStyle().Foreground(theme.ColorGreen)
+			row = greenPipe + " " +
+				greenStyle.Render(padRight(versionStr, colVersion)) + " " +
+				greenStyle.Render(padRight(sourceStr, colSource)) + " " +
+				greenStyle.Render(padRight(msgStr, colMsg)) + " " +
+				greenStyle.Render(padRight(authorStr, colAuthor)) + " " +
+				greenStyle.Render(whenStr)
 		} else {
-			// Source-dependent styling
+			// Normal row — pad before styling to preserve alignment
 			sourceStyle := lipgloss.NewStyle().Foreground(theme.ColorGray)
 			if entry.RawSource == "wrangler" {
 				sourceStyle = lipgloss.NewStyle().Foreground(theme.ColorDarkGray)
 			}
-			row = fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s",
-				colVersion, theme.ValueStyle.Render(versionStr),
-				colSource, sourceStyle.Render(sourceStr),
-				colMsg, theme.DimStyle.Render(msgStr),
-				colAuthor, theme.DimStyle.Render(authorStr),
-				colWhen, theme.DimStyle.Render(whenStr),
-			)
+			row = "  " +
+				theme.ValueStyle.Render(padRight(versionStr, colVersion)) + " " +
+				sourceStyle.Render(padRight(sourceStr, colSource)) + " " +
+				theme.DimStyle.Render(padRight(msgStr, colMsg)) + " " +
+				theme.DimStyle.Render(padRight(authorStr, colAuthor)) + " " +
+				theme.DimStyle.Render(whenStr)
 		}
 
 		lines = append(lines, row)

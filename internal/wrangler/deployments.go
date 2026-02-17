@@ -186,7 +186,9 @@ func (e VersionHistoryEntry) DisplayAuthor() string {
 // history suitable for display. Versions are the primary list; deployment
 // data enriches each version with deployment context and live status.
 func BuildVersionHistory(versions []Version, deployments []Deployment) []VersionHistoryEntry {
-	// Build lookup: version_id -> latest deployment referencing it
+	// Build lookup: version_id -> latest deployment referencing it.
+	// Deployments from wrangler are in chronological order (oldest first),
+	// so later entries overwrite earlier ones and the last write wins.
 	type deplInfo struct {
 		deploymentID string
 		source       string
@@ -196,31 +198,27 @@ func BuildVersionHistory(versions []Version, deployments []Deployment) []Version
 	deplByVersion := make(map[string]deplInfo)
 	for _, d := range deployments {
 		for _, v := range d.Versions {
-			// Later deployments overwrite earlier ones, so the last one wins.
-			// Since deployments are newest-first, we only set if not already present.
-			if _, ok := deplByVersion[v.VersionID]; !ok {
-				deplByVersion[v.VersionID] = deplInfo{
-					deploymentID: d.ID,
-					source:       d.Source,
-					message:      d.Message,
-					createdOn:    d.CreatedOn,
-				}
+			deplByVersion[v.VersionID] = deplInfo{
+				deploymentID: d.ID,
+				source:       d.Source,
+				message:      d.Message,
+				createdOn:    d.CreatedOn,
 			}
 		}
 	}
 
-	// Determine which version(s) are currently live (from the most recent deployment)
+	// Determine which version(s) are currently live (from the most recent deployment).
+	// Deployments are chronological (oldest first), so the last entry is the current one.
 	liveVersions := make(map[string]float64)
 	if len(deployments) > 0 {
-		latest := deployments[len(deployments)-1] // newest is last? No — check order
-		// Deployments from wrangler are newest-first based on the sample data
-		latest = deployments[0]
+		latest := deployments[len(deployments)-1]
 		for _, v := range latest.Versions {
 			liveVersions[v.VersionID] = v.Percentage
 		}
 	}
 
-	// Versions come newest-first from wrangler
+	// Versions from wrangler are in chronological order (oldest first).
+	// Build entries in that order, then reverse so newest appears at the top.
 	entries := make([]VersionHistoryEntry, 0, len(versions))
 	for _, v := range versions {
 		source := v.Source
@@ -258,6 +256,11 @@ func BuildVersionHistory(versions []Version, deployments []Deployment) []Version
 			Percentage:   pct,
 			HasBuildLog:  false, // set by EnrichWithBuilds after querying the Builds API
 		})
+	}
+
+	// Reverse so newest is first
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
 	}
 
 	return entries

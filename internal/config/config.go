@@ -52,6 +52,9 @@ type Config struct {
 	OAuthExpiresAt    time.Time `toml:"oauth_expires_at,omitempty"`
 	OAuthScopes       []string  `toml:"oauth_scopes,omitempty"`
 
+	// Builds API token (needed when primary auth lacks Workers CI Read scope, e.g. OAuth)
+	BuildsAPIToken string `toml:"builds_api_token,omitempty"`
+
 	// AI settings
 	AIProvider     AIProvider    `toml:"ai_provider,omitempty"`
 	AIModelPreset  AIModelPreset `toml:"ai_model_preset,omitempty"`

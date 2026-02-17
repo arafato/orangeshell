@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/oarafat/orangeshell/internal/api"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
@@ -548,8 +549,11 @@ func (m *Model) fetchBuildsForVersionHistory(scriptName string) tea.Cmd {
 
 		buildsByVersion, err := client.GetBuildsByVersionIDs(ctx, versionIDs)
 		if err != nil {
-			// Non-fatal: version history still shows, just without git metadata.
-			// Don't propagate the error — the table is already visible.
+			// Auth error (401/403) — signal the app to prompt for a builds token.
+			if api.IsAuthError(err) {
+				return detail.BuildsAuthFailedMsg{ScriptName: scriptName}
+			}
+			// Other errors: non-fatal, return unenriched entries.
 			return detail.BuildsEnrichedMsg{ScriptName: scriptName, Entries: entries}
 		}
 

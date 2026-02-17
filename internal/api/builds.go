@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,11 +57,32 @@ func (b *BuildsClient) doRequest(ctx context.Context, method, path string) ([]by
 		return nil, fmt.Errorf("reading builds API response: %w", err)
 	}
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, &AuthError{StatusCode: resp.StatusCode, Body: truncateBody(body, 200)}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("builds API returned %d: %s", resp.StatusCode, truncateBody(body, 200))
 	}
 
 	return body, nil
+}
+
+// AuthError is returned when the Builds API responds with 401 or 403,
+// indicating that the credentials lack the required Workers CI Read scope.
+type AuthError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *AuthError) Error() string {
+	return fmt.Sprintf("builds API authentication failed (HTTP %d): %s", e.StatusCode, e.Body)
+}
+
+// IsAuthError returns true if err (or any wrapped error) is an *AuthError.
+func IsAuthError(err error) bool {
+	var ae *AuthError
+	return errors.As(err, &ae)
 }
 
 func truncateBody(b []byte, maxLen int) string {
@@ -131,9 +153,32 @@ type BuildTriggerMeta struct {
 }
 
 // LogLine is a single line in the build log.
+// The API returns lines as 2-element arrays: [timestamp_millis, message].
 type LogLine struct {
-	Timestamp time.Time `json:"timestamp"`
-	Message   string    `json:"message"`
+	Timestamp time.Time
+	Message   string
+}
+
+// UnmarshalJSON handles the [timestamp_millis, "message"] array format.
+func (l *LogLine) UnmarshalJSON(data []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw) != 2 {
+		return fmt.Errorf("expected 2-element array, got %d", len(raw))
+	}
+
+	var millis int64
+	if err := json.Unmarshal(raw[0], &millis); err != nil {
+		return fmt.Errorf("parsing timestamp: %w", err)
+	}
+	l.Timestamp = time.UnixMilli(millis)
+
+	if err := json.Unmarshal(raw[1], &l.Message); err != nil {
+		return fmt.Errorf("parsing message: %w", err)
+	}
+	return nil
 }
 
 // --- Public methods ---
@@ -221,4 +266,21 @@ func (b *BuildsClient) GetBuildLog(ctx context.Context, buildUUID string) ([]Log
 	}
 
 	return allLines, nil
+}
+
+// VerifyAuth checks whether the client's credentials are accepted by the
+// Builds API. It calls a lightweight endpoint and returns nil if auth succeeds,
+// or an *AuthError if the token lacks the required Workers CI Read scope.
+func (b *BuildsClient) VerifyAuth(ctx context.Context) error {
+	// Use the builds-by-version endpoint with an empty version list.
+	// This returns an empty result on success, or 401/403 on auth failure.
+	_, err := b.doRequest(ctx, http.MethodGet, "builds/builds?version_ids=_")
+	if err != nil {
+		if IsAuthError(err) {
+			return err
+		}
+		// Any other error (e.g. 400, 404) means auth itself succeeded.
+		return nil
+	}
+	return nil
 }

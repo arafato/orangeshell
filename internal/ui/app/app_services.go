@@ -222,7 +222,7 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.wrangler.CloseVersionPicker()
 
 	m.cfg.AccountID = accountID
-	m.buildsClient = nil // invalidate — new account needs new client
+	m.buildsTokenDeclined = false // allow re-prompting for new account
 	m.registerServices(accountID)
 
 	// Update search items with whatever is cached for this account

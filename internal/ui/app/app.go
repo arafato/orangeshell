@@ -19,6 +19,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	uiai "github.com/oarafat/orangeshell/internal/ui/ai"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
+	"github.com/oarafat/orangeshell/internal/ui/buildstokenpopup"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/deployallpopup"
@@ -237,6 +238,11 @@ type Model struct {
 	showRemoveProjectPopup bool
 	removeProjectPopup     removeprojectpopup.Model
 
+	// Builds API token popup overlay
+	showBuildsTokenPopup bool
+	buildsTokenPopup     buildstokenpopup.Model
+	buildsTokenDeclined  bool // suppresses repeated prompts within a session
+
 	// Configuration tab (unified model)
 	configView uiconfig.Model
 
@@ -263,9 +269,6 @@ type Model struct {
 	// scanDir is the directory to scan for wrangler projects (from CLI arg).
 	// Empty means no auto-scan — show the empty-state menu immediately.
 	scanDir string
-
-	// Workers Builds API client (lazy-initialized, raw HTTP)
-	buildsClient *api.BuildsClient
 
 	// program holds the *tea.Program reference for background goroutine → UI
 	// communication (e.g., AI provisioning progress callbacks).
@@ -324,12 +327,18 @@ func (m Model) Init() tea.Cmd {
 	return nil
 }
 
-// getBuildsClient lazily creates the Workers Builds API client.
+// getBuildsClient creates the Workers Builds API client.
+// Prefers the dedicated BuildsAPIToken (which has Workers CI Read scope),
+// falling back to the primary auth credentials.
 func (m *Model) getBuildsClient() *api.BuildsClient {
-	if m.buildsClient != nil {
-		return m.buildsClient
-	}
 	accountID := m.registry.ActiveAccountID()
+
+	// 1. Prefer dedicated builds token (always has the right scope)
+	if m.cfg.BuildsAPIToken != "" {
+		return api.NewBuildsClient(accountID, "", "", m.cfg.BuildsAPIToken)
+	}
+
+	// 2. Fall back to primary credentials
 	var authEmail, authKey, authToken string
 	switch m.cfg.AuthMethod {
 	case config.AuthMethodAPIKey:
@@ -340,8 +349,8 @@ func (m *Model) getBuildsClient() *api.BuildsClient {
 	case config.AuthMethodOAuth:
 		authToken = m.cfg.OAuthAccessToken
 	}
-	m.buildsClient = api.NewBuildsClient(accountID, authEmail, authKey, authToken)
-	return m.buildsClient
+
+	return api.NewBuildsClient(accountID, authEmail, authKey, authToken)
 }
 
 // initDashboardCmd authenticates and fetches account info.
@@ -391,6 +400,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(*Model).handleTriggersMsg,
 		(*Model).handleConfigViewMsg,
 		(*Model).handleDeployAllMsg,
+		(*Model).handleBuildsTokenPopupMsg,
 	}
 	for _, h := range handlers {
 		if result, cmd, handled := h(&m, msg); handled {
@@ -603,6 +613,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case detail.BuildsEnrichedMsg:
 		m.detail.SetBuildsEnriched(msg.ScriptName, msg.Entries)
+		return m, nil
+
+	case detail.BuildsAuthFailedMsg:
+		// Builds API returned 401/403 — prompt for a dedicated token
+		if !m.buildsTokenDeclined {
+			m.showBuildsTokenPopup = true
+			m.buildsTokenPopup = buildstokenpopup.New(m.registry.ActiveAccountID())
+			return m, m.buildsTokenPopup.Init()
+		}
 		return m, nil
 
 	case detail.FetchBuildLogMsg:
@@ -1364,6 +1383,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If action popup is active, route everything there
 	if m.showActions {
 		return m.updateActions(msg)
+	}
+
+	// If builds token popup is active, route everything there
+	if m.showBuildsTokenPopup {
+		return m.updateBuildsTokenPopup(msg)
 	}
 
 	// If envvars view is active (legacy, opened from Operations tab), route key events there

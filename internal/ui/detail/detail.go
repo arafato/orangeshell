@@ -192,6 +192,12 @@ type (
 		Err       error
 		Entry     wrangler.VersionHistoryEntry
 	}
+
+	// BuildsAuthFailedMsg indicates that the Builds API returned 401/403,
+	// meaning the current credentials lack the Workers CI Read scope.
+	BuildsAuthFailedMsg struct {
+		ScriptName string
+	}
 )
 
 // Model represents the Resources tab — a dual-pane layout with a service dropdown,
@@ -745,6 +751,11 @@ func (m Model) VersionHistory() []wrangler.VersionHistoryEntry {
 	return m.versionHistory
 }
 
+// VersionHistoryScript returns the script name for the current version history.
+func (m Model) VersionHistoryScript() string {
+	return m.versionHistoryScript
+}
+
 // HasCIEntries returns true if any version history entry has HasBuildLog set.
 func (m Model) HasCIEntries() bool {
 	for _, e := range m.versionHistory {
@@ -753,11 +764,6 @@ func (m Model) HasCIEntries() bool {
 		}
 	}
 	return false
-}
-
-// VersionHistoryScript returns the script name version history was fetched for.
-func (m Model) VersionHistoryScript() string {
-	return m.versionHistoryScript
 }
 
 // SetBuildLog stores the fetched build log data.

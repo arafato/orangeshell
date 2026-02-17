@@ -597,7 +597,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Workers: trigger version history fetch if needed
 		if scriptName := m.detail.NeedsVersionHistory(); scriptName != "" {
 			m.detail.StartVersionHistoryLoad(scriptName)
-			return m, m.fetchVersionHistory(scriptName)
+			return m, tea.Batch(m.fetchVersionHistory(scriptName), m.detail.SpinnerInit())
 		}
 		return m, nil
 

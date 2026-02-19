@@ -63,7 +63,8 @@ orangeshell/
     │   └── oauth.go                 #   OAuth PKCE flow with token refresh
     ├── api/
     │   ├── client.go                # Cloudflare SDK v6 client wrapper
-    │   └── builds.go                # Workers Builds API (raw HTTP, not SDK)
+    │   ├── builds.go                # Workers Builds API (raw HTTP, not SDK)
+    │   └── token.go                 # Scoped API token auto-provisioning
     ├── service/
     │   ├── service.go               # Service interface, Registry, caching, types
     │   ├── workers.go               # WorkersService: list/get/settings/bindings
@@ -150,7 +151,6 @@ orangeshell/
         ├── projectpopup/projectpopup.go     # Create project wizard
         ├── removeprojectpopup/              # Remove project popup
         ├── deployallpopup/deployallpopup.go # Monorepo batch deploy
-        ├── buildstokenpopup/buildstokenpopup.go # Builds API token prompt
         └── confirmbox/confirmbox.go # Generic yes/no confirm component
 ```
 
@@ -269,11 +269,12 @@ type Config struct {
     Email, APIKey, APIToken string
     OAuthAccessToken, OAuthRefreshToken string
     OAuthExpiresAt time.Time
-    BuildsAPIToken string        // Dedicated token for Workers Builds API
+    APITokenFallback string      // Scoped token for restricted APIs (Access, Builds)
     AIProvider     AIProvider    // "workers_ai"
     AIModelPreset  AIModelPreset // "fast" | "balanced" | "deep"
     AIWorkerURL    string
     AIWorkerSecret string
+    envOverrides   map[string]bool // tracks env-var-sourced fields (never serialized)
 }
 ```
 
@@ -452,7 +453,7 @@ Located in Resources tab → Worker detail view.
 4. `fetchBuildsForVersionHistory()` enriches with Workers Builds API (git metadata)
 5. If Builds API returns 403 → `BuildsAuthFailedMsg` → token popup
 
-**Workers Builds API** requires `Workers CI Read` scope, which cannot be created from the Cloudflare dashboard UI and cannot be granted via OAuth. Only the Global API Key or a programmatically-created API Token works. The `buildstokenpopup` guides users through creating a token via curl.
+**Workers Builds API** requires `Workers CI Read` scope, which cannot be created from the Cloudflare dashboard UI and cannot be granted via OAuth. Only the Global API Key or a programmatically-created API Token works. The `api_token_fallback` config field (auto-provisioned or manually set) provides these credentials.
 
 **Display**: Table with short ID, relative time, source, message, author. Green `┃` marks the live deployment. Enter on CI-deployed version opens build log overlay.
 
@@ -535,7 +536,7 @@ go build -o orangeshell .
 - Live version marker: green fat pipe `┃`
 - Version history in Resources tab → Worker detail view (not a new tab)
 - Data fetch: wrangler CLI for versions/deployments; raw HTTP for Workers Builds API
-- Builds API token popup: show curl command with clickable copy button
+- Builds API token popup: removed — replaced by auto-provisioning + `(restricted)` badge
 
 ---
 
@@ -612,6 +613,18 @@ go build -o orangeshell .
 30. **Restricted mode badge communicates degradation**: When fallback credentials are unavailable and auto-provisioning can't run (no env vars), showing a dimmed `(restricted)` badge in the header next to the auth method communicates the limitation without interrupting the workflow. Much better than error popups or toasts.
 
 31. **Fallback auth chain pattern**: For restricted APIs, the auth priority chain should be: (1) dedicated fallback token from config, (2) primary auth method if it has permissions (API Key always does, API Token might), (3) auto-provisioned token via env vars, (4) silent degradation. This pattern applies to both Access API and Workers Builds API and can be extended to future restricted APIs.
+
+32. **Never persist env-var-sourced secrets to disk**: `Config.Save()` must strip fields that came from environment variables (`CLOUDFLARE_API_KEY`, `CLOUDFLARE_EMAIL`, etc.) before encoding to TOML. Track env-sourced fields with a `toml:"-"` map in `Load()`, then temporarily clear them in `Save()` and restore after encoding. For OAuth auth, also strip API Key + Email unconditionally — they're runtime-only fallback credentials and should never appear in the config file alongside OAuth tokens.
+
+33. **Pre-fetch Workers list on dashboard init for early index builds**: The binding index and access index are only built after Workers are listed. If Workers aren't fetched until the user visits the Resources tab, badges on the Operations tab (EnvBoxes, ProjectBoxes) never appear. Dispatching `loadServiceResources("Workers")` from `initDashboardMsg` ensures both indexes are built in the background immediately, so badges are ready before the user even sees the Operations tab.
+
+34. **Monorepo drill-in recreates envboxes from scratch**: `drillIntoProject()` creates fresh `EnvBox` instances, copying deployment data and subdomain from the `ProjectBox` but losing any badge state (Access, Dev) that was set on the project-level. Always copy badge fields (`AccessProtected`, dev badges) from the parent `ProjectBox` into the child `EnvBox` during drill-in, same pattern as deployment data.
+
+### Bubble Tea Input Handling
+
+35. **Bracketed paste via `msg.Paste`**: When the user pastes text (Cmd+V / Ctrl+V), Bubble Tea delivers it as a single `tea.KeyMsg` with `Paste: true` and all pasted characters in `Runes`. The `String()` method wraps pasted text in `[...]`, so `len(msg.String()) == 1` will never match a paste. Custom text input handlers must check `msg.Paste` first and iterate `msg.Runes` to append all characters. For single-character typing, check `len(msg.Runes) == 1` (not `len(msg.String()) == 1`) to correctly handle multi-byte UTF-8.
+
+36. **Gate interactive UI elements on focus state**: Cursors, selection highlights, and other interactive indicators in sub-panes should only render when that pane has focus (`m.focus == FocusDetail`). Showing a cursor highlight unconditionally (e.g., version history table always showing a purple row) confuses users about which pane is active. The focus state already exists for border color switching — reuse it for cursor visibility.
 
 ## General Design Considerations
 ### Design-Patterns

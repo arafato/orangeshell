@@ -195,7 +195,7 @@ func (m Model) renderVersionHistory(width int) []string {
 			colWhen, whenStr,
 		)
 
-		if i == m.versionHistoryCursor {
+		if i == m.versionHistoryCursor && m.focus == FocusDetail {
 			// Highlighted row
 			style := lipgloss.NewStyle().Background(lipgloss.Color("#333355")).Foreground(lipgloss.Color("#FAFAFA"))
 			if entry.IsLive {

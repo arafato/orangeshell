@@ -250,6 +250,10 @@ func (m Model) drillIntoProject(idx int) (Model, tea.Cmd) {
 			if entry.box.Subdomain != "" {
 				m.envBoxes[i].Subdomain = entry.box.Subdomain
 			}
+			// Copy Access protection badge from the project box
+			if entry.box.AccessBadges[name] {
+				m.envBoxes[i].AccessProtected = true
+			}
 		}
 	} else {
 		m.envNames = nil

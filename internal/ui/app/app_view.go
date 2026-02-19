@@ -139,18 +139,6 @@ func (m Model) renderResourcesTab() string {
 
 // renderConfigurationTab renders the Configuration tab content.
 func (m Model) renderConfigurationTab() string {
-	contentHeight := m.height - 1 - tabBarHeight - 1 // header + tab bar + help bar
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
-	// Legacy views (opened from Operations tab via ShowEnvVarsMsg/ShowTriggersMsg)
-	switch m.viewState {
-	case ViewEnvVars:
-		return m.envvarsView.View(m.width, contentHeight)
-	case ViewTriggers:
-		return m.triggersView.View(m.width, contentHeight)
-	}
-	// Unified configuration tab
 	return m.configView.View()
 }
 
@@ -378,24 +366,6 @@ func (m Model) renderResourcesHelp() []helpEntry {
 
 // renderConfigurationHelp returns the context-sensitive help entries for the Configuration tab.
 func (m Model) renderConfigurationHelp() []helpEntry {
-	// Legacy views
-	switch m.viewState {
-	case ViewEnvVars:
-		return []helpEntry{
-			{"esc", "back"},
-			{"enter", "edit/add"},
-			{"d", "delete"},
-			{"ctrl+h", "home"},
-		}
-	case ViewTriggers:
-		return []helpEntry{
-			{"esc", "back"},
-			{"a", "add"},
-			{"d", "delete"},
-			{"ctrl+h", "home"},
-		}
-	}
-	// Unified config tab — delegate to config model
 	cfgHelp := m.configView.HelpEntries()
 	entries := make([]helpEntry, len(cfgHelp))
 	for i, h := range cfgHelp {

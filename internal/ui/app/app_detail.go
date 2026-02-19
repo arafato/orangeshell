@@ -1,0 +1,325 @@
+package app
+
+import (
+	"time"
+
+	"github.com/atotto/clipboard"
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/oarafat/orangeshell/internal/ui/buildstokenpopup"
+	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
+	"github.com/oarafat/orangeshell/internal/ui/detail"
+	"github.com/oarafat/orangeshell/internal/ui/tabbar"
+)
+
+// handleDetailMsg handles all detail/resource panel messages.
+// Returns (model, cmd, handled).
+func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
+	switch msg := msg.(type) {
+	// --- Service data messages ---
+
+	case detail.ResourcesLoadedMsg:
+		if m.isStaleAccount(msg.AccountID) {
+			return *m, nil, true
+		}
+		// Cache the result regardless of which service is displayed
+		if msg.Err == nil && msg.Resources != nil {
+			m.registry.SetCache(msg.ServiceName, msg.Resources)
+		}
+		// When Workers list loads, build the binding index in the background.
+		// When a non-Workers service loads and no binding index exists yet,
+		// trigger a Workers fetch + index build so managed detection works.
+		var indexCmd tea.Cmd
+		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
+			indexCmd = m.buildBindingIndexCmd()
+		} else if msg.ServiceName != "Workers" && msg.Err == nil && m.registry.GetBindingIndex() == nil {
+			// Binding index not yet available — kick off Workers fetch + build
+			if m.registry.GetCache("Workers") == nil {
+				indexCmd = m.loadServiceResources("Workers")
+			} else {
+				indexCmd = m.buildBindingIndexCmd()
+			}
+		}
+		// Staleness check: ignore if the user has already switched services
+		if msg.ServiceName != m.detail.Service() {
+			// Still update search items even if not the active service
+			if msg.Err == nil {
+				m.search.SetItems(m.registry.AllSearchItems())
+			}
+			if indexCmd != nil {
+				return *m, indexCmd, true
+			}
+			return *m, nil, true
+		}
+		previewCmd := m.detail.SetResources(msg.Resources, msg.Err, msg.NotIntegrated)
+		// Update managed resource highlighting
+		m.updateManagedResources()
+		// Sync viewState: auto-preview switches detail model to viewDetail
+		if m.detail.InDetailView() {
+			m.viewState = ViewServiceDetail
+		}
+		// Update search items after loading
+		if msg.Err == nil {
+			m.search.SetItems(m.registry.AllSearchItems())
+		}
+		var cmds []tea.Cmd
+		if previewCmd != nil {
+			cmds = append(cmds, previewCmd, m.detail.SpinnerInit())
+		}
+		if indexCmd != nil {
+			cmds = append(cmds, indexCmd)
+		}
+		if len(cmds) > 0 {
+			return *m, tea.Batch(cmds...), true
+		}
+		return *m, nil, true
+
+	case detail.SelectServiceMsg:
+		// User selected a service from the dropdown — navigate to it
+		cmd := m.navigateToService(msg.ServiceName)
+		return *m, cmd, true
+
+	case detail.LoadResourcesMsg:
+		// Don't attempt to load if auth hasn't completed yet — services aren't
+		// registered. The initDashboardMsg handler will trigger the load once
+		// the client is ready.
+		if m.client == nil {
+			return *m, nil, true
+		}
+		return *m, m.loadServiceResources(msg.ServiceName), true
+
+	case detail.LoadDetailMsg:
+		if msg.ServiceName == "Env Variables" {
+			m.detail.BackToList()
+			return *m, m.navigateToEnvVars(msg.ResourceID), true
+		}
+		if msg.ServiceName == "Triggers" {
+			m.detail.BackToList()
+			return *m, m.navigateToTriggers(msg.ResourceID), true
+		}
+		m.viewState = ViewServiceDetail
+		return *m, tea.Batch(m.loadResourceDetail(msg.ServiceName, msg.ResourceID), m.detail.SpinnerInit()), true
+
+	case detail.DetailLoadedMsg:
+		// Staleness check: ignore if the user has switched services or resources
+		if msg.ServiceName != m.detail.Service() {
+			return *m, nil, true
+		}
+		// Enrich non-Workers detail with bound worker references
+		if msg.Err == nil && msg.Detail != nil && msg.ServiceName != "Workers" {
+			m.enrichDetailWithBoundWorkers(msg.Detail, msg.ServiceName, msg.ResourceID)
+		}
+		m.detail.SetDetail(msg.Detail, msg.Err)
+		// D1 console initialization is deferred to interactive mode (EnterInteractiveMsg).
+		// However, load the schema in preview mode so it's visible in the read-only detail view.
+		if msg.Err == nil && msg.ServiceName == "D1" && msg.Detail != nil {
+			m.detail.PreviewD1Schema(msg.ResourceID)
+			schemaCmd := m.loadD1Schema(msg.ResourceID)
+			return *m, tea.Batch(schemaCmd, m.detail.SpinnerInit()), true
+		}
+		// Workers: trigger version history fetch if needed
+		if scriptName := m.detail.NeedsVersionHistory(); scriptName != "" {
+			m.detail.StartVersionHistoryLoad(scriptName)
+			return *m, tea.Batch(m.fetchVersionHistory(scriptName), m.detail.SpinnerInit()), true
+		}
+		return *m, nil, true
+
+	case detail.BackgroundRefreshMsg:
+		if m.isStaleAccount(msg.AccountID) {
+			return *m, nil, true
+		}
+		// Cache the refreshed result
+		if msg.Err == nil && msg.Resources != nil {
+			m.registry.SetCache(msg.ServiceName, msg.Resources)
+		}
+		// Update the detail panel if it's showing this service (in list mode)
+		if msg.Err == nil && msg.ServiceName == m.detail.Service() {
+			m.detail.RefreshResources(msg.Resources)
+			m.updateManagedResources()
+		}
+		// Always update search items and decrement fetching counter
+		m.search.SetItems(m.registry.AllSearchItems())
+		if m.showSearch {
+			m.search.DecrementFetching()
+		}
+		// Rebuild binding index when Workers list is refreshed
+		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
+			return *m, m.buildBindingIndexCmd(), true
+		}
+		return *m, nil, true
+
+	// --- Version history messages ---
+
+	case detail.VersionHistoryLoadedMsg:
+		m.detail.SetVersionHistory(msg.ScriptName, msg.Entries, msg.Err)
+		// Always try to enrich with builds API data — Workers Builds uses
+		// `wrangler deploy` internally so the version source may say "wrangler"
+		// even for CI-deployed versions.
+		if msg.Err == nil && len(msg.Entries) > 0 {
+			return *m, m.fetchBuildsForVersionHistory(msg.ScriptName), true
+		}
+		return *m, nil, true
+
+	case detail.BuildsEnrichedMsg:
+		m.detail.SetBuildsEnriched(msg.ScriptName, msg.Entries)
+		return *m, nil, true
+
+	case detail.BuildsAuthFailedMsg:
+		// Builds API returned 401/403 — prompt for a dedicated token
+		if !m.buildsTokenDeclined {
+			m.showBuildsTokenPopup = true
+			m.buildsTokenPopup = buildstokenpopup.New(m.registry.ActiveAccountID())
+			return *m, m.buildsTokenPopup.Init(), true
+		}
+		return *m, nil, true
+
+	case detail.FetchBuildLogMsg:
+		return *m, tea.Batch(m.fetchBuildLog(msg.BuildUUID, msg.Entry), m.detail.SpinnerInit()), true
+
+	case detail.BuildLogLoadedMsg:
+		m.detail.SetBuildLog(msg.BuildUUID, msg.Lines, msg.Err, msg.Entry)
+		return *m, nil, true
+
+	// --- Interactive mode messages ---
+
+	case detail.EnterInteractiveMsg:
+		// User entered interactive mode on a ReadWrite service — initialize interactive features.
+		if msg.Mode == detail.ReadWrite && msg.ServiceName == "D1" && msg.ResourceID != "" {
+			// Only init D1 console if not already active for this database
+			if !m.detail.D1Active() || m.detail.D1DatabaseID() != msg.ResourceID {
+				inputCmd := m.detail.InitD1Console(msg.ResourceID)
+				// InitD1Console preserves schema if already loaded for this DB;
+				// only re-fetch if schema is not yet available.
+				cmds := []tea.Cmd{inputCmd}
+				if m.detail.IsLoading() {
+					cmds = append(cmds, m.loadD1Schema(msg.ResourceID), m.detail.SpinnerInit())
+				}
+				return *m, tea.Batch(cmds...), true
+			}
+		}
+		return *m, nil, true
+
+	// --- D1 SQL console messages ---
+
+	case detail.D1QueryMsg:
+		if m.client == nil {
+			return *m, nil, true
+		}
+		return *m, m.executeD1Query(msg.DatabaseID, msg.SQL), true
+
+	case detail.D1QueryResultMsg:
+		m.detail.SetD1QueryResult(msg.Result, msg.Err)
+		// If the query changed the DB, auto-refresh the schema
+		if msg.Result != nil && msg.Result.ChangedDB {
+			m.detail.SetD1SchemaLoading()
+			dbID := m.detail.D1DatabaseID()
+			return *m, tea.Batch(m.loadD1Schema(dbID), m.detail.SpinnerInit()), true
+		}
+		return *m, nil, true
+
+	case detail.D1SchemaLoadMsg:
+		return *m, m.loadD1Schema(msg.DatabaseID), true
+
+	case detail.D1SchemaLoadedMsg:
+		// Staleness check: only apply if we're still on this database
+		if msg.DatabaseID != m.detail.D1DatabaseID() {
+			return *m, nil, true
+		}
+		m.detail.SetD1Schema(msg.Tables, msg.Err)
+		return *m, nil, true
+
+	// --- Tail lifecycle messages (single-tail from detail/Resources tab) ---
+
+	case detail.TailStartMsg:
+		if m.client == nil {
+			return *m, nil, true
+		}
+		m.tailSource = "monitoring"
+		m.monitoring.StartSingleTail(msg.ScriptName)
+		m.activeTab = tabbar.TabMonitoring
+		accountID := m.registry.ActiveAccountID()
+		return *m, m.startTailCmd(accountID, msg.ScriptName), true
+
+	case detail.TailStartedMsg:
+		m.tailSession = msg.Session
+		m.monitoring.SetTailConnected()
+		return *m, m.waitForTailLines(), true
+
+	case detail.TailLogMsg:
+		if m.tailSession == nil {
+			return *m, nil, true
+		}
+		m.monitoring.AppendTailLines(msg.Lines)
+		// Continue polling for more lines
+		return *m, m.waitForTailLines(), true
+
+	case detail.TailErrorMsg:
+		m.monitoring.SetTailError(msg.Err)
+		m.tailSession = nil
+		return *m, nil, true
+
+	case detail.TailStoppedMsg:
+		m.stopTail()
+		return *m, nil, true
+
+	// --- Clipboard ---
+
+	case detail.CopyToClipboardMsg:
+		_ = clipboard.WriteAll(msg.Text)
+		m.toastMsg = "Copied to clipboard"
+		m.toastExpiry = time.Now().Add(2 * time.Second)
+		return *m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+			return toastExpireMsg{}
+		}), true
+
+	// --- Delete resource request ---
+
+	case detail.DeleteResourceRequestMsg:
+		if idx := m.registry.GetBindingIndex(); idx != nil {
+			// Index available — show popup immediately with binding warnings
+			boundWorkers := idx.Lookup(msg.ServiceName, msg.ResourceID)
+			m.showDeletePopup = true
+			m.deletePopup = deletepopup.New(msg.ServiceName, msg.ResourceID, msg.ResourceName, boundWorkers)
+			return *m, nil, true
+		}
+		// Index not yet built — show popup immediately in loading state (spinner)
+		// while we fetch Workers and build the index in the background.
+		req := msg // copy for stashing
+		m.pendingDeleteReq = &req
+		m.showDeletePopup = true
+		m.deletePopup = deletepopup.NewLoading(msg.ServiceName, msg.ResourceID, msg.ResourceName)
+		// Kick off Workers fetch (if needed) + index build
+		fetchCmds := []tea.Cmd{m.deletePopup.SpinnerTick()}
+		if m.registry.GetCache("Workers") == nil {
+			fetchCmds = append(fetchCmds, m.loadServiceResources("Workers"))
+		} else {
+			// Workers cached but index not built yet — just build the index
+			if cmd := m.buildBindingIndexCmd(); cmd != nil {
+				fetchCmds = append(fetchCmds, cmd)
+			}
+		}
+		return *m, tea.Batch(fetchCmds...), true
+
+	// --- Binding index built ---
+
+	case bindingIndexBuiltMsg:
+		if m.isStaleAccount(msg.accountID) {
+			return *m, nil, true
+		}
+		m.registry.SetBindingIndex(msg.index)
+		// Update managed resource highlighting now that the index is available
+		m.updateManagedResources()
+		// If there's a pending delete request, transition the popup from loading → confirm.
+		if m.pendingDeleteReq != nil {
+			req := m.pendingDeleteReq
+			m.pendingDeleteReq = nil
+			if m.showDeletePopup && m.deletePopup.IsLoading() {
+				boundWorkers := msg.index.Lookup(req.ServiceName, req.ResourceID)
+				m.deletePopup.SetBindingWarnings(boundWorkers)
+			}
+		}
+		return *m, nil, true
+	}
+
+	return *m, nil, false
+}

@@ -290,3 +290,81 @@ type aiStreamContinueMsg struct {
 	chunk string
 	ch    <-chan string
 }
+
+// handleAIMsg handles all AI-related messages.
+// Returns (model, cmd, handled).
+func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
+	switch msg := msg.(type) {
+	case uiai.AIConfigSaveMsg:
+		m.cfg.AIProvider = msg.Provider
+		m.cfg.AIModelPreset = msg.ModelPreset
+		_ = m.cfg.Save()
+		return *m, nil, true
+
+	case uiai.AIProvisionRequestMsg:
+		m.aiTab.SetDeploying(true)
+		return *m, m.provisionAIWorker(), true
+
+	case uiai.AIDeprovisionRequestMsg:
+		m.aiTab.SetDeploying(true)
+		return *m, m.deprovisionAIWorker(), true
+
+	case aiProvisionProgressMsg:
+		m.aiTab.SetDeployProgress(msg.Status)
+		return *m, nil, true
+
+	case aiProvisionDoneMsg:
+		m.aiTab.SetDeploying(false)
+		m.aiTab.SetDeployProgress("")
+		if msg.Err != nil {
+			m.aiTab.SetDeployError(msg.Err.Error())
+		} else {
+			m.aiTab.SetDeployError("")
+			m.aiTab.SetWorkerURL(msg.WorkerURL)
+			m.aiTab.SetWorkerSecret(msg.Secret)
+			m.cfg.AIWorkerURL = msg.WorkerURL
+			m.cfg.AIWorkerSecret = msg.Secret
+			m.cfg.AIProvider = config.AIProviderWorkersAI
+			_ = m.cfg.Save()
+			m.setToast("AI Worker deployed successfully")
+		}
+		return *m, nil, true
+
+	case aiDeprovisionDoneMsg:
+		m.aiTab.SetDeploying(false)
+		if msg.Err != nil {
+			m.aiTab.SetDeployError(msg.Err.Error())
+		} else {
+			m.aiTab.SetDeployError("")
+			m.aiTab.SetWorkerURL("")
+			m.cfg.AIWorkerURL = ""
+			m.cfg.AIWorkerSecret = ""
+			_ = m.cfg.Save()
+			m.setToast("AI Worker removed")
+		}
+		return *m, nil, true
+
+	case uiai.AIChatSendMsg:
+		// User pressed enter in the chat input — start streaming AI response
+		if !m.aiTab.IsProvisioned() {
+			return *m, nil, true
+		}
+		return *m, m.startAIChatStream(msg.UserMessage), true
+
+	case aiStreamBatchMsg:
+		// First chunk arrived — deliver it and start reading more
+		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.firstChunk})
+		return *m, readNextAIChunk(msg.ch), true
+
+	case aiStreamContinueMsg:
+		// Subsequent chunk — deliver and continue reading
+		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.chunk})
+		return *m, readNextAIChunk(msg.ch), true
+
+	case uiai.AIChatNewConversationMsg:
+		m.aiTab.NewConversation()
+		return *m, nil, true
+	}
+
+	return *m, nil, false
+}

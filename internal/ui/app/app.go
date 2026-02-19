@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	zone "github.com/lrstanley/bubblezone"
@@ -25,7 +24,6 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/deployallpopup"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
-	"github.com/oarafat/orangeshell/internal/ui/envvars"
 	"github.com/oarafat/orangeshell/internal/ui/header"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
 	"github.com/oarafat/orangeshell/internal/ui/monitoring"
@@ -34,7 +32,6 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/setup"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
-	uitriggers "github.com/oarafat/orangeshell/internal/ui/triggers"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
@@ -50,8 +47,6 @@ const (
 	ViewWrangler      ViewState = iota // Wrangler home screen (default)
 	ViewServiceList                    // Service resource list (Workers, KV, etc.)
 	ViewServiceDetail                  // Resource detail (Worker detail, D1 console)
-	ViewEnvVars                        // Environment variables view
-	ViewTriggers                       // Cron triggers view
 )
 
 // Phase tracks the top-level application state.
@@ -249,14 +244,6 @@ type Model struct {
 	// AI tab model
 	aiTab uiai.Model
 
-	// Legacy: Environment variables view (kept for Operations tab cross-nav)
-	envvarsView             envvars.Model
-	envVarsFromResourceList bool // true when env vars view was opened from the Resources launcher
-
-	// Legacy: Cron triggers view (kept for Operations tab cross-nav)
-	triggersView             uitriggers.Model
-	triggersFromResourceList bool // true when triggers view was opened from the Resources launcher
-
 	// Deploy all popup overlay
 	showDeployAllPopup bool
 	deployAllPopup     deployallpopup.Model
@@ -401,6 +388,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(*Model).handleConfigViewMsg,
 		(*Model).handleDeployAllMsg,
 		(*Model).handleBuildsTokenPopupMsg,
+		(*Model).handleDetailMsg,
+		(*Model).handleWranglerMsg,
+		(*Model).handleMonitoringMsg,
+		(*Model).handleAIMsg,
+		(*Model).handleOverlayMsg,
 	}
 	for _, h := range handlers {
 		if result, cmd, handled := h(&m, msg); handled {
@@ -469,800 +461,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Service data messages
-	case detail.ResourcesLoadedMsg:
-		if m.isStaleAccount(msg.AccountID) {
-			return m, nil
-		}
-		// Cache the result regardless of which service is displayed
-		if msg.Err == nil && msg.Resources != nil {
-			m.registry.SetCache(msg.ServiceName, msg.Resources)
-		}
-		// When Workers list loads, build the binding index in the background.
-		// When a non-Workers service loads and no binding index exists yet,
-		// trigger a Workers fetch + index build so managed detection works.
-		var indexCmd tea.Cmd
-		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
-			indexCmd = m.buildBindingIndexCmd()
-		} else if msg.ServiceName != "Workers" && msg.Err == nil && m.registry.GetBindingIndex() == nil {
-			// Binding index not yet available — kick off Workers fetch + build
-			if m.registry.GetCache("Workers") == nil {
-				indexCmd = m.loadServiceResources("Workers")
-			} else {
-				indexCmd = m.buildBindingIndexCmd()
-			}
-		}
-		// Staleness check: ignore if the user has already switched services
-		if msg.ServiceName != m.detail.Service() {
-			// Still update search items even if not the active service
-			if msg.Err == nil {
-				m.search.SetItems(m.registry.AllSearchItems())
-			}
-			if indexCmd != nil {
-				return m, indexCmd
-			}
-			return m, nil
-		}
-		previewCmd := m.detail.SetResources(msg.Resources, msg.Err, msg.NotIntegrated)
-		// Update managed resource highlighting
-		m.updateManagedResources()
-		// Sync viewState: auto-preview switches detail model to viewDetail
-		if m.detail.InDetailView() {
-			m.viewState = ViewServiceDetail
-		}
-		// Update search items after loading
-		if msg.Err == nil {
-			m.search.SetItems(m.registry.AllSearchItems())
-		}
-		var cmds []tea.Cmd
-		if previewCmd != nil {
-			cmds = append(cmds, previewCmd, m.detail.SpinnerInit())
-		}
-		if indexCmd != nil {
-			cmds = append(cmds, indexCmd)
-		}
-		if len(cmds) > 0 {
-			return m, tea.Batch(cmds...)
-		}
-		return m, nil
-
-	case detail.SelectServiceMsg:
-		// User selected a service from the dropdown — navigate to it
-		cmd := m.navigateToService(msg.ServiceName)
-		return m, cmd
-
-	case detail.LoadResourcesMsg:
-		// Don't attempt to load if auth hasn't completed yet — services aren't
-		// registered. The initDashboardMsg handler will trigger the load once
-		// the client is ready.
-		if m.client == nil {
-			return m, nil
-		}
-		return m, m.loadServiceResources(msg.ServiceName)
-
-	case detail.LoadDetailMsg:
-		if msg.ServiceName == "Env Variables" {
-			// ResourceID is the config path; look up project name
-			configPath := msg.ResourceID
-			projectName := ""
-			for _, p := range m.wrangler.ProjectConfigs() {
-				if p.ConfigPath == configPath {
-					if p.Config != nil {
-						projectName = p.Config.Name
-					}
-					break
-				}
-			}
-			// Reset detail model back to list mode so it's not stuck
-			// in "Loading details..." when we return via esc.
-			m.detail.BackToList()
-			m.envVarsFromResourceList = true
-			return m, m.openEnvVarsView(configPath, "", projectName)
-		}
-		if msg.ServiceName == "Triggers" {
-			configPath := msg.ResourceID
-			projectName := ""
-			for _, p := range m.wrangler.ProjectConfigs() {
-				if p.ConfigPath == configPath {
-					if p.Config != nil {
-						projectName = p.Config.Name
-					}
-					break
-				}
-			}
-			m.detail.BackToList()
-			m.triggersFromResourceList = true
-			return m, m.openTriggersView(configPath, projectName)
-		}
-		m.viewState = ViewServiceDetail
-		return m, tea.Batch(m.loadResourceDetail(msg.ServiceName, msg.ResourceID), m.detail.SpinnerInit())
-
-	case detail.DetailLoadedMsg:
-		// Staleness check: ignore if the user has switched services or resources
-		if msg.ServiceName != m.detail.Service() {
-			return m, nil
-		}
-		// Enrich non-Workers detail with bound worker references
-		if msg.Err == nil && msg.Detail != nil && msg.ServiceName != "Workers" {
-			m.enrichDetailWithBoundWorkers(msg.Detail, msg.ServiceName, msg.ResourceID)
-		}
-		m.detail.SetDetail(msg.Detail, msg.Err)
-		// D1 console initialization is deferred to interactive mode (EnterInteractiveMsg).
-		// However, load the schema in preview mode so it's visible in the read-only detail view.
-		if msg.Err == nil && msg.ServiceName == "D1" && msg.Detail != nil {
-			m.detail.PreviewD1Schema(msg.ResourceID)
-			schemaCmd := m.loadD1Schema(msg.ResourceID)
-			return m, tea.Batch(schemaCmd, m.detail.SpinnerInit())
-		}
-		// Workers: trigger version history fetch if needed
-		if scriptName := m.detail.NeedsVersionHistory(); scriptName != "" {
-			m.detail.StartVersionHistoryLoad(scriptName)
-			return m, tea.Batch(m.fetchVersionHistory(scriptName), m.detail.SpinnerInit())
-		}
-		return m, nil
-
-	case detail.VersionHistoryLoadedMsg:
-		m.detail.SetVersionHistory(msg.ScriptName, msg.Entries, msg.Err)
-		// Always try to enrich with builds API data — Workers Builds uses
-		// `wrangler deploy` internally so the version source may say "wrangler"
-		// even for CI-deployed versions.
-		if msg.Err == nil && len(msg.Entries) > 0 {
-			return m, m.fetchBuildsForVersionHistory(msg.ScriptName)
-		}
-		return m, nil
-
-	case detail.BuildsEnrichedMsg:
-		m.detail.SetBuildsEnriched(msg.ScriptName, msg.Entries)
-		return m, nil
-
-	case detail.BuildsAuthFailedMsg:
-		// Builds API returned 401/403 — prompt for a dedicated token
-		if !m.buildsTokenDeclined {
-			m.showBuildsTokenPopup = true
-			m.buildsTokenPopup = buildstokenpopup.New(m.registry.ActiveAccountID())
-			return m, m.buildsTokenPopup.Init()
-		}
-		return m, nil
-
-	case detail.FetchBuildLogMsg:
-		return m, tea.Batch(m.fetchBuildLog(msg.BuildUUID, msg.Entry), m.detail.SpinnerInit())
-
-	case detail.BuildLogLoadedMsg:
-		m.detail.SetBuildLog(msg.BuildUUID, msg.Lines, msg.Err, msg.Entry)
-		return m, nil
-
-	case detail.EnterInteractiveMsg:
-		// User entered interactive mode on a ReadWrite service — initialize interactive features.
-		if msg.Mode == detail.ReadWrite && msg.ServiceName == "D1" && msg.ResourceID != "" {
-			// Only init D1 console if not already active for this database
-			if !m.detail.D1Active() || m.detail.D1DatabaseID() != msg.ResourceID {
-				inputCmd := m.detail.InitD1Console(msg.ResourceID)
-				// InitD1Console preserves schema if already loaded for this DB;
-				// only re-fetch if schema is not yet available.
-				cmds := []tea.Cmd{inputCmd}
-				if m.detail.IsLoading() {
-					cmds = append(cmds, m.loadD1Schema(msg.ResourceID), m.detail.SpinnerInit())
-				}
-				return m, tea.Batch(cmds...)
-			}
-		}
-		return m, nil
-
-	case detail.BackgroundRefreshMsg:
-		if m.isStaleAccount(msg.AccountID) {
-			return m, nil
-		}
-		// Cache the refreshed result
-		if msg.Err == nil && msg.Resources != nil {
-			m.registry.SetCache(msg.ServiceName, msg.Resources)
-		}
-		// Update the detail panel if it's showing this service (in list mode)
-		if msg.Err == nil && msg.ServiceName == m.detail.Service() {
-			m.detail.RefreshResources(msg.Resources)
-			m.updateManagedResources()
-		}
-		// Always update search items and decrement fetching counter
-		m.search.SetItems(m.registry.AllSearchItems())
-		if m.showSearch {
-			m.search.DecrementFetching()
-		}
-		// Rebuild binding index when Workers list is refreshed
-		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
-			return m, m.buildBindingIndexCmd()
-		}
-		return m, nil
-
-	// Tail lifecycle messages — all routed to the monitoring model
-	case detail.TailStartMsg:
-		if m.client == nil {
-			return m, nil
-		}
-		m.tailSource = "monitoring"
-		m.monitoring.StartSingleTail(msg.ScriptName)
-		m.activeTab = tabbar.TabMonitoring
-		accountID := m.registry.ActiveAccountID()
-		return m, m.startTailCmd(accountID, msg.ScriptName)
-
-	case detail.TailStartedMsg:
-		m.tailSession = msg.Session
-		m.monitoring.SetTailConnected()
-		return m, m.waitForTailLines()
-
-	case detail.TailLogMsg:
-		if m.tailSession == nil {
-			return m, nil
-		}
-		m.monitoring.AppendTailLines(msg.Lines)
-		// Continue polling for more lines
-		return m, m.waitForTailLines()
-
-	case detail.TailErrorMsg:
-		m.monitoring.SetTailError(msg.Err)
-		m.tailSession = nil
-		return m, nil
-
-	case detail.TailStoppedMsg:
-		m.stopTail()
-		return m, nil
-
-	// D1 SQL console messages
-	case detail.D1QueryMsg:
-		if m.client == nil {
-			return m, nil
-		}
-		return m, m.executeD1Query(msg.DatabaseID, msg.SQL)
-
-	case detail.D1QueryResultMsg:
-		m.detail.SetD1QueryResult(msg.Result, msg.Err)
-		// If the query changed the DB, auto-refresh the schema
-		if msg.Result != nil && msg.Result.ChangedDB {
-			m.detail.SetD1SchemaLoading()
-			dbID := m.detail.D1DatabaseID()
-			return m, tea.Batch(m.loadD1Schema(dbID), m.detail.SpinnerInit())
-		}
-		return m, nil
-
-	case detail.D1SchemaLoadMsg:
-		return m, m.loadD1Schema(msg.DatabaseID)
-
-	case detail.D1SchemaLoadedMsg:
-		// Staleness check: only apply if we're still on this database
-		if msg.DatabaseID != m.detail.D1DatabaseID() {
-			return m, nil
-		}
-		m.detail.SetD1Schema(msg.Tables, msg.Err)
-		return m, nil
-
-	case detail.CopyToClipboardMsg:
-		_ = clipboard.WriteAll(msg.Text)
-		m.toastMsg = "Copied to clipboard"
-		m.toastExpiry = time.Now().Add(2 * time.Second)
-		return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
-			return toastExpireMsg{}
-		})
-
 	case toastExpireMsg:
 		if time.Now().After(m.toastExpiry) {
 			m.toastMsg = ""
 		}
-		return m, nil
-
-	// Delete resource popup messages (from detail list view)
-	case detail.DeleteResourceRequestMsg:
-		if idx := m.registry.GetBindingIndex(); idx != nil {
-			// Index available — show popup immediately with binding warnings
-			boundWorkers := idx.Lookup(msg.ServiceName, msg.ResourceID)
-			m.showDeletePopup = true
-			m.deletePopup = deletepopup.New(msg.ServiceName, msg.ResourceID, msg.ResourceName, boundWorkers)
-			return m, nil
-		}
-		// Index not yet built — show popup immediately in loading state (spinner)
-		// while we fetch Workers and build the index in the background.
-		req := msg // copy for stashing
-		m.pendingDeleteReq = &req
-		m.showDeletePopup = true
-		m.deletePopup = deletepopup.NewLoading(msg.ServiceName, msg.ResourceID, msg.ResourceName)
-		// Kick off Workers fetch (if needed) + index build
-		fetchCmds := []tea.Cmd{m.deletePopup.SpinnerTick()}
-		if m.registry.GetCache("Workers") == nil {
-			fetchCmds = append(fetchCmds, m.loadServiceResources("Workers"))
-		} else {
-			// Workers cached but index not built yet — just build the index
-			if cmd := m.buildBindingIndexCmd(); cmd != nil {
-				fetchCmds = append(fetchCmds, cmd)
-			}
-		}
-		return m, tea.Batch(fetchCmds...)
-
-	case bindingIndexBuiltMsg:
-		if m.isStaleAccount(msg.accountID) {
-			return m, nil
-		}
-		m.registry.SetBindingIndex(msg.index)
-		// Update managed resource highlighting now that the index is available
-		m.updateManagedResources()
-		// If there's a pending delete request, transition the popup from loading → confirm.
-		if m.pendingDeleteReq != nil {
-			req := m.pendingDeleteReq
-			m.pendingDeleteReq = nil
-			if m.showDeletePopup && m.deletePopup.IsLoading() {
-				boundWorkers := msg.index.Lookup(req.ServiceName, req.ResourceID)
-				m.deletePopup.SetBindingWarnings(boundWorkers)
-			}
-		}
-		return m, nil
-
-	// Wrangler messages
-	case uiwrangler.ConfigLoadedMsg:
-		m.wrangler.SetConfig(msg.Config, msg.Path, msg.Err)
-		// Refresh the monitoring worker tree in case we're on the Monitoring tab
-		m.refreshMonitoringWorkerTree()
-		// Refresh AI file sources so the context panel picks up new projects
-		m.refreshAIFileSources()
-		// Trigger deployment fetching for single-project environments
-		if msg.Err == nil && msg.Config != nil {
-			return m, m.fetchSingleProjectDeployments(msg.Config)
-		}
-		return m, nil
-
-	case uiwrangler.EmptyMenuSelectMsg:
-		switch msg.Action {
-		case "create_project":
-			m.wrangler.ActivateDirBrowser(uiwrangler.DirBrowserModeCreate)
-		case "open_project":
-			m.wrangler.ActivateDirBrowser(uiwrangler.DirBrowserModeOpen)
-		}
-		return m, nil
-
-	case uiwrangler.EnvDeploymentLoadedMsg:
-		if m.isStaleAccount(msg.AccountID) {
-			return m, nil
-		}
-		// Always update (even on error) so DeploymentFetched gets set and
-		// the UI can show "Currently not deployed" instead of nothing.
-		m.wrangler.SetEnvDeployment(msg.EnvName, msg.Deployment, msg.Subdomain)
-		// Cache the deployment data in the registry for instant restore on account switch-back.
-		// Cache both successful responses and errors (worker not found = "not deployed").
-		if msg.ScriptName != "" {
-			m.registry.SetDeploymentCache(msg.ScriptName, displayToDeploymentInfo(msg.Deployment), msg.Subdomain)
-		}
-		return m, nil
-
-	case uiwrangler.ProjectsDiscoveredMsg:
-		m.wrangler.SetProjects(msg.Projects, msg.RootName, msg.RootDir)
-		// Refresh the monitoring worker tree
-		m.refreshMonitoringWorkerTree()
-		// Refresh AI file sources so the context panel picks up new projects
-		m.refreshAIFileSources()
-		// Trigger deployment fetching for all projects
-		return m, m.fetchAllProjectDeployments()
-
-	case uiwrangler.ProjectDeploymentLoadedMsg:
-		if m.isStaleAccount(msg.AccountID) {
-			return m, nil
-		}
-		// Always update so DeploymentFetched gets set
-		m.wrangler.SetProjectDeployment(msg.ProjectIndex, msg.EnvName, msg.Deployment, msg.Subdomain)
-		// Cache the deployment data in the registry.
-		// Cache both successful responses and errors (worker not found = "not deployed").
-		if msg.ScriptName != "" {
-			m.registry.SetDeploymentCache(msg.ScriptName, displayToDeploymentInfo(msg.Deployment), msg.Subdomain)
-		}
-		return m, nil
-
-	case uiwrangler.TailStartMsg:
-		// "t" key pressed in wrangler view — start tailing on Monitoring tab
-		if m.client == nil {
-			return m, nil
-		}
-		// Stop any existing tail
-		m.stopTail()
-		// Start tail via monitoring model and switch to Monitoring tab
-		m.tailSource = "monitoring"
-		m.monitoring.StartSingleTail(msg.ScriptName)
-		m.activeTab = tabbar.TabMonitoring
-		accountID := m.registry.ActiveAccountID()
-		return m, m.startTailCmd(accountID, msg.ScriptName)
-
-	case uiwrangler.TailStoppedMsg:
-		// "t" key pressed while tail is active — stop it
-		m.stopTail()
-		return m, nil
-
-	// Parallel tail lifecycle messages — routed to monitoring model
-	case uiwrangler.ParallelTailStartMsg:
-		if m.client == nil {
-			return m, nil
-		}
-		// Stop any existing single tail and parallel tails
-		m.stopTail()
-		m.stopAllParallelTails()
-		// Convert wrangler targets to monitoring targets
-		monTargets := make([]monitoring.ParallelTailTarget, len(msg.Scripts))
-		for i, t := range msg.Scripts {
-			monTargets[i] = monitoring.ParallelTailTarget{ScriptName: t.ScriptName, URL: t.URL}
-		}
-		// Start parallel tailing on Monitoring tab
-		m.monitoring.StartParallelTail(msg.EnvName, monTargets)
-		m.parallelTailActive = true
-		m.activeTab = tabbar.TabMonitoring
-		accountID := m.registry.ActiveAccountID()
-		var cmds []tea.Cmd
-		for _, target := range msg.Scripts {
-			cmds = append(cmds, m.startParallelTailSessionCmd(accountID, target.ScriptName))
-		}
-		return m, tea.Batch(cmds...)
-
-	case uiwrangler.ParallelTailExitMsg:
-		m.stopAllParallelTails()
-		return m, nil
-
-	case parallelTailStartedMsg:
-		if !m.parallelTailActive {
-			// Stale — parallel tail was stopped while session was connecting
-			if msg.Session != nil {
-				session := msg.Session
-				client := m.client
-				go func() {
-					ctx := context.Background()
-					svc.StopTail(ctx, client.CF, session)
-				}()
-			}
-			return m, nil
-		}
-		m.parallelTailSessions = append(m.parallelTailSessions, msg.Session)
-		m.monitoring.ParallelTailSetConnected(msg.ScriptName)
-		m.monitoring.ParallelTailSetSessionID(msg.ScriptName, msg.Session.ID)
-		return m, m.waitForParallelTailLines(msg.ScriptName, msg.Session)
-
-	case parallelTailLogMsg:
-		if !m.parallelTailActive {
-			return m, nil
-		}
-		m.monitoring.ParallelTailAppendLines(msg.ScriptName, msg.Lines)
-		// Find the session to continue polling
-		for _, s := range m.parallelTailSessions {
-			if s.ScriptName == msg.ScriptName {
-				return m, m.waitForParallelTailLines(msg.ScriptName, s)
-			}
-		}
-		return m, nil
-
-	case parallelTailErrorMsg:
-		if !m.parallelTailActive {
-			return m, nil
-		}
-		m.monitoring.ParallelTailSetError(msg.ScriptName, msg.Err)
-		return m, nil
-
-	case parallelTailSessionDoneMsg:
-		// Channel closed for one session — nothing to do, pane stays with last lines
-		return m, nil
-
-	// Monitoring model messages
-	case monitoring.TailStopMsg:
-		m.stopTail()
-		return m, nil
-
-	case monitoring.ParallelTailStopMsg:
-		m.stopAllParallelTails()
-		return m, nil
-
-	// New monitoring dual-pane messages
-	case monitoring.TailAddMsg:
-		// User pressed 'a' on a worker in the tree — add to grid and start tail
-		if m.isDevWorker(msg.ScriptName) {
-			// Dev worker: output is already being piped. Just ensure it's in the grid.
-			if ds := m.findDevSession(msg.ScriptName); ds != nil {
-				m.monitoring.AddDevToGrid(ds.ScriptName, ds.DevKind)
-			}
-			return m, nil
-		}
-		if m.client == nil {
-			return m, nil
-		}
-		m.monitoring.AddToGrid(msg.ScriptName, "")
-		m.parallelTailActive = true
-		accountID := m.registry.ActiveAccountID()
-		return m, m.startGridTailCmd(accountID, msg.ScriptName)
-
-	case monitoring.TailRemoveMsg:
-		// User pressed 'd' on a worker in the tree — stop tail and remove from grid
-		if m.isDevWorker(msg.ScriptName) {
-			// Dev worker: remove from grid but don't stop the dev process.
-			// Output continues flowing to CmdPane. User can re-add via 'a'.
-			m.monitoring.RemoveFromGrid(msg.ScriptName)
-			return m, nil
-		}
-		m.stopGridTail(msg.ScriptName)
-		m.monitoring.RemoveFromGrid(msg.ScriptName)
-		return m, nil
-
-	case monitoring.TailToggleMsg:
-		if m.isDevWorker(msg.ScriptName) {
-			// Dev panes can't be toggled — they're always active while process runs
-			return m, nil
-		}
-		if m.client == nil {
-			return m, nil
-		}
-		if msg.Start {
-			// Restart the tail for this pane
-			m.parallelTailActive = true
-			accountID := m.registry.ActiveAccountID()
-			return m, m.startGridTailCmd(accountID, msg.ScriptName)
-		}
-		// Stop the tail for this pane (but keep in grid)
-		m.stopGridTail(msg.ScriptName)
-		m.monitoring.GridSetStopped(msg.ScriptName)
-		return m, nil
-
-	case monitoring.TailToggleAllMsg:
-		if m.client == nil {
-			return m, nil
-		}
-		if msg.Start {
-			// Start tails for all stopped grid panes (skip dev panes — always active)
-			m.parallelTailActive = true
-			accountID := m.registry.ActiveAccountID()
-			var cmds []tea.Cmd
-			for _, script := range m.monitoring.AllGridPaneScripts() {
-				if !m.hasGridTailSession(script) && !m.isDevWorker(script) {
-					cmds = append(cmds, m.startGridTailCmd(accountID, script))
-				}
-			}
-			if len(cmds) > 0 {
-				return m, tea.Batch(cmds...)
-			}
-			return m, nil
-		}
-		// Stop all grid tails (dev panes are unaffected — no API session to stop)
-		m.stopAllGridTails()
-		return m, nil
-
-	case monitoring.DevCronTriggerMsg:
-		ds := m.findDevSession(msg.ScriptName)
-		if ds == nil || ds.Port == "" {
-			// No port yet — dev server hasn't announced it
-			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
-				Timestamp: time.Now(),
-				Level:     "warn",
-				Text:      "[orangeshell] Cannot trigger cron: dev server port not detected yet",
-			}})
-			return m, nil
-		}
-		// Fire the cron trigger request in the background
-		port := ds.Port
-		scriptName := msg.ScriptName
-		return m, func() tea.Msg {
-			return triggerDevCron(scriptName, port)
-		}
-
-	case devCronTriggerDoneMsg:
-		if msg.Err != nil {
-			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Text:      fmt.Sprintf("[orangeshell] Cron trigger failed: %v", msg.Err),
-			}})
-		} else {
-			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
-				Timestamp: time.Now(),
-				Level:     "system",
-				Text:      "[orangeshell] Cron trigger fired (scheduled handler invoked)",
-			}})
-		}
-		return m, nil
-
-	// AI tab messages
-	case uiai.AIConfigSaveMsg:
-		m.cfg.AIProvider = msg.Provider
-		m.cfg.AIModelPreset = msg.ModelPreset
-		_ = m.cfg.Save()
-		return m, nil
-
-	case uiai.AIProvisionRequestMsg:
-		m.aiTab.SetDeploying(true)
-		return m, m.provisionAIWorker()
-
-	case uiai.AIDeprovisionRequestMsg:
-		m.aiTab.SetDeploying(true)
-		return m, m.deprovisionAIWorker()
-
-	case aiProvisionProgressMsg:
-		m.aiTab.SetDeployProgress(msg.Status)
-		return m, nil
-
-	case aiProvisionDoneMsg:
-		m.aiTab.SetDeploying(false)
-		m.aiTab.SetDeployProgress("")
-		if msg.Err != nil {
-			m.aiTab.SetDeployError(msg.Err.Error())
-		} else {
-			m.aiTab.SetDeployError("")
-			m.aiTab.SetWorkerURL(msg.WorkerURL)
-			m.aiTab.SetWorkerSecret(msg.Secret)
-			m.cfg.AIWorkerURL = msg.WorkerURL
-			m.cfg.AIWorkerSecret = msg.Secret
-			m.cfg.AIProvider = config.AIProviderWorkersAI
-			_ = m.cfg.Save()
-			m.setToast("AI Worker deployed successfully")
-		}
-		return m, nil
-
-	case aiDeprovisionDoneMsg:
-		m.aiTab.SetDeploying(false)
-		if msg.Err != nil {
-			m.aiTab.SetDeployError(msg.Err.Error())
-		} else {
-			m.aiTab.SetDeployError("")
-			m.aiTab.SetWorkerURL("")
-			m.cfg.AIWorkerURL = ""
-			m.cfg.AIWorkerSecret = ""
-			_ = m.cfg.Save()
-			m.setToast("AI Worker removed")
-		}
-		return m, nil
-
-	case uiai.AIChatSendMsg:
-		// User pressed enter in the chat input — start streaming AI response
-		if !m.aiTab.IsProvisioned() {
-			return m, nil
-		}
-		return m, m.startAIChatStream(msg.UserMessage)
-
-	case aiStreamBatchMsg:
-		// First chunk arrived — deliver it and start reading more
-		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.firstChunk})
-		return m, readNextAIChunk(msg.ch)
-
-	case aiStreamContinueMsg:
-		// Subsequent chunk — deliver and continue reading
-		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.chunk})
-		return m, readNextAIChunk(msg.ch)
-
-	case uiai.AIChatNewConversationMsg:
-		m.aiTab.NewConversation()
-		return m, nil
-
-	case uiwrangler.LoadConfigPathMsg:
-		if m.wrangler.DirBrowserActiveMode() == uiwrangler.DirBrowserModeCreate {
-			// User chose a directory to create a new project in
-			m.wrangler.CloseDirBrowser()
-			m.showProjectPopup = true
-			m.projectPopup = projectpopup.New(nil, msg.Path)
-			return m, nil
-		}
-		// User entered a custom path — scan it for wrangler config
-		m.wrangler.SetConfigLoading()
-		return m, tea.Batch(m.discoverProjectsFromDir(msg.Path), m.wrangler.SpinnerInit())
-
-	case uiwrangler.NavigateMsg:
-		return m, m.navigateTo(msg.ServiceName, msg.ResourceID)
-
-	case uiwrangler.ActionMsg:
-		return m, m.startWranglerCmd(msg.Action, msg.EnvName)
-
-	case uiwrangler.OpenURLMsg:
-		return m, openURL(msg.URL)
-
-	case uiwrangler.VersionsFetchedMsg:
-		if msg.Err != nil {
-			// Show error and close picker
-			m.wrangler.CloseVersionPicker()
-			m.err = fmt.Errorf("failed to fetch versions: %w", msg.Err)
-			return m, nil
-		}
-		m.wrangler.SetVersions(msg.Versions)
-		return m, m.wrangler.SpinnerInit()
-
-	case uiwrangler.DeployVersionMsg:
-		m.wrangler.CloseVersionPicker()
-		projectName := m.wrangler.FocusedProjectName()
-		configPath := m.wrangler.ConfigPath()
-		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, configPath, []string{
-			fmt.Sprintf("%s@100", msg.VersionID),
-			"-y",
-		})
-
-	case uiwrangler.GradualDeployMsg:
-		m.wrangler.CloseVersionPicker()
-		pctB := 100 - msg.PercentageA
-		projectName := m.wrangler.FocusedProjectName()
-		configPath := m.wrangler.ConfigPath()
-		return m, m.startWranglerCmdWithArgs("versions deploy", projectName, msg.EnvName, configPath, []string{
-			fmt.Sprintf("%s@%d", msg.VersionA, msg.PercentageA),
-			fmt.Sprintf("%s@%d", msg.VersionB, pctB),
-			"-y",
-		})
-
-	case uiwrangler.VersionPickerCloseMsg:
-		m.wrangler.CloseVersionPicker()
-		return m, nil
-
-	case uiwrangler.DeleteBindingRequestMsg:
-		m.showDeletePopup = true
-		m.deletePopup = deletepopup.NewBindingDelete(msg.ConfigPath, msg.EnvName, msg.BindingName, msg.BindingType, msg.WorkerName)
-		return m, nil
-
-	case uiwrangler.ShowEnvVarsMsg:
-		m.syncConfigProjects()
-		m.configView.SelectProjectByPath(msg.ConfigPath)
-		m.configView.SetCategory(uiconfig.CategoryEnvVars)
-		m.activeTab = tabbar.TabConfiguration
-		return m, nil
-
-	case uiwrangler.ShowTriggersMsg:
-		m.syncConfigProjects()
-		m.configView.SelectProjectByPath(msg.ConfigPath)
-		m.configView.SetCategory(uiconfig.CategoryTriggers)
-		m.activeTab = tabbar.TabConfiguration
-		return m, nil
-
-	case uiwrangler.CmdOutputMsg:
-		if msg.IsDevCmd {
-			// Dev server output → monitoring grid + log file (no CmdPane)
-			m.handleDevOutput(msg.RunnerKey, msg.Line)
-		} else {
-			// Command output → CmdPane
-			m.handleCmdOutput(msg.RunnerKey, msg.Line)
-		}
-		// Continue reading from the runner
-		return m, m.waitForRunnerOutput(msg.RunnerKey, msg.IsDevCmd)
-
-	case uiwrangler.CmdDoneMsg:
-		if msg.IsDevCmd {
-			return m, m.handleDevDone(msg.RunnerKey, msg.Result)
-		}
-		return m, m.handleCmdDone(msg.RunnerKey, msg.Result)
-
-	// Search messages
-	case search.NavigateMsg:
-		m.showSearch = false
-		// Navigate to the selected service and resource
-		return m, m.navigateTo(msg.ServiceName, msg.ResourceID)
-
-	case search.CloseMsg:
-		m.showSearch = false
-		return m, nil
-
-	// Action popup messages
-	case actions.SelectMsg:
-		m.showActions = false
-		return m, m.handleActionSelect(msg.Item)
-
-	case actions.CloseMsg:
-		m.showActions = false
-		return m, nil
-
-	// Launcher messages
-	case launcher.LaunchServiceMsg:
-		m.showLauncher = false
-		if msg.ServiceName == "" {
-			// Go home
-			m.activeTab = tabbar.TabOperations
-			m.viewState = ViewWrangler
-			if cmd := m.refreshDeploymentsIfStale(); cmd != nil {
-				return m, cmd
-			}
-			return m, nil
-		}
-		if msg.ServiceName == "Env Variables" {
-			m.syncConfigProjects()
-			m.configView.SetCategory(uiconfig.CategoryEnvVars)
-			m.activeTab = tabbar.TabConfiguration
-			return m, nil
-		}
-		if msg.ServiceName == "Triggers" {
-			m.syncConfigProjects()
-			m.configView.SetCategory(uiconfig.CategoryTriggers)
-			m.activeTab = tabbar.TabConfiguration
-			return m, nil
-		}
-		return m, m.navigateToService(msg.ServiceName)
-
-	case launcher.CloseMsg:
-		m.showLauncher = false
 		return m, nil
 
 	case spinner.TickMsg:
@@ -1390,34 +592,6 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateBuildsTokenPopup(msg)
 	}
 
-	// If envvars view is active (legacy, opened from Operations tab), route key events there
-	if m.viewState == ViewEnvVars {
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "ctrl+h", "ctrl+l", "1", "2", "3", "4", "5":
-				// Let global shortcuts and tab-switch keys fall through
-			default:
-				return m.updateEnvVars(msg)
-			}
-		} else {
-			return m.updateEnvVars(msg)
-		}
-	}
-
-	// If triggers view is active (legacy, opened from Operations tab), route key events there
-	if m.viewState == ViewTriggers {
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			switch keyMsg.String() {
-			case "ctrl+h", "ctrl+l", "1", "2", "3", "4", "5":
-				// Let global shortcuts and tab-switch keys fall through
-			default:
-				return m.updateTriggers(msg)
-			}
-		} else {
-			return m.updateTriggers(msg)
-		}
-	}
-
 	// If launcher overlay is active, route everything there
 	if m.showLauncher {
 		return m.updateLauncher(msg)
@@ -1477,7 +651,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Forward mouse events to the config view on Configuration tab
-		if m.activeTab == tabbar.TabConfiguration && m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
+		if m.activeTab == tabbar.TabConfiguration {
 			var cmd tea.Cmd
 			m.configView, cmd = m.configView.Update(msg)
 			return m, cmd
@@ -1532,14 +706,9 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// If tail is active, q is not quit — fall through.
 				break
 			}
-			// Configuration tab: quit unless in legacy ViewEnvVars/ViewTriggers.
-			// The config model's own Update handles q → tea.Quit for its categories.
-			if m.activeTab == tabbar.TabConfiguration && m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
-				// Let it fall through to the config model's Update below
-				break
-			}
+			// Configuration tab: the config model's own Update handles q → tea.Quit.
 			if m.activeTab == tabbar.TabConfiguration {
-				return m, tea.Quit
+				break
 			}
 			// Resources tab: quit unless D1 console is interactively focused
 			if m.activeTab == tabbar.TabResources {
@@ -1565,8 +734,6 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopAllParallelTails()
 			m.monitoring.Clear()
 			m.detail.ClearD1()
-			m.envVarsFromResourceList = false
-			m.triggersFromResourceList = false
 			m.activeTab = tabbar.TabOperations
 			m.viewState = ViewWrangler
 			// Refresh deployment data if stale
@@ -1674,7 +841,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Esc on Configuration tab — let the config model handle it
 			// (dropdown close, mode cancel, etc.)
-			if m.activeTab == tabbar.TabConfiguration && m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
+			if m.activeTab == tabbar.TabConfiguration {
 				// Fall through to the config model's Update below
 				break
 			}
@@ -1692,10 +859,6 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ViewServiceDetail:
 				// Let detail handle Esc internally (detail→list transition)
 				// We detect the transition after detail processes the message
-			case ViewEnvVars:
-				// Envvars view handles its own Esc (clear filter first, then close)
-			case ViewTriggers:
-				// Triggers view handles its own Esc
 			case ViewWrangler:
 				// Wrangler handles its own Esc (dir browser, cmd pane, etc.)
 			}
@@ -1725,10 +888,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tabbar.TabConfiguration:
-		// Route to the unified config model (unless in legacy ViewEnvVars/ViewTriggers)
-		if m.viewState != ViewEnvVars && m.viewState != ViewTriggers {
-			m.configView, cmd = m.configView.Update(msg)
-		}
+		m.configView, cmd = m.configView.Update(msg)
 	case tabbar.TabAI:
 		// Refresh context sources before routing (keeps line counts up to date)
 		if _, isKey := msg.(tea.KeyMsg); isKey {

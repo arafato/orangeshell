@@ -6,7 +6,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
-	uitriggers "github.com/oarafat/orangeshell/internal/ui/triggers"
 )
 
 // --- Cron presets (same as triggers package) ---
@@ -107,7 +106,7 @@ func (m Model) updateTriggersPreset(msg tea.KeyMsg) (Model, tea.Cmd) {
 		configPath := m.configPath
 		cron := p.Cron
 		return m, func() tea.Msg {
-			return uitriggers.AddCronMsg{ConfigPath: configPath, Cron: cron}
+			return AddCronMsg{ConfigPath: configPath, Cron: cron}
 		}
 	}
 	return m, nil
@@ -138,7 +137,7 @@ func (m Model) updateTriggersCustom(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		configPath := m.configPath
 		return m, func() tea.Msg {
-			return uitriggers.AddCronMsg{ConfigPath: configPath, Cron: cron}
+			return AddCronMsg{ConfigPath: configPath, Cron: cron}
 		}
 	}
 	var cmd tea.Cmd
@@ -171,7 +170,7 @@ func (m Model) updateTriggersDelete(msg tea.KeyMsg) (Model, tea.Cmd) {
 			configPath := m.configPath
 			cron := m.triggersDeleteTarget
 			return m, func() tea.Msg {
-				return uitriggers.DeleteCronMsg{ConfigPath: configPath, Cron: cron}
+				return DeleteCronMsg{ConfigPath: configPath, Cron: cron}
 			}
 		}
 		m.mode = modeNormal

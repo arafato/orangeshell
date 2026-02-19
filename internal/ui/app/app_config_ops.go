@@ -15,11 +15,9 @@ import (
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
-	"github.com/oarafat/orangeshell/internal/ui/envvars"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
-	uitriggers "github.com/oarafat/orangeshell/internal/ui/triggers"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
 
@@ -184,143 +182,33 @@ func (m Model) removeBindingCmd(configPath, envName, bindingName, bindingType st
 	}
 }
 
-// --- Environment variables view helpers ---
+// --- Environment variables / Triggers navigation helpers ---
 
-// updateEnvVars forwards messages to the envvars view when it's active.
-func (m Model) updateEnvVars(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.envvarsView, cmd = m.envvarsView.Update(msg)
-	return m, cmd
-}
-
-// navigateToEnvVarsList builds a project list for the "Env Variables" resource type
-// and shows it in the standard detail list view. Each project is a list item;
-// pressing enter on one opens the envvars detail view for that project.
-func (m *Model) navigateToEnvVarsList() tea.Cmd {
-	m.stopTail()
-	m.detail.ClearD1()
-
-	projects := m.wrangler.ProjectConfigs()
-	resources := make([]svc.Resource, 0, len(projects))
-	for _, p := range projects {
-		if p.Config == nil {
-			continue
-		}
-		// Count total vars across all environments
-		totalVars := 0
-		envCount := 0
-		for _, envName := range p.Config.EnvNames() {
-			vars := p.Config.EnvVars(envName)
-			if len(vars) > 0 {
-				envCount++
-			}
-			totalVars += len(vars)
-		}
-
-		summary := "no variables defined"
-		if totalVars > 0 {
-			summary = fmt.Sprintf("%d variable(s) across %d environment(s)", totalVars, envCount)
-		}
-
-		resources = append(resources, svc.Resource{
-			ID:          p.ConfigPath,
-			Name:        p.Config.Name,
-			ServiceType: "Env Variables",
-			Summary:     summary,
-		})
-	}
-
+// navigateToEnvVars opens the Configuration tab with Env Variables category selected
+// for the given config path.
+func (m *Model) navigateToEnvVars(configPath string) tea.Cmd {
+	m.syncConfigProjects()
+	m.configView.SelectProjectByPath(configPath)
+	m.configView.SetCategory(uiconfig.CategoryEnvVars)
 	m.activeTab = tabbar.TabConfiguration
-	m.viewState = ViewServiceList
-	m.detail.SetFocused(true)
-	m.detail.SetServiceFresh("Env Variables", resources)
 	return nil
 }
 
-// navigateToTriggersList builds a project list for the "Triggers" resource type
-// and shows it in the standard detail list view.
-func (m *Model) navigateToTriggersList() tea.Cmd {
-	m.stopTail()
-	m.detail.ClearD1()
-
-	projects := m.wrangler.ProjectConfigs()
-	resources := make([]svc.Resource, 0, len(projects))
-	for _, p := range projects {
-		if p.Config == nil {
-			continue
-		}
-		cronCount := len(p.Config.CronTriggers())
-		summary := "no cron triggers defined"
-		if cronCount > 0 {
-			summary = fmt.Sprintf("%d cron trigger(s)", cronCount)
-		}
-
-		resources = append(resources, svc.Resource{
-			ID:          p.ConfigPath,
-			Name:        p.Config.Name,
-			ServiceType: "Triggers",
-			Summary:     summary,
-		})
-	}
-
+// navigateToTriggers opens the Configuration tab with Triggers category selected
+// for the given config path.
+func (m *Model) navigateToTriggers(configPath string) tea.Cmd {
+	m.syncConfigProjects()
+	m.configView.SelectProjectByPath(configPath)
+	m.configView.SetCategory(uiconfig.CategoryTriggers)
 	m.activeTab = tabbar.TabConfiguration
-	m.viewState = ViewServiceList
-	m.detail.SetFocused(true)
-	m.detail.SetServiceFresh("Triggers", resources)
 	return nil
-}
-
-// openEnvVarsView collects env vars from the config and opens the envvars view.
-// If envName is empty or "default", shows all envs. Otherwise shows only the specified env.
-func (m *Model) openEnvVarsView(configPath, envName, projectName string) tea.Cmd {
-	cfg, err := wcfg.Parse(configPath)
-	if err != nil {
-		m.setToast(fmt.Sprintf("Failed to read config: %v", err))
-		return toastTick()
-	}
-
-	vars := m.buildEnvVarsList(configPath, cfg)
-	m.envvarsView = envvars.New(configPath, projectName, envName, cfg.EnvNames(), vars)
-	contentHeight := m.height - 2
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
-	m.envvarsView.SetSize(m.width, contentHeight)
-	m.activeTab = tabbar.TabConfiguration
-	m.viewState = ViewEnvVars
-	return nil
-}
-
-// buildEnvVarsList collects all env vars from a wrangler config into a flat list.
-func (m Model) buildEnvVarsList(configPath string, cfg *wcfg.WranglerConfig) []envvars.EnvVar {
-	if cfg == nil {
-		return nil
-	}
-
-	projectName := cfg.Name
-	var result []envvars.EnvVar
-
-	for _, envName := range cfg.EnvNames() {
-		vars := cfg.EnvVars(envName)
-		for name, value := range vars {
-			result = append(result, envvars.EnvVar{
-				EnvName:     envName,
-				Name:        name,
-				Value:       value,
-				ConfigPath:  configPath,
-				ProjectName: projectName,
-			})
-		}
-	}
-
-	return result
 }
 
 // setVarCmd writes an env var into the wrangler config file.
 func (m Model) setVarCmd(configPath, envName, varName, value string) tea.Cmd {
 	return func() tea.Msg {
 		err := wcfg.SetVar(configPath, envName, varName, value)
-		return envvars.SetVarDoneMsg{Err: err}
+		return uiconfig.SetVarDoneMsg{Err: err}
 	}
 }
 
@@ -328,43 +216,15 @@ func (m Model) setVarCmd(configPath, envName, varName, value string) tea.Cmd {
 func (m Model) removeVarCmd(configPath, envName, varName string) tea.Cmd {
 	return func() tea.Msg {
 		err := wcfg.RemoveVar(configPath, envName, varName)
-		return envvars.DeleteVarDoneMsg{Err: err}
+		return uiconfig.DeleteVarDoneMsg{Err: err}
 	}
-}
-
-// --- Triggers helpers ---
-
-// openTriggersView opens the cron triggers view for a given config file.
-func (m *Model) openTriggersView(configPath, projectName string) tea.Cmd {
-	cfg, err := wcfg.Parse(configPath)
-	if err != nil {
-		m.setToast(fmt.Sprintf("Failed to read config: %v", err))
-		return toastTick()
-	}
-
-	m.triggersView = uitriggers.New(configPath, projectName, cfg.CronTriggers())
-	contentHeight := m.height - 2
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
-	m.triggersView.SetSize(m.width, contentHeight)
-	m.activeTab = tabbar.TabConfiguration
-	m.viewState = ViewTriggers
-	return nil
-}
-
-// updateTriggers forwards messages to the triggers view.
-func (m Model) updateTriggers(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.triggersView, cmd = m.triggersView.Update(msg)
-	return m, cmd
 }
 
 // addCronCmd adds a cron trigger to the wrangler config file.
 func (m Model) addCronCmd(configPath, cron string) tea.Cmd {
 	return func() tea.Msg {
 		err := wcfg.AddCron(configPath, cron)
-		return uitriggers.AddCronDoneMsg{Err: err}
+		return uiconfig.AddCronDoneMsg{Err: err}
 	}
 }
 
@@ -372,7 +232,7 @@ func (m Model) addCronCmd(configPath, cron string) tea.Cmd {
 func (m Model) removeCronCmd(configPath, cron string) tea.Cmd {
 	return func() tea.Msg {
 		err := wcfg.RemoveCron(configPath, cron)
-		return uitriggers.DeleteCronDoneMsg{Err: err}
+		return uiconfig.DeleteCronDoneMsg{Err: err}
 	}
 }
 
@@ -722,147 +582,78 @@ func (m *Model) handleRemoveProjectMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	return *m, nil, false
 }
 
-// handleEnvVarsMsg handles all environment variables view messages.
+// handleEnvVarsMsg handles all environment variables messages from the config tab.
 func (m *Model) handleEnvVarsMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
-	case envvars.CloseMsg:
-		if m.envVarsFromResourceList {
-			// Return to the Env Variables project list on the Configuration tab
-			m.envVarsFromResourceList = false
-			m.activeTab = tabbar.TabConfiguration
-			m.viewState = ViewServiceList
-		} else {
-			// Opened from wrangler — return to Operations
-			m.activeTab = tabbar.TabOperations
-			m.viewState = ViewWrangler
-		}
-		return *m, nil, true
-
-	case envvars.SetVarMsg:
+	case uiconfig.SetVarMsg:
 		return *m, m.setVarCmd(msg.ConfigPath, msg.EnvName, msg.VarName, msg.Value), true
 
-	case envvars.DeleteVarMsg:
+	case uiconfig.DeleteVarMsg:
 		return *m, m.removeVarCmd(msg.ConfigPath, msg.EnvName, msg.VarName), true
 
-	case envvars.SetVarDoneMsg:
+	case uiconfig.SetVarDoneMsg:
 		if msg.Err != nil {
-			// Error — reset config model mode, show error
 			m.configView.SetError(fmt.Sprintf("Failed to set var: %v", msg.Err))
 		} else {
-			// Success — reload config and show toast
 			configPath := m.configView.ConfigPath()
 			if configPath != "" {
-				if cfg := m.reloadWranglerConfig(configPath, "Variable saved. Deploy to apply."); cfg != nil {
-					vars := m.buildEnvVarsList(configPath, cfg)
-					m.envvarsView.SetVars(vars)
-				}
+				m.reloadWranglerConfig(configPath, "Variable saved. Deploy to apply.")
 				m.configView.ReloadConfig()
 				return *m, toastTick(), true
 			}
 		}
-		// Also forward to legacy view
-		var cmd tea.Cmd
-		m.envvarsView, cmd = m.envvarsView.Update(msg)
-		return *m, cmd, true
+		return *m, nil, true
 
-	case envvars.DeleteVarDoneMsg:
+	case uiconfig.DeleteVarDoneMsg:
 		if msg.Err != nil {
 			m.configView.SetError(fmt.Sprintf("Failed to delete var: %v", msg.Err))
 		} else {
 			configPath := m.configView.ConfigPath()
 			if configPath != "" {
-				if cfg := m.reloadWranglerConfig(configPath, "Variable deleted. Deploy to apply."); cfg != nil {
-					vars := m.buildEnvVarsList(configPath, cfg)
-					m.envvarsView.SetVars(vars)
-				}
+				m.reloadWranglerConfig(configPath, "Variable deleted. Deploy to apply.")
 				m.configView.ReloadConfig()
 				return *m, toastTick(), true
 			}
 		}
-		var cmd tea.Cmd
-		m.envvarsView, cmd = m.envvarsView.Update(msg)
-		return *m, cmd, true
-
-	case envvars.DoneMsg:
-		if msg.ConfigPath != "" {
-			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Variable saved. Deploy to apply."); cfg != nil {
-				vars := m.buildEnvVarsList(msg.ConfigPath, cfg)
-				m.envvarsView.SetVars(vars)
-			}
-			m.configView.ReloadConfig()
-		}
-		return *m, toastTick(), true
+		return *m, nil, true
 	}
 	return *m, nil, false
 }
 
-// handleTriggersMsg handles all cron triggers view messages.
+// handleTriggersMsg handles all cron triggers messages from the config tab.
 func (m *Model) handleTriggersMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
-	case uitriggers.CloseMsg:
-		if m.triggersFromResourceList {
-			// Return to the Triggers project list on the Configuration tab
-			m.triggersFromResourceList = false
-			m.activeTab = tabbar.TabConfiguration
-			m.viewState = ViewServiceList
-		} else {
-			// Opened from wrangler — return to Operations
-			m.activeTab = tabbar.TabOperations
-			m.viewState = ViewWrangler
-		}
-		return *m, nil, true
-
-	case uitriggers.AddCronMsg:
+	case uiconfig.AddCronMsg:
 		return *m, m.addCronCmd(msg.ConfigPath, msg.Cron), true
 
-	case uitriggers.DeleteCronMsg:
+	case uiconfig.DeleteCronMsg:
 		return *m, m.removeCronCmd(msg.ConfigPath, msg.Cron), true
 
-	case uitriggers.AddCronDoneMsg:
+	case uiconfig.AddCronDoneMsg:
 		if msg.Err != nil {
 			m.configView.SetError(fmt.Sprintf("Failed to add trigger: %v", msg.Err))
 		} else {
 			configPath := m.configView.ConfigPath()
 			if configPath != "" {
-				if cfg := m.reloadWranglerConfig(configPath, "Trigger added. Deploy to apply."); cfg != nil {
-					m.triggersView.SetCrons(cfg.CronTriggers())
-				}
+				m.reloadWranglerConfig(configPath, "Trigger added. Deploy to apply.")
 				m.configView.ReloadConfig()
 				return *m, toastTick(), true
 			}
 		}
-		// Also forward to legacy view
-		var cmd tea.Cmd
-		m.triggersView, cmd = m.triggersView.Update(msg)
-		return *m, cmd, true
+		return *m, nil, true
 
-	case uitriggers.DeleteCronDoneMsg:
+	case uiconfig.DeleteCronDoneMsg:
 		if msg.Err != nil {
 			m.configView.SetError(fmt.Sprintf("Failed to delete trigger: %v", msg.Err))
 		} else {
 			configPath := m.configView.ConfigPath()
 			if configPath != "" {
-				if cfg := m.reloadWranglerConfig(configPath, "Trigger deleted. Deploy to apply."); cfg != nil {
-					m.triggersView.SetCrons(cfg.CronTriggers())
-				}
+				m.reloadWranglerConfig(configPath, "Trigger deleted. Deploy to apply.")
 				m.configView.ReloadConfig()
 				return *m, toastTick(), true
 			}
 		}
-		// Also forward to legacy view
-		var cmd2 tea.Cmd
-		m.triggersView, cmd2 = m.triggersView.Update(msg)
-		return *m, cmd2, true
-
-	case uitriggers.DoneMsg:
-		if msg.ConfigPath != "" {
-			if cfg := m.reloadWranglerConfig(msg.ConfigPath, "Trigger saved. Deploy to apply."); cfg != nil {
-				m.triggersView.SetCrons(cfg.CronTriggers())
-			}
-			// Also refresh the unified config view
-			m.configView.ReloadConfig()
-		}
-		return *m, toastTick(), true
+		return *m, nil, true
 	}
 	return *m, nil, false
 }

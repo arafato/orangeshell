@@ -426,21 +426,19 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 
 	// Triggers action
 	if item.Action == "show_triggers" {
-		configPath, projectName := m.resolveActiveProjectConfig()
+		configPath, _ := m.resolveActiveProjectConfig()
 		if configPath == "" {
 			return nil
 		}
-		m.triggersFromResourceList = false
-		return m.openTriggersView(configPath, projectName)
+		return m.navigateToTriggers(configPath)
 	}
 
 	if item.Action == "show_env_vars" {
-		configPath, projectName := m.resolveActiveProjectConfig()
+		configPath, _ := m.resolveActiveProjectConfig()
 		if configPath == "" {
 			return nil
 		}
-		m.envVarsFromResourceList = false
-		return m.openEnvVarsView(configPath, "", projectName)
+		return m.navigateToEnvVars(configPath)
 	}
 
 	// Create project action

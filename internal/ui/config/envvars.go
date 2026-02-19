@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/oarafat/orangeshell/internal/ui/envvars"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
 
@@ -126,7 +125,7 @@ func (m Model) updateEnvVarsEdit(msg tea.KeyMsg) (Model, tea.Cmd) {
 		envName := m.evEditEnvName
 		varName := m.evEditOrigName
 		return m, func() tea.Msg {
-			return envvars.SetVarMsg{
+			return SetVarMsg{
 				ConfigPath: configPath,
 				EnvName:    envName,
 				VarName:    varName,
@@ -193,7 +192,7 @@ func (m Model) updateEnvVarsAdd(msg tea.KeyMsg) (Model, tea.Cmd) {
 		configPath := m.configPath
 		envName := m.evEditEnvName
 		return m, func() tea.Msg {
-			return envvars.SetVarMsg{
+			return SetVarMsg{
 				ConfigPath: configPath,
 				EnvName:    envName,
 				VarName:    name,
@@ -237,7 +236,7 @@ func (m Model) updateEnvVarsDelete(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.evDeleteTarget != nil {
 			v := m.evDeleteTarget
 			return m, func() tea.Msg {
-				return envvars.DeleteVarMsg{
+				return DeleteVarMsg{
 					ConfigPath: v.ConfigPath,
 					EnvName:    v.EnvName,
 					VarName:    v.Name,

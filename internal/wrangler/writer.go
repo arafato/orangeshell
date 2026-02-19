@@ -175,7 +175,9 @@ func deleteEnvironmentJSON(data []byte, envName string) ([]byte, error) {
 
 // BindingDef describes a binding to be written into a wrangler config file.
 type BindingDef struct {
-	// Type is one of: "d1", "kv", "r2", "queue"
+	// Type is one of: "d1", "kv", "r2", "queue", "service", "durable_object",
+	// "ai", "browser", "images", "vectorize", "hyperdrive", "analytics_engine",
+	// "mtls_certificate", "workflow", "secrets_store_secret"
 	Type string
 	// BindingName is the JS variable name (e.g. "MY_DB").
 	BindingName string
@@ -183,6 +185,10 @@ type BindingDef struct {
 	ResourceID string
 	// ResourceName is the human name (used for D1's database_name field).
 	ResourceName string
+	// ExtraFields holds additional type-specific fields (e.g. "class_name", "script_name"
+	// for Workflows; "store_id", "secret_name" for Secrets Store). Keys are the
+	// config field names; values are strings. Nil for simple types.
+	ExtraFields map[string]string
 }
 
 // AddBinding writes a binding definition into a wrangler config file.
@@ -241,6 +247,16 @@ func addBindingTOML(data []byte, envName string, isTopLevel bool, b BindingDef) 
 	return []byte(result), nil
 }
 
+// isSingletonBindingType returns true for binding types that use a single TOML
+// table [section] rather than an array-of-tables [[section]].
+func isSingletonBindingType(bindingType string) bool {
+	switch bindingType {
+	case "ai", "browser", "images":
+		return true
+	}
+	return false
+}
+
 // formatTOMLBinding generates a TOML block for a binding definition.
 func formatTOMLBinding(b BindingDef) string {
 	var sb strings.Builder
@@ -264,6 +280,60 @@ func formatTOMLBinding(b BindingDef) string {
 		sb.WriteString("[[queues.producers]]\n")
 		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
 		sb.WriteString(fmt.Sprintf("queue = %q\n", b.ResourceName))
+	case "service":
+		sb.WriteString("[[services]]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("service = %q\n", b.ResourceID))
+		if v := b.ExtraFields["entrypoint"]; v != "" {
+			sb.WriteString(fmt.Sprintf("entrypoint = %q\n", v))
+		}
+	case "durable_object":
+		sb.WriteString("[[durable_objects.bindings]]\n")
+		sb.WriteString(fmt.Sprintf("name = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("class_name = %q\n", b.ResourceID))
+		if v := b.ExtraFields["script_name"]; v != "" {
+			sb.WriteString(fmt.Sprintf("script_name = %q\n", v))
+		}
+	case "ai":
+		sb.WriteString("[ai]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+	case "browser":
+		sb.WriteString("[browser]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+	case "images":
+		sb.WriteString("[images]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+	case "vectorize":
+		sb.WriteString("[[vectorize]]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("index_name = %q\n", b.ResourceID))
+	case "hyperdrive":
+		sb.WriteString("[[hyperdrive]]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("id = %q\n", b.ResourceID))
+	case "analytics_engine":
+		sb.WriteString("[[analytics_engine_datasets]]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		if b.ResourceID != "" {
+			sb.WriteString(fmt.Sprintf("dataset = %q\n", b.ResourceID))
+		}
+	case "mtls_certificate":
+		sb.WriteString("[[mtls_certificates]]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("certificate_id = %q\n", b.ResourceID))
+	case "workflow":
+		sb.WriteString("[[workflows]]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("name = %q\n", b.ResourceName))
+		sb.WriteString(fmt.Sprintf("class_name = %q\n", b.ResourceID))
+		if v := b.ExtraFields["script_name"]; v != "" {
+			sb.WriteString(fmt.Sprintf("script_name = %q\n", v))
+		}
+	case "secrets_store_secret":
+		sb.WriteString("[[secrets_store_secrets]]\n")
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("store_id = %q\n", b.ResourceID))
+		sb.WriteString(fmt.Sprintf("secret_name = %q\n", b.ResourceName))
 	}
 
 	return sb.String()
@@ -295,6 +365,60 @@ func formatTOMLEnvBinding(envName string, b BindingDef) string {
 		sb.WriteString(fmt.Sprintf("[[%s.queues.producers]]\n", prefix))
 		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
 		sb.WriteString(fmt.Sprintf("queue = %q\n", b.ResourceName))
+	case "service":
+		sb.WriteString(fmt.Sprintf("[[%s.services]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("service = %q\n", b.ResourceID))
+		if v := b.ExtraFields["entrypoint"]; v != "" {
+			sb.WriteString(fmt.Sprintf("entrypoint = %q\n", v))
+		}
+	case "durable_object":
+		sb.WriteString(fmt.Sprintf("[[%s.durable_objects.bindings]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("name = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("class_name = %q\n", b.ResourceID))
+		if v := b.ExtraFields["script_name"]; v != "" {
+			sb.WriteString(fmt.Sprintf("script_name = %q\n", v))
+		}
+	case "ai":
+		sb.WriteString(fmt.Sprintf("[%s.ai]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+	case "browser":
+		sb.WriteString(fmt.Sprintf("[%s.browser]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+	case "images":
+		sb.WriteString(fmt.Sprintf("[%s.images]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+	case "vectorize":
+		sb.WriteString(fmt.Sprintf("[[%s.vectorize]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("index_name = %q\n", b.ResourceID))
+	case "hyperdrive":
+		sb.WriteString(fmt.Sprintf("[[%s.hyperdrive]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("id = %q\n", b.ResourceID))
+	case "analytics_engine":
+		sb.WriteString(fmt.Sprintf("[[%s.analytics_engine_datasets]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		if b.ResourceID != "" {
+			sb.WriteString(fmt.Sprintf("dataset = %q\n", b.ResourceID))
+		}
+	case "mtls_certificate":
+		sb.WriteString(fmt.Sprintf("[[%s.mtls_certificates]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("certificate_id = %q\n", b.ResourceID))
+	case "workflow":
+		sb.WriteString(fmt.Sprintf("[[%s.workflows]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("name = %q\n", b.ResourceName))
+		sb.WriteString(fmt.Sprintf("class_name = %q\n", b.ResourceID))
+		if v := b.ExtraFields["script_name"]; v != "" {
+			sb.WriteString(fmt.Sprintf("script_name = %q\n", v))
+		}
+	case "secrets_store_secret":
+		sb.WriteString(fmt.Sprintf("[[%s.secrets_store_secrets]]\n", prefix))
+		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
+		sb.WriteString(fmt.Sprintf("store_id = %q\n", b.ResourceID))
+		sb.WriteString(fmt.Sprintf("secret_name = %q\n", b.ResourceName))
 	}
 
 	return sb.String()
@@ -392,12 +516,23 @@ func addBindingJSON(data []byte, isTopLevel bool, envName string, b BindingDef) 
 	clean := jsonc.ToJSON(data)
 
 	entry := buildJSONEntry(b)
+	key := jsonArrayKey(b.Type)
 
 	var path string
-	if isTopLevel {
-		path = jsonArrayKey(b.Type) + ".-1"
+	if isSingletonBindingType(b.Type) {
+		// Singleton types: set as an object, not append to array
+		if isTopLevel {
+			path = key
+		} else {
+			path = "env." + envName + "." + key
+		}
 	} else {
-		path = "env." + envName + "." + jsonArrayKey(b.Type) + ".-1"
+		// Array types: append to array using -1 sentinel
+		if isTopLevel {
+			path = key + ".-1"
+		} else {
+			path = "env." + envName + "." + key + ".-1"
+		}
 	}
 
 	result, err := sjson.SetRawBytes(clean, path, entry)
@@ -415,6 +550,7 @@ func addBindingJSON(data []byte, isTopLevel bool, envName string, b BindingDef) 
 }
 
 // jsonArrayKey returns the JSON key for a binding type's array.
+// For singleton types (ai, browser, images), it returns the object key.
 func jsonArrayKey(resourceType string) string {
 	switch resourceType {
 	case "d1":
@@ -424,8 +560,29 @@ func jsonArrayKey(resourceType string) string {
 	case "r2":
 		return "r2_buckets"
 	case "queue":
-		// For queues, the JSON path needs special handling since it's nested
 		return "queues.producers"
+	case "service":
+		return "services"
+	case "durable_object":
+		return "durable_objects.bindings"
+	case "ai":
+		return "ai"
+	case "browser":
+		return "browser"
+	case "images":
+		return "images"
+	case "vectorize":
+		return "vectorize"
+	case "hyperdrive":
+		return "hyperdrive"
+	case "analytics_engine":
+		return "analytics_engine_datasets"
+	case "mtls_certificate":
+		return "mtls_certificates"
+	case "workflow":
+		return "workflows"
+	case "secrets_store_secret":
+		return "secrets_store_secrets"
 	default:
 		return resourceType
 	}
@@ -487,9 +644,19 @@ func bindingTypeToConfigKey(bindingType string) string {
 	case "hyperdrive":
 		return "hyperdrive"
 	case "analytics_engine":
-		return "analytics_engine"
+		return "analytics_engine_datasets"
 	case "ai":
 		return "ai"
+	case "browser":
+		return "browser"
+	case "images":
+		return "images"
+	case "mtls_certificate":
+		return "mtls_certificates"
+	case "workflow":
+		return "workflows"
+	case "secrets_store_secret":
+		return "secrets_store_secrets"
 	default:
 		return bindingType
 	}
@@ -505,13 +672,14 @@ func bindingNameField(bindingType string) string {
 }
 
 // removeBindingTOML removes a binding entry from TOML config text.
-// It finds the [[section]] block where the binding name matches and removes the entire block.
+// For array types, it finds the [[section]] block where the binding name matches.
+// For singleton types (ai, browser, images), it finds the [section] block.
 func removeBindingTOML(data []byte, envName string, isTopLevel bool, bindingName, bindingType string) ([]byte, error) {
 	content := string(data)
 	configKey := bindingTypeToConfigKey(bindingType)
 	nameField := bindingNameField(bindingType)
 
-	// Build the TOML array-of-tables header pattern
+	// Build the TOML section header prefix
 	var headerPrefix string
 	if isTopLevel {
 		headerPrefix = configKey
@@ -519,8 +687,17 @@ func removeBindingTOML(data []byte, envName string, isTopLevel bool, bindingName
 		headerPrefix = fmt.Sprintf("env.%s.%s", envName, configKey)
 	}
 
-	// Pattern to match the array-of-tables header: [[kv_namespaces]] or [[env.staging.kv_namespaces]]
-	headerPattern := fmt.Sprintf(`(?m)^\[\[%s\]\]`, regexp.QuoteMeta(headerPrefix))
+	// Determine if this is a singleton type ([section]) or array type ([[section]])
+	var headerPattern string
+	if isSingletonBindingType(bindingType) {
+		// Singleton: match [ai] or [env.staging.ai] (single brackets, NOT double)
+		// Use negative lookahead/behind isn't available, so match [section] and verify
+		// it's not [[section]] by checking the character before [
+		headerPattern = fmt.Sprintf(`(?m)^\[%s\]`, regexp.QuoteMeta(headerPrefix))
+	} else {
+		// Array: match [[kv_namespaces]] or [[env.staging.kv_namespaces]]
+		headerPattern = fmt.Sprintf(`(?m)^\[\[%s\]\]`, regexp.QuoteMeta(headerPrefix))
+	}
 	headerRe := regexp.MustCompile(headerPattern)
 
 	// Pattern to match the binding name field within a block
@@ -535,7 +712,13 @@ func removeBindingTOML(data []byte, envName string, isTopLevel bool, bindingName
 
 	for _, match := range matches {
 		blockStart := match[0]
-		// Find the end of this block: next [[ or [ header, or EOF
+
+		// For singleton pattern, skip if this is actually a double-bracket [[section]]
+		if isSingletonBindingType(bindingType) && blockStart > 0 && content[blockStart-1] == '[' {
+			continue
+		}
+
+		// Find the end of this block: next [ header, or EOF
 		blockEnd := len(content)
 		remaining := content[match[1]:]
 		nextHeader := regexp.MustCompile(`(?m)^\[`).FindStringIndex(remaining)
@@ -569,20 +752,39 @@ func removeBindingTOML(data []byte, envName string, isTopLevel bool, bindingName
 }
 
 // removeBindingJSON removes a binding entry from JSON/JSONC config.
+// For singleton types (ai, browser, images), it removes the entire object key.
 func removeBindingJSON(data []byte, isTopLevel bool, envName, bindingName, bindingType string) ([]byte, error) {
 	clean := jsonc.ToJSON(data)
 	configKey := bindingTypeToConfigKey(bindingType)
-	nameField := bindingNameField(bindingType)
 
-	var arrayPath string
+	var basePath string
 	if isTopLevel {
-		arrayPath = configKey
+		basePath = configKey
 	} else {
-		arrayPath = "env." + envName + "." + configKey
+		basePath = "env." + envName + "." + configKey
 	}
 
-	// Find the index of the binding entry in the array
-	arr := gjson.GetBytes(clean, arrayPath)
+	// Singleton types: remove the entire object key
+	if isSingletonBindingType(bindingType) {
+		existing := gjson.GetBytes(clean, basePath)
+		if !existing.Exists() {
+			return nil, fmt.Errorf("no %s binding found in config", configKey)
+		}
+		result, err := sjson.DeleteBytes(clean, basePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update JSON config: %w", err)
+		}
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, result, "", "  "); err != nil {
+			return result, nil
+		}
+		return append(pretty.Bytes(), '\n'), nil
+	}
+
+	// Array types: find the matching entry by binding name and remove it
+	nameField := bindingNameField(bindingType)
+
+	arr := gjson.GetBytes(clean, basePath)
 	if !arr.Exists() || !arr.IsArray() {
 		return nil, fmt.Errorf("no %s bindings found in config", configKey)
 	}
@@ -600,7 +802,7 @@ func removeBindingJSON(data []byte, isTopLevel bool, envName, bindingName, bindi
 		return nil, fmt.Errorf("binding %q not found in %s", bindingName, configKey)
 	}
 
-	deletePath := fmt.Sprintf("%s.%d", arrayPath, deleteIdx)
+	deletePath := fmt.Sprintf("%s.%d", basePath, deleteIdx)
 	result, err := sjson.DeleteBytes(clean, deletePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update JSON config: %w", err)
@@ -1127,6 +1329,7 @@ func removeCronJSON(data []byte, cron string) ([]byte, error) {
 }
 
 // buildJSONEntry returns the raw JSON bytes for a binding entry.
+// For singleton types (ai, browser, images), this returns the entire object.
 func buildJSONEntry(b BindingDef) []byte {
 	var m map[string]string
 
@@ -1151,6 +1354,63 @@ func buildJSONEntry(b BindingDef) []byte {
 		m = map[string]string{
 			"binding": b.BindingName,
 			"queue":   b.ResourceName,
+		}
+	case "service":
+		m = map[string]string{
+			"binding": b.BindingName,
+			"service": b.ResourceID,
+		}
+		if v := b.ExtraFields["entrypoint"]; v != "" {
+			m["entrypoint"] = v
+		}
+	case "durable_object":
+		m = map[string]string{
+			"name":       b.BindingName,
+			"class_name": b.ResourceID,
+		}
+		if v := b.ExtraFields["script_name"]; v != "" {
+			m["script_name"] = v
+		}
+	case "ai", "browser", "images":
+		m = map[string]string{
+			"binding": b.BindingName,
+		}
+	case "vectorize":
+		m = map[string]string{
+			"binding":    b.BindingName,
+			"index_name": b.ResourceID,
+		}
+	case "hyperdrive":
+		m = map[string]string{
+			"binding": b.BindingName,
+			"id":      b.ResourceID,
+		}
+	case "analytics_engine":
+		m = map[string]string{
+			"binding": b.BindingName,
+		}
+		if b.ResourceID != "" {
+			m["dataset"] = b.ResourceID
+		}
+	case "mtls_certificate":
+		m = map[string]string{
+			"binding":        b.BindingName,
+			"certificate_id": b.ResourceID,
+		}
+	case "workflow":
+		m = map[string]string{
+			"binding":    b.BindingName,
+			"name":       b.ResourceName,
+			"class_name": b.ResourceID,
+		}
+		if v := b.ExtraFields["script_name"]; v != "" {
+			m["script_name"] = v
+		}
+	case "secrets_store_secret":
+		m = map[string]string{
+			"binding":     b.BindingName,
+			"store_id":    b.ResourceID,
+			"secret_name": b.ResourceName,
 		}
 	default:
 		m = map[string]string{

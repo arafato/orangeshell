@@ -49,12 +49,15 @@ func (c Category) zoneID() string {
 type mode int
 
 const (
-	modeNormal    mode = iota // browsing list
-	modeAdd                   // inline add flow
-	modeEdit                  // inline edit flow
-	modeDelete                // inline delete confirmation
-	modeAddPreset             // triggers: preset picker
-	modeAddCustom             // triggers: custom cron input
+	modeNormal           mode = iota // browsing list
+	modeAdd                          // inline add flow
+	modeEdit                         // inline edit flow
+	modeDelete                       // inline delete confirmation
+	modeAddPreset                    // triggers: preset picker
+	modeAddCustom                    // triggers: custom cron input
+	modeAddBinding                   // bindings: type selector
+	modeAddBindingForm               // bindings: simple text form (singletons, code-defined types)
+	modeAddBindingPicker             // bindings: resource picker with async fetch
 )
 
 // --- ProjectEntry ---
@@ -134,6 +137,17 @@ type Model struct {
 	bindingsCursor       int
 	bindingsScrollY      int
 	bindingsDeleteTarget *bindingItem
+
+	// Inline add-binding state
+	addBindingTypeCursor int                   // cursor in the type selector list
+	addBindingType       string                // selected writer type key (e.g. "ai", "workflow")
+	addBindingEnvName    string                // target environment
+	addBindingFocusField int                   // which form field has focus (0-based)
+	addBindingInputs     []textinput.Model     // dynamic text inputs for the form
+	addBindingFieldNames []string              // field labels matching addBindingInputs
+	addBindingResources  []BindingResourceItem // fetched API resources for picker mode
+	addBindingResCursor  int                   // cursor in the resource picker list
+	addBindingResLoading bool                  // true while fetching resources
 
 	// --- Environments state ---
 	envsList         []string
@@ -282,7 +296,7 @@ func (m Model) DropdownOpen() bool {
 // than being intercepted as tab-switch shortcuts.
 func (m Model) IsTextInputActive() bool {
 	switch m.mode {
-	case modeEdit, modeAdd, modeAddCustom:
+	case modeEdit, modeAdd, modeAddCustom, modeAddBindingForm:
 		return true
 	}
 	if m.envVarsFilterActive {
@@ -461,6 +475,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case CategoryTriggers:
 		if m.mode == modeAddCustom {
 			m.triggersCustomInput, cmd = m.triggersCustomInput.Update(msg)
+		}
+	case CategoryBindings:
+		if m.mode == modeAddBindingForm && m.addBindingFocusField < len(m.addBindingInputs) {
+			m.addBindingInputs[m.addBindingFocusField], cmd = m.addBindingInputs[m.addBindingFocusField].Update(msg)
 		}
 	case CategoryEnvironments:
 		if m.mode == modeAdd {

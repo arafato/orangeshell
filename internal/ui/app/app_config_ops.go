@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/oarafat/orangeshell/internal/api"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
@@ -711,6 +712,149 @@ func (m *Model) handleConfigViewMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	// --- Navigate to resource (from bindings) ---
 	case uiconfig.NavigateToResourceMsg:
 		return *m, m.navigateTo(msg.ServiceName, msg.ResourceID), true
+
+	// --- Inline binding add: write directly ---
+	case uiconfig.WriteDirectBindingMsg:
+		return *m, m.writeDirectBindingCmd(msg.ConfigPath, msg.EnvName, msg.BindingDef), true
+
+	case uiconfig.WriteDirectBindingDoneMsg:
+		if msg.Err != nil {
+			m.configView.SetError(fmt.Sprintf("Failed to add binding: %v", msg.Err))
+		} else {
+			configPath := m.configView.ConfigPath()
+			if configPath != "" {
+				m.reloadWranglerConfig(configPath, "Binding added. Deploy to apply.")
+				m.configView.ReloadConfig()
+				return *m, toastTick(), true
+			}
+		}
+		return *m, nil, true
+
+	// --- Inline binding add: list resources ---
+	case uiconfig.ListBindingResourcesMsg:
+		return *m, m.listBindingResourcesCmd(msg.ResourceType), true
+
+	case uiconfig.BindingResourcesLoadedMsg:
+		m.configView.SetBindingResources(msg.Items, msg.Err)
+		return *m, nil, true
 	}
 	return *m, nil, false
+}
+
+// writeDirectBindingCmd writes a binding definition into the wrangler config file.
+// Used by the inline binding form (not the popup wizard).
+func (m Model) writeDirectBindingCmd(configPath, envName string, bindingDef interface{}) tea.Cmd {
+	def, ok := bindingDef.(wcfg.BindingDef)
+	if !ok {
+		return func() tea.Msg {
+			return uiconfig.WriteDirectBindingDoneMsg{Err: fmt.Errorf("invalid binding definition type")}
+		}
+	}
+	return func() tea.Msg {
+		err := wcfg.AddBinding(configPath, envName, def)
+		return uiconfig.WriteDirectBindingDoneMsg{Err: err}
+	}
+}
+
+// listBindingResourcesCmd fetches resources for the inline binding picker.
+func (m Model) listBindingResourcesCmd(resourceType string) tea.Cmd {
+	// For "service" type, use the registry's Workers service
+	if resourceType == "service" {
+		return func() tea.Msg {
+			s := m.registry.Get("Workers")
+			if s == nil {
+				return uiconfig.BindingResourcesLoadedMsg{
+					ResourceType: resourceType,
+					Err:          fmt.Errorf("Workers service not available"),
+				}
+			}
+			resources, err := s.List()
+			if err != nil {
+				return uiconfig.BindingResourcesLoadedMsg{
+					ResourceType: resourceType,
+					Err:          err,
+				}
+			}
+			var items []uiconfig.BindingResourceItem
+			for _, r := range resources {
+				items = append(items, uiconfig.BindingResourceItem{
+					ID:   r.ID,
+					Name: r.Name,
+				})
+			}
+			return uiconfig.BindingResourcesLoadedMsg{
+				ResourceType: resourceType,
+				Items:        items,
+			}
+		}
+	}
+
+	// For other types, use the raw HTTP resource list client
+	rlc := m.newResourceListClient()
+	if rlc == nil {
+		return func() tea.Msg {
+			return uiconfig.BindingResourcesLoadedMsg{
+				ResourceType: resourceType,
+				Err:          fmt.Errorf("API credentials not available"),
+			}
+		}
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		var apiItems []api.ResourceItem
+		var err error
+
+		switch resourceType {
+		case "vectorize":
+			apiItems, err = rlc.ListVectorizeIndexes(ctx)
+		case "hyperdrive":
+			apiItems, err = rlc.ListHyperdriveConfigs(ctx)
+		case "mtls_certificate":
+			apiItems, err = rlc.ListMTLSCertificates(ctx)
+		case "secrets_store":
+			apiItems, err = rlc.ListSecretsStoreStores(ctx)
+		default:
+			err = fmt.Errorf("unsupported resource type: %s", resourceType)
+		}
+
+		if err != nil {
+			return uiconfig.BindingResourcesLoadedMsg{
+				ResourceType: resourceType,
+				Err:          err,
+			}
+		}
+
+		items := make([]uiconfig.BindingResourceItem, len(apiItems))
+		for i, r := range apiItems {
+			items[i] = uiconfig.BindingResourceItem{ID: r.ID, Name: r.Name}
+		}
+		return uiconfig.BindingResourcesLoadedMsg{
+			ResourceType: resourceType,
+			Items:        items,
+		}
+	}
+}
+
+// newResourceListClient creates a resource list client from the current auth config.
+func (m Model) newResourceListClient() *api.ResourceListClient {
+	accountID := m.registry.ActiveAccountID()
+	if accountID == "" {
+		return nil
+	}
+	switch m.cfg.AuthMethod {
+	case "apikey":
+		return api.NewResourceListClientWithCreds(accountID, m.cfg.Email, m.cfg.APIKey, "")
+	case "apitoken":
+		return api.NewResourceListClientWithCreds(accountID, "", "", m.cfg.APIToken)
+	case "oauth":
+		token := m.cfg.OAuthAccessToken
+		if token == "" {
+			return nil
+		}
+		return api.NewResourceListClientWithCreds(accountID, "", "", token)
+	}
+	return nil
 }

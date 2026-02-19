@@ -626,6 +626,22 @@ go build -o orangeshell .
 
 36. **Gate interactive UI elements on focus state**: Cursors, selection highlights, and other interactive indicators in sub-panes should only render when that pane has focus (`m.focus == FocusDetail`). Showing a cursor highlight unconditionally (e.g., version history table always showing a purple row) confuses users about which pane is active. The focus state already exists for border color switching — reuse it for cursor visibility.
 
+### Binding Type Expansion
+
+37. **Three-tier binding kind pattern**: Binding types fall into three categories: (1) "wizard" types (D1/KV/R2/Queue) that delegate to the existing popup wizard with create-or-select flow, (2) "form" types (AI/Browser/Images, DO, Workflow, Analytics Engine) with inline text inputs, and (3) "picker" types (Service, Vectorize, Hyperdrive, mTLS, Secrets Store) that fetch API resources first, then transition to a pre-filled form. This three-kind classification keeps the UX consistent while reusing existing infrastructure for the mature binding types.
+
+38. **Singleton vs array bindings need distinct code paths everywhere**: AI, Browser, and Images use `[section]` in TOML (not `[[section]]`) and a plain object in JSON (not an array). The parser `collectBindings()`, writer `formatTOMLBinding()`/`addBindingJSON()`, and remover `removeBindingTOML()`/`removeBindingJSON()` all needed separate branches. Added `isSingletonBindingType()` helper to centralize the check.
+
+39. **`ExtraFields map[string]string` is better than proliferating struct fields**: For binding types with 3+ config fields (Workflow: `name`, `class_name`, `script_name`; Service: `entrypoint`; DO: `script_name`), a generic `ExtraFields` map on `BindingDef` avoids adding many type-specific fields. The existing 4 types (D1/KV/R2/Queue) continue using `ResourceID`/`ResourceName` for backward compatibility.
+
+40. **Inline mode chain within a category**: The binding add flow uses three sequential modes (`modeAddBinding` → `modeAddBindingForm` or `modeAddBindingPicker` → form submit). Picker mode transitions to form mode with pre-filled values after resource selection. All modes coexist within the same category's Update/View dispatch, not as separate overlay components. This keeps the config tab self-contained.
+
+41. **interface{} message fields avoid import cycles**: `WriteDirectBindingMsg.BindingDef` is typed as `interface{}` because the `config` UI package defines the message but the value is a `wcfg.BindingDef`. The app layer (which imports both packages) does the type assertion. This avoids the config UI package importing wrangler types in its message definitions, which would create import cycle risk.
+
+42. **Raw HTTP resource list functions use the generic Cloudflare v4 envelope**: All list endpoints (Vectorize, Hyperdrive, mTLS, Secrets Store) return `{success, result[], errors[]}`. A single `parseResourceList(body, idField, nameField)` function handles all four, extracting just ID and Name from each result item via `map[string]interface{}`. Much simpler than defining per-type response structs.
+
+43. **Service bindings use the existing Workers registry, not raw HTTP**: For the "service" resource picker, the Workers service is already registered in the service registry and caches worker lists. Using `m.registry.Get("Workers").List()` avoids duplicating API calls. Only Vectorize, Hyperdrive, mTLS, and Secrets Store need the raw HTTP `ResourceListClient` since they don't have full Service implementations.
+
 ## General Design Considerations
 ### Design-Patterns
 1. The Elm Architecture (MVU)

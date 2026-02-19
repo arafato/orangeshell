@@ -92,6 +92,16 @@ func (b Binding) TypeLabel() string {
 		return "Hyperdrive"
 	case "analytics_engine":
 		return "Analytics"
+	case "browser":
+		return "Browser"
+	case "images":
+		return "Images"
+	case "mtls_certificate":
+		return "mTLS"
+	case "workflow":
+		return "Workflow"
+	case "secrets_store_secret":
+		return "Secrets Store"
 	case "secret_text":
 		return "Secret"
 	case "plain_text":
@@ -140,26 +150,31 @@ func Parse(path string) (*WranglerConfig, error) {
 
 // rawConfig is the intermediate representation that both TOML and JSON parse into.
 type rawConfig struct {
-	Name            string            `toml:"name" json:"name"`
-	Main            string            `toml:"main" json:"main"`
-	CompatDate      string            `toml:"compatibility_date" json:"compatibility_date"`
-	CompatFlags     []string          `toml:"compatibility_flags" json:"compatibility_flags"`
-	Route           *rawRoute         `toml:"route" json:"route"`
-	Routes          []rawRoute        `toml:"routes" json:"routes"`
-	WorkersDev      *bool             `toml:"workers_dev" json:"workers_dev"`
-	Vars            map[string]any    `toml:"vars" json:"vars"`
-	KVNamespaces    []rawKV           `toml:"kv_namespaces" json:"kv_namespaces"`
-	R2Buckets       []rawR2           `toml:"r2_buckets" json:"r2_buckets"`
-	D1Databases     []rawD1           `toml:"d1_databases" json:"d1_databases"`
-	Services        []rawService      `toml:"services" json:"services"`
-	DurableObjects  *rawDO            `toml:"durable_objects" json:"durable_objects"`
-	Queues          *rawQueues        `toml:"queues" json:"queues"`
-	AI              *rawAI            `toml:"ai" json:"ai"`
-	Vectorize       []rawVectorize    `toml:"vectorize" json:"vectorize"`
-	Hyperdrive      []rawHyperdrive   `toml:"hyperdrive" json:"hyperdrive"`
-	AnalyticsEngine []rawAnalytics    `toml:"analytics_engine_datasets" json:"analytics_engine_datasets"`
-	Triggers        *rawTriggers      `toml:"triggers" json:"triggers"`
-	Env             map[string]rawEnv `toml:"env" json:"env"`
+	Name                string            `toml:"name" json:"name"`
+	Main                string            `toml:"main" json:"main"`
+	CompatDate          string            `toml:"compatibility_date" json:"compatibility_date"`
+	CompatFlags         []string          `toml:"compatibility_flags" json:"compatibility_flags"`
+	Route               *rawRoute         `toml:"route" json:"route"`
+	Routes              []rawRoute        `toml:"routes" json:"routes"`
+	WorkersDev          *bool             `toml:"workers_dev" json:"workers_dev"`
+	Vars                map[string]any    `toml:"vars" json:"vars"`
+	KVNamespaces        []rawKV           `toml:"kv_namespaces" json:"kv_namespaces"`
+	R2Buckets           []rawR2           `toml:"r2_buckets" json:"r2_buckets"`
+	D1Databases         []rawD1           `toml:"d1_databases" json:"d1_databases"`
+	Services            []rawService      `toml:"services" json:"services"`
+	DurableObjects      *rawDO            `toml:"durable_objects" json:"durable_objects"`
+	Queues              *rawQueues        `toml:"queues" json:"queues"`
+	AI                  *rawAI            `toml:"ai" json:"ai"`
+	Vectorize           []rawVectorize    `toml:"vectorize" json:"vectorize"`
+	Hyperdrive          []rawHyperdrive   `toml:"hyperdrive" json:"hyperdrive"`
+	AnalyticsEngine     []rawAnalytics    `toml:"analytics_engine_datasets" json:"analytics_engine_datasets"`
+	Browser             *rawBrowser       `toml:"browser" json:"browser"`
+	Images              *rawImages        `toml:"images" json:"images"`
+	MTLSCertificates    []rawMTLS         `toml:"mtls_certificates" json:"mtls_certificates"`
+	Workflows           []rawWorkflow     `toml:"workflows" json:"workflows"`
+	SecretsStoreSecrets []rawSecretsStore `toml:"secrets_store_secrets" json:"secrets_store_secrets"`
+	Triggers            *rawTriggers      `toml:"triggers" json:"triggers"`
+	Env                 map[string]rawEnv `toml:"env" json:"env"`
 }
 
 // rawTriggers represents the [triggers] section in wrangler config (top-level only).
@@ -168,22 +183,27 @@ type rawTriggers struct {
 }
 
 type rawEnv struct {
-	Name            string          `toml:"name" json:"name"`
-	CompatDate      string          `toml:"compatibility_date" json:"compatibility_date"`
-	CompatFlags     []string        `toml:"compatibility_flags" json:"compatibility_flags"`
-	Route           *rawRoute       `toml:"route" json:"route"`
-	Routes          []rawRoute      `toml:"routes" json:"routes"`
-	Vars            map[string]any  `toml:"vars" json:"vars"`
-	KVNamespaces    []rawKV         `toml:"kv_namespaces" json:"kv_namespaces"`
-	R2Buckets       []rawR2         `toml:"r2_buckets" json:"r2_buckets"`
-	D1Databases     []rawD1         `toml:"d1_databases" json:"d1_databases"`
-	Services        []rawService    `toml:"services" json:"services"`
-	DurableObjects  *rawDO          `toml:"durable_objects" json:"durable_objects"`
-	Queues          *rawQueues      `toml:"queues" json:"queues"`
-	AI              *rawAI          `toml:"ai" json:"ai"`
-	Vectorize       []rawVectorize  `toml:"vectorize" json:"vectorize"`
-	Hyperdrive      []rawHyperdrive `toml:"hyperdrive" json:"hyperdrive"`
-	AnalyticsEngine []rawAnalytics  `toml:"analytics_engine_datasets" json:"analytics_engine_datasets"`
+	Name                string            `toml:"name" json:"name"`
+	CompatDate          string            `toml:"compatibility_date" json:"compatibility_date"`
+	CompatFlags         []string          `toml:"compatibility_flags" json:"compatibility_flags"`
+	Route               *rawRoute         `toml:"route" json:"route"`
+	Routes              []rawRoute        `toml:"routes" json:"routes"`
+	Vars                map[string]any    `toml:"vars" json:"vars"`
+	KVNamespaces        []rawKV           `toml:"kv_namespaces" json:"kv_namespaces"`
+	R2Buckets           []rawR2           `toml:"r2_buckets" json:"r2_buckets"`
+	D1Databases         []rawD1           `toml:"d1_databases" json:"d1_databases"`
+	Services            []rawService      `toml:"services" json:"services"`
+	DurableObjects      *rawDO            `toml:"durable_objects" json:"durable_objects"`
+	Queues              *rawQueues        `toml:"queues" json:"queues"`
+	AI                  *rawAI            `toml:"ai" json:"ai"`
+	Vectorize           []rawVectorize    `toml:"vectorize" json:"vectorize"`
+	Hyperdrive          []rawHyperdrive   `toml:"hyperdrive" json:"hyperdrive"`
+	AnalyticsEngine     []rawAnalytics    `toml:"analytics_engine_datasets" json:"analytics_engine_datasets"`
+	Browser             *rawBrowser       `toml:"browser" json:"browser"`
+	Images              *rawImages        `toml:"images" json:"images"`
+	MTLSCertificates    []rawMTLS         `toml:"mtls_certificates" json:"mtls_certificates"`
+	Workflows           []rawWorkflow     `toml:"workflows" json:"workflows"`
+	SecretsStoreSecrets []rawSecretsStore `toml:"secrets_store_secrets" json:"secrets_store_secrets"`
 }
 
 type rawRoute struct {
@@ -252,6 +272,32 @@ type rawHyperdrive struct {
 type rawAnalytics struct {
 	Binding string `toml:"binding" json:"binding"`
 	Dataset string `toml:"dataset" json:"dataset"`
+}
+
+type rawBrowser struct {
+	Binding string `toml:"binding" json:"binding"`
+}
+
+type rawImages struct {
+	Binding string `toml:"binding" json:"binding"`
+}
+
+type rawMTLS struct {
+	Binding       string `toml:"binding" json:"binding"`
+	CertificateID string `toml:"certificate_id" json:"certificate_id"`
+}
+
+type rawWorkflow struct {
+	Binding    string `toml:"binding" json:"binding"`
+	Name       string `toml:"name" json:"name"`
+	ClassName  string `toml:"class_name" json:"class_name"`
+	ScriptName string `toml:"script_name" json:"script_name"`
+}
+
+type rawSecretsStore struct {
+	Binding    string `toml:"binding" json:"binding"`
+	StoreID    string `toml:"store_id" json:"store_id"`
+	SecretName string `toml:"secret_name" json:"secret_name"`
 }
 
 // --- Parsers ---
@@ -338,6 +384,8 @@ func extractBindings(raw *rawConfig) []Binding {
 		raw.KVNamespaces, raw.R2Buckets, raw.D1Databases, raw.Services,
 		raw.DurableObjects, raw.Queues, raw.AI,
 		raw.Vectorize, raw.Hyperdrive, raw.AnalyticsEngine,
+		raw.Browser, raw.Images, raw.MTLSCertificates,
+		raw.Workflows, raw.SecretsStoreSecrets,
 	)
 }
 
@@ -347,6 +395,8 @@ func extractEnvBindings(raw *rawEnv) []Binding {
 		raw.KVNamespaces, raw.R2Buckets, raw.D1Databases, raw.Services,
 		raw.DurableObjects, raw.Queues, raw.AI,
 		raw.Vectorize, raw.Hyperdrive, raw.AnalyticsEngine,
+		raw.Browser, raw.Images, raw.MTLSCertificates,
+		raw.Workflows, raw.SecretsStoreSecrets,
 	)
 }
 
@@ -354,6 +404,8 @@ func collectBindings(
 	kv []rawKV, r2 []rawR2, d1 []rawD1, svcs []rawService,
 	do *rawDO, queues *rawQueues, ai *rawAI,
 	vectorize []rawVectorize, hyperdrive []rawHyperdrive, analytics []rawAnalytics,
+	browser *rawBrowser, images *rawImages, mtls []rawMTLS,
+	workflows []rawWorkflow, secretsStore []rawSecretsStore,
 ) []Binding {
 	var bindings []Binding
 
@@ -397,6 +449,21 @@ func collectBindings(
 	}
 	for _, b := range analytics {
 		bindings = append(bindings, Binding{Name: b.Binding, Type: "analytics_engine", ResourceID: b.Dataset})
+	}
+	if browser != nil && browser.Binding != "" {
+		bindings = append(bindings, Binding{Name: browser.Binding, Type: "browser", ResourceID: "Browser Rendering"})
+	}
+	if images != nil && images.Binding != "" {
+		bindings = append(bindings, Binding{Name: images.Binding, Type: "images", ResourceID: "Cloudflare Images"})
+	}
+	for _, b := range mtls {
+		bindings = append(bindings, Binding{Name: b.Binding, Type: "mtls_certificate", ResourceID: b.CertificateID})
+	}
+	for _, b := range workflows {
+		bindings = append(bindings, Binding{Name: b.Binding, Type: "workflow", ResourceID: b.ClassName})
+	}
+	for _, b := range secretsStore {
+		bindings = append(bindings, Binding{Name: b.Binding, Type: "secrets_store_secret", ResourceID: b.SecretName})
 	}
 
 	return bindings

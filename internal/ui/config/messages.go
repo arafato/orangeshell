@@ -54,3 +54,40 @@ type AddCronDoneMsg struct {
 type DeleteCronDoneMsg struct {
 	Err error
 }
+
+// --- Inline binding add messages ---
+// These message types are used by the inline add-binding flow in the
+// Configuration tab's Bindings category (for types beyond D1/KV/R2/Queue).
+
+// WriteDirectBindingMsg requests the app to write a binding into the wrangler
+// config file. Used by the inline add-binding form/picker (not the popup wizard).
+type WriteDirectBindingMsg struct {
+	ConfigPath string
+	EnvName    string
+	BindingDef interface{} // wcfg.BindingDef — typed as interface to avoid import cycle
+}
+
+// WriteDirectBindingDoneMsg delivers the result.
+type WriteDirectBindingDoneMsg struct {
+	Err error
+}
+
+// ListBindingResourcesMsg requests the app to fetch API resources for the
+// inline binding picker (e.g. Vectorize indexes, Hyperdrive configs, mTLS certs,
+// Secrets Store stores, or Workers for Service bindings).
+type ListBindingResourcesMsg struct {
+	ResourceType string // "vectorize", "hyperdrive", "mtls_certificate", "secrets_store", "service"
+}
+
+// BindingResourceItem is a lightweight resource entry returned by the API.
+type BindingResourceItem struct {
+	ID   string
+	Name string
+}
+
+// BindingResourcesLoadedMsg delivers the fetched resources.
+type BindingResourcesLoadedMsg struct {
+	ResourceType string
+	Items        []BindingResourceItem
+	Err          error
+}

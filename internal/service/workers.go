@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +25,21 @@ type WorkersService struct {
 	cachedRaw       map[string]workers.ScriptListResponse // keyed by script ID
 	cacheTime       time.Time
 	cachedSubdomain string // workers.dev subdomain, cached after first fetch
+
+	// Separate auth credentials for the Access API, which requires permissions
+	// that OAuth scopes don't cover. Set via SetAccessAuth().
+	accessAuthEmail string
+	accessAuthKey   string
+	accessAuthToken string
+}
+
+// SetAccessAuth configures alternative credentials for Access API calls.
+// OAuth tokens lack the required Access scope, so we accept API Key (email+key)
+// or a dedicated API Token that has the "Access: Apps and Policies Read" permission.
+func (s *WorkersService) SetAccessAuth(email, key, token string) {
+	s.accessAuthEmail = email
+	s.accessAuthKey = key
+	s.accessAuthToken = token
 }
 
 // NewWorkersService creates a Workers service.
@@ -521,29 +539,67 @@ type safeAccessPolicy struct {
 }
 
 // fetchAccessApps fetches all Access Applications for the account using raw HTTP.
-// Returns only self_hosted apps. Returns nil (no error) on 401/403 (silent fallback).
+// Uses the dedicated access auth credentials (not the main SDK client) because
+// OAuth tokens lack the Access scope. Returns only self_hosted apps.
+// Returns nil (no error) on 401/403 or if no access auth is configured (silent fallback).
 func (s *WorkersService) fetchAccessApps(ctx context.Context) []safeAccessApp {
+	// No access credentials configured — skip silently
+	if s.accessAuthEmail == "" && s.accessAuthKey == "" && s.accessAuthToken == "" {
+		return nil
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 	var allApps []safeAccessApp
 	page := 1
 	perPage := 100
 
 	for {
-		path := fmt.Sprintf("/accounts/%s/access/apps?page=%d&per_page=%d", s.accountID, page, perPage)
-		var resp safeAccessAppsResponse
-		err := s.client.Get(ctx, path, nil, &resp)
+		url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/access/apps?page=%d&per_page=%d",
+			s.accountID, page, perPage)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			// Silent fallback on auth errors or any error
 			return nil
 		}
 
-		for _, app := range resp.Result {
+		// Authenticate with the dedicated access credentials
+		if s.accessAuthToken != "" {
+			req.Header.Set("Authorization", "Bearer "+s.accessAuthToken)
+		} else {
+			req.Header.Set("X-Auth-Email", s.accessAuthEmail)
+			req.Header.Set("X-Auth-Key", s.accessAuthKey)
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil
+		}
+
+		// Silent fallback on auth errors
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			return nil
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil
+		}
+
+		var parsed safeAccessAppsResponse
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil
+		}
+
+		for _, app := range parsed.Result {
 			if app.Type == "self_hosted" {
 				allApps = append(allApps, app)
 			}
 		}
 
 		// Check if there are more pages
-		if resp.ResultInfo.TotalPages <= page || len(resp.Result) == 0 {
+		if parsed.ResultInfo.TotalPages <= page || len(parsed.Result) == 0 {
 			break
 		}
 		page++

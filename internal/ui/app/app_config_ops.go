@@ -7,11 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
-	"github.com/oarafat/orangeshell/internal/ui/buildstokenpopup"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
@@ -715,40 +713,4 @@ func (m *Model) handleConfigViewMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, m.navigateTo(msg.ServiceName, msg.ResourceID), true
 	}
 	return *m, nil, false
-}
-
-// --- Builds API token popup helpers ---
-
-// handleBuildsTokenPopupMsg handles messages emitted by the builds token popup.
-func (m *Model) handleBuildsTokenPopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
-	switch msg := msg.(type) {
-	case buildstokenpopup.CloseMsg:
-		m.showBuildsTokenPopup = false
-		m.buildsTokenDeclined = true // suppress re-prompts for this session
-		return *m, nil, true
-
-	case buildstokenpopup.TokenSavedMsg:
-		m.showBuildsTokenPopup = false
-		m.cfg.BuildsAPIToken = msg.Token
-		_ = m.cfg.Save()
-		// Retry builds enrichment now that we have a valid token
-		if scriptName := m.detail.VersionHistoryScript(); scriptName != "" {
-			return *m, m.fetchBuildsForVersionHistory(scriptName), true
-		}
-		return *m, nil, true
-
-	case buildstokenpopup.CopyCommandMsg:
-		_ = clipboard.WriteAll(msg.Text)
-		m.toastMsg = "Copied curl command to clipboard"
-		m.toastExpiry = time.Now().Add(2 * time.Second)
-		return *m, toastTick(), true
-	}
-	return *m, nil, false
-}
-
-// updateBuildsTokenPopup forwards messages to the builds token popup.
-func (m Model) updateBuildsTokenPopup(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.buildsTokenPopup, cmd = m.buildsTokenPopup.Update(msg)
-	return m, cmd
 }

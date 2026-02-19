@@ -1,10 +1,13 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/oarafat/orangeshell/internal/api"
+	"github.com/oarafat/orangeshell/internal/config"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
@@ -197,6 +200,28 @@ func (m *Model) registerServices(accountID string) {
 	m.registry.SetAccountID(accountID)
 
 	workersSvc := svc.NewWorkersService(m.client.CF, accountID)
+	// Configure Access API auth — OAuth tokens lack the required scope,
+	// so we use fallback credentials when available.
+	switch m.cfg.AuthMethod {
+	case config.AuthMethodAPIKey:
+		// Global API Key has all permissions
+		workersSvc.SetAccessAuth(m.cfg.Email, m.cfg.APIKey, "")
+	case config.AuthMethodAPIToken:
+		// API Token might have Access scope — try it (silent fallback on 403)
+		workersSvc.SetAccessAuth("", "", m.cfg.APIToken)
+	case config.AuthMethodOAuth:
+		// OAuth can't access the Access API — use fallback credentials
+		if m.cfg.APITokenFallback != "" {
+			// Dedicated fallback token from config (api_token) — takes priority
+			workersSvc.SetAccessAuth("", "", m.cfg.APITokenFallback)
+		} else if m.cfg.APIKey != "" && m.cfg.Email != "" {
+			// Global API Key from env vars (CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL)
+			// Note: auto-provisioning will create a scoped token and save it to config
+			// so this path is only used until the provisioned token is ready.
+			workersSvc.SetAccessAuth(m.cfg.Email, m.cfg.APIKey, "")
+		}
+		// else: no access credentials → Access badges silently disabled
+	}
 	m.registry.Register(workersSvc)
 
 	kvSvc := svc.NewKVService(m.client.CF, accountID)
@@ -240,8 +265,14 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.wrangler.CloseVersionPicker()
 
 	m.cfg.AccountID = accountID
-	m.buildsTokenDeclined = false // allow re-prompting for new account
 	m.registerServices(accountID)
+
+	// Update restricted badge — provisioning may be needed for the new account
+	if m.cfg.AuthMethod == config.AuthMethodOAuth && !m.cfg.HasFallbackAuth() {
+		m.header.SetRestricted(true)
+	} else {
+		m.header.SetRestricted(false)
+	}
 
 	// Update search items with whatever is cached for this account
 	m.search.SetItems(m.registry.AllSearchItems())
@@ -254,6 +285,12 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 		deployCmd = m.fetchAllProjectDeployments(true)
 	} else if cfg := m.wrangler.Config(); cfg != nil {
 		deployCmd = m.fetchSingleProjectDeployments(cfg, true)
+	}
+
+	// Auto-provision fallback token for the new account if needed
+	var provisionCmd tea.Cmd
+	if m.needsFallbackTokenProvisioning() {
+		provisionCmd = m.provisionFallbackTokenCmd()
 	}
 
 	// If we're viewing a service, reload it with the new account
@@ -277,10 +314,17 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 		if previewCmd != nil {
 			cmds = append(cmds, previewCmd)
 		}
+		if provisionCmd != nil {
+			cmds = append(cmds, provisionCmd)
+		}
 		return tea.Batch(cmds...)
 	}
 
-	return deployCmd
+	cmds := []tea.Cmd{deployCmd}
+	if provisionCmd != nil {
+		cmds = append(cmds, provisionCmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 // navigateTo navigates directly to a specific resource's detail view.
@@ -465,5 +509,74 @@ func (m Model) enrichDetailWithBoundWorkers(detail *svc.ResourceDetail, serviceN
 			NavService:  "Workers",
 			NavResource: bw.ScriptName,
 		})
+	}
+}
+
+// handleFallbackTokenMsg handles the result of auto-provisioning a scoped API token.
+// On success: saves the token to config, re-wires WorkersService access auth,
+// updates the header restricted badge, and triggers an access index rebuild.
+// On failure: silently ignores (restricted mode continues).
+func (m *Model) handleFallbackTokenMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
+	ftMsg, ok := msg.(fallbackTokenProvisionedMsg)
+	if !ok {
+		return *m, nil, false
+	}
+
+	if m.isStaleAccount(ftMsg.accountID) {
+		return *m, nil, true
+	}
+
+	if ftMsg.err != nil {
+		// Silent failure — restricted mode continues, no user-facing error
+		return *m, nil, true
+	}
+
+	// Save the provisioned token to config
+	m.cfg.APITokenFallback = ftMsg.token
+	_ = m.cfg.Save() // best-effort persist
+
+	// Re-wire WorkersService access auth with the new token
+	if ws := m.getWorkersService(); ws != nil {
+		ws.SetAccessAuth("", "", ftMsg.token)
+	}
+
+	// Update header restricted badge (no longer restricted)
+	m.header.SetRestricted(false)
+
+	// Trigger access index rebuild now that we have credentials
+	var cmds []tea.Cmd
+	if cmd := m.buildAccessIndexCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if len(cmds) > 0 {
+		return *m, tea.Batch(cmds...), true
+	}
+	return *m, nil, true
+}
+
+// needsFallbackTokenProvisioning returns true when the app should attempt
+// to auto-provision a scoped API token. Conditions:
+//   - Auth method is OAuth (only OAuth lacks the needed scopes)
+//   - No APITokenFallback already exists in config
+//   - Global API Key + Email are available (from env vars)
+func (m Model) needsFallbackTokenProvisioning() bool {
+	return m.cfg.AuthMethod == config.AuthMethodOAuth &&
+		m.cfg.APITokenFallback == "" &&
+		m.cfg.APIKey != "" && m.cfg.Email != ""
+}
+
+// provisionFallbackTokenCmd creates a background command that auto-provisions a
+// scoped API token with Access Apps Read + Workers CI Read permissions.
+func (m Model) provisionFallbackTokenCmd() tea.Cmd {
+	email := m.cfg.Email
+	apiKey := m.cfg.APIKey
+	accountID := m.registry.ActiveAccountID()
+	return func() tea.Msg {
+		token, err := api.CreateScopedToken(context.Background(), email, apiKey, accountID)
+		return fallbackTokenProvisionedMsg{
+			token:     token,
+			accountID: accountID,
+			err:       err,
+		}
 	}
 }

@@ -21,6 +21,7 @@ type Model struct {
 	activeIdx  int
 	hoverIdx   int // -1 means no hover
 	authMethod config.AuthMethod
+	restricted bool // true when OAuth auth lacks fallback credentials for restricted APIs
 	width      int
 }
 
@@ -105,6 +106,13 @@ func (m *Model) SetActiveIndex(idx int) bool {
 	return true
 }
 
+// SetRestricted sets the restricted-mode indicator. When true, a dimmed
+// "(restricted)" badge is shown next to the auth method in the header,
+// indicating that some API features (Access, Builds) are unavailable.
+func (m *Model) SetRestricted(r bool) {
+	m.restricted = r
+}
+
 // SetHoverIdx sets which account tab the mouse is hovering over (-1 for none).
 func (m *Model) SetHoverIdx(idx int) {
 	m.hoverIdx = idx
@@ -131,14 +139,21 @@ func (m Model) View() string {
 	// Build account tabs
 	tabs := m.renderTabs()
 
-	// Right side: auth method badge
+	// Right side: auth method badge + optional restricted indicator
 	right := ""
 	if authLabel != "" {
+		badge := authLabel
+		if m.restricted {
+			badge += " " + lipgloss.NewStyle().
+				Foreground(theme.ColorGray).
+				Background(theme.ColorDarkGray).
+				Render("(restricted)")
+		}
 		right = lipgloss.NewStyle().
 			Foreground(theme.ColorWhite).
 			Background(theme.ColorDarkGray).
 			Padding(0, 1).
-			Render(authLabel)
+			Render(badge)
 	}
 
 	// Fill the gap between left+tabs and right

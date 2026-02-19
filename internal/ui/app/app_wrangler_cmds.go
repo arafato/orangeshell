@@ -549,7 +549,7 @@ func (m *Model) fetchBuildsForVersionHistory(scriptName string) tea.Cmd {
 
 		buildsByVersion, err := client.GetBuildsByVersionIDs(ctx, versionIDs)
 		if err != nil {
-			// Auth error (401/403) — signal the app to prompt for a builds token.
+			// Auth error (401/403) — credentials lack Workers CI Read scope.
 			if api.IsAuthError(err) {
 				return detail.BuildsAuthFailedMsg{ScriptName: scriptName}
 			}

@@ -79,6 +79,58 @@ When running `wrangler dev` or `wrangler dev --remote`, the dev worker appears i
 
 Run SQL queries against D1 databases directly from the detail view. Schema is auto-loaded and refreshed after mutations.
 
+## Full API Access (OAuth users)
+
+When using **OAuth** authentication (the default via `wrangler login`), some Cloudflare APIs are inaccessible because the OAuth system does not support the required permission scopes. This affects:
+
+- **Access Applications** — used to show access-protected badges on Workers
+- **Workers Builds API** — used to show git metadata and build logs in version history
+
+Without additional credentials, these features degrade silently (no errors — just missing data). The header shows a dimmed `(restricted)` indicator when this is the case.
+
+### Automatic provisioning via environment variables
+
+Set your **Global API Key** and **email** as environment variables:
+
+```bash
+export CLOUDFLARE_API_KEY="your-global-api-key"
+export CLOUDFLARE_EMAIL="you@example.com"
+```
+
+On startup, orangeshell will automatically create a minimal scoped API token with just the two needed permissions (`Access: Apps and Policies Read` + `Workers CI Read`), save it to `~/.orangeshell/config.toml` as `api_token_fallback`, and use it going forward. The env vars are only needed once — after provisioning, the saved token is used on all subsequent launches.
+
+### Manual token creation
+
+If you prefer not to expose your Global API Key, you can create a scoped token manually and add it to your config:
+
+```bash
+curl -X POST "https://api.cloudflare.com/client/v4/user/tokens" \
+  -H "X-Auth-Email: you@example.com" \
+  -H "X-Auth-Key: YOUR_GLOBAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "name": "orangeshell (manual)",
+    "policies": [{
+      "effect": "allow",
+      "resources": { "com.cloudflare.api.account.YOUR_ACCOUNT_ID": "*" },
+      "permission_groups": [
+        { "id": "7ea222f6d5064cfa89ea366d7c1fee89" },
+        { "id": "ad99c5ae555e45c4bef5bdf2678388ba" }
+      ]
+    }]
+  }'
+```
+
+Then add the returned token value to `~/.orangeshell/config.toml`:
+
+```toml
+api_token_fallback = "your-token-value"
+```
+
+### API Key and API Token users
+
+If your primary auth method is **API Key** or **API Token** (with the required scopes), all features work out of the box — no fallback token is needed.
+
 ## Install
 
 ### Homebrew

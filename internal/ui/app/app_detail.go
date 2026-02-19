@@ -9,7 +9,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	svc "github.com/oarafat/orangeshell/internal/service"
-	"github.com/oarafat/orangeshell/internal/ui/buildstokenpopup"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
@@ -190,12 +189,8 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, nil, true
 
 	case detail.BuildsAuthFailedMsg:
-		// Builds API returned 401/403 — prompt for a dedicated token
-		if !m.buildsTokenDeclined {
-			m.showBuildsTokenPopup = true
-			m.buildsTokenPopup = buildstokenpopup.New(m.registry.ActiveAccountID())
-			return *m, m.buildsTokenPopup.Init(), true
-		}
+		// Builds API returned 401/403 — silently ignore.
+		// The user sees a "(restricted)" badge in the header if fallback auth is not configured.
 		return *m, nil, true
 
 	case detail.FetchBuildLogMsg:

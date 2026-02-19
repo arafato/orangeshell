@@ -18,7 +18,6 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	uiai "github.com/oarafat/orangeshell/internal/ui/ai"
 	"github.com/oarafat/orangeshell/internal/ui/bindings"
-	"github.com/oarafat/orangeshell/internal/ui/buildstokenpopup"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/deployallpopup"
@@ -64,6 +63,14 @@ type initDashboardMsg struct {
 
 type errMsg struct {
 	err error
+}
+
+// fallbackTokenProvisionedMsg is sent when the background auto-provisioning of
+// a scoped API token completes. The token covers Access Apps Read + Workers CI Read.
+type fallbackTokenProvisionedMsg struct {
+	token     string // The created API token value
+	accountID string
+	err       error
 }
 
 // SetProgramMsg carries the *tea.Program reference so the model can use p.Send()
@@ -233,11 +240,6 @@ type Model struct {
 	showRemoveProjectPopup bool
 	removeProjectPopup     removeprojectpopup.Model
 
-	// Builds API token popup overlay
-	showBuildsTokenPopup bool
-	buildsTokenPopup     buildstokenpopup.Model
-	buildsTokenDeclined  bool // suppresses repeated prompts within a session
-
 	// Configuration tab (unified model)
 	configView uiconfig.Model
 
@@ -315,29 +317,32 @@ func (m Model) Init() tea.Cmd {
 }
 
 // getBuildsClient creates the Workers Builds API client.
-// Prefers the dedicated BuildsAPIToken (which has Workers CI Read scope),
-// falling back to the primary auth credentials.
+// Prefers the dedicated fallback token, then primary credentials, then
+// env var fallback for OAuth (which can't access the Builds API).
 func (m *Model) getBuildsClient() *api.BuildsClient {
 	accountID := m.registry.ActiveAccountID()
 
-	// 1. Prefer dedicated builds token (always has the right scope)
-	if m.cfg.BuildsAPIToken != "" {
-		return api.NewBuildsClient(accountID, "", "", m.cfg.BuildsAPIToken)
+	// 1. Prefer dedicated fallback token from config (api_token)
+	if m.cfg.APITokenFallback != "" {
+		return api.NewBuildsClient(accountID, "", "", m.cfg.APITokenFallback)
 	}
 
-	// 2. Fall back to primary credentials
-	var authEmail, authKey, authToken string
+	// 2. Use primary credentials
 	switch m.cfg.AuthMethod {
 	case config.AuthMethodAPIKey:
-		authEmail = m.cfg.Email
-		authKey = m.cfg.APIKey
+		return api.NewBuildsClient(accountID, m.cfg.Email, m.cfg.APIKey, "")
 	case config.AuthMethodAPIToken:
-		authToken = m.cfg.APIToken
+		return api.NewBuildsClient(accountID, "", "", m.cfg.APIToken)
 	case config.AuthMethodOAuth:
-		authToken = m.cfg.OAuthAccessToken
+		// OAuth tokens can't access Builds API — try env var fallback
+		if m.cfg.APIKey != "" && m.cfg.Email != "" {
+			return api.NewBuildsClient(accountID, m.cfg.Email, m.cfg.APIKey, "")
+		}
+		// Last resort: OAuth token (will likely 403)
+		return api.NewBuildsClient(accountID, "", "", m.cfg.OAuthAccessToken)
 	}
 
-	return api.NewBuildsClient(accountID, authEmail, authKey, authToken)
+	return api.NewBuildsClient(accountID, "", "", "")
 }
 
 // initDashboardCmd authenticates and fetches account info.
@@ -387,7 +392,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(*Model).handleTriggersMsg,
 		(*Model).handleConfigViewMsg,
 		(*Model).handleDeployAllMsg,
-		(*Model).handleBuildsTokenPopupMsg,
+		(*Model).handleFallbackTokenMsg,
 		(*Model).handleDetailMsg,
 		(*Model).handleWranglerMsg,
 		(*Model).handleMonitoringMsg,
@@ -433,10 +438,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Register services for the active account
 		m.registerServices(m.cfg.AccountID)
 
+		// Set restricted badge for OAuth without fallback credentials
+		if m.cfg.AuthMethod == config.AuthMethodOAuth && !m.cfg.HasFallbackAuth() {
+			m.header.SetRestricted(true)
+		}
+
 		// Start on wrangler home — no service to load initially
 		m.viewState = ViewWrangler
 
 		var cmds []tea.Cmd
+
+		// Auto-provision a scoped fallback token if OAuth + env vars available
+		if m.needsFallbackTokenProvisioning() {
+			cmds = append(cmds, m.provisionFallbackTokenCmd())
+		}
+
+		// Pre-fetch the Workers list so the binding index and access index
+		// are built early. This enables access badges and managed-resource
+		// highlighting on the Operations tab without requiring a visit to Resources.
+		cmds = append(cmds, m.loadServiceResources("Workers"))
 
 		// If wrangler config was already discovered (it runs in parallel with auth),
 		// trigger deployment fetching now that the client is available.
@@ -585,11 +605,6 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If action popup is active, route everything there
 	if m.showActions {
 		return m.updateActions(msg)
-	}
-
-	// If builds token popup is active, route everything there
-	if m.showBuildsTokenPopup {
-		return m.updateBuildsTokenPopup(msg)
 	}
 
 	// If launcher overlay is active, route everything there

@@ -48,7 +48,6 @@ func (m Model) viewDashboard() string {
 		{m.showProjectPopup, func() string { return m.projectPopup.View(w, h) }},
 		{m.showRemoveProjectPopup, func() string { return m.removeProjectPopup.View(w, h) }},
 		{m.showActions, func() string { return m.actionsPopup.View(w, h) }},
-		{m.showBuildsTokenPopup, func() string { return m.buildsTokenPopup.View(w, h) }},
 	}
 
 	for _, o := range overlays {

@@ -22,6 +22,15 @@ type NavigateMsg struct {
 	ResourceID  string // namespace_id, bucket_name, database_id, script_name
 }
 
+// NavigateToBindingMsg is sent when the user presses enter on a binding that
+// does not have a corresponding Resources tab service (e.g. AI, Vectorize, Workflow).
+// The parent navigates to the Configuration tab → Bindings category with the binding highlighted.
+type NavigateToBindingMsg struct {
+	ConfigPath  string
+	EnvName     string
+	BindingName string
+}
+
 // DirBrowserMode indicates what the directory browser was opened for.
 type DirBrowserMode int
 

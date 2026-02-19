@@ -256,6 +256,14 @@ func (m *Model) handleWranglerMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.activeTab = tabbar.TabConfiguration
 		return *m, nil, true
 
+	case uiwrangler.NavigateToBindingMsg:
+		m.syncConfigProjects()
+		m.configView.SelectProjectByPath(msg.ConfigPath)
+		m.configView.SetCategory(uiconfig.CategoryBindings)
+		m.configView.SelectBindingByName(msg.EnvName, msg.BindingName)
+		m.activeTab = tabbar.TabConfiguration
+		return *m, nil, true
+
 	// --- Command output messages ---
 
 	case uiwrangler.CmdOutputMsg:

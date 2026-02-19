@@ -280,11 +280,9 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 				resID = theme.DimStyle.Render(fmt.Sprintf(" (%s)", bnd.ResourceID))
 			}
 
-			// Navigation arrow for navigable bindings
-			navArrow := ""
-			if bnd.NavService() != "" {
-				navArrow = " " + theme.ActionNavArrowStyle.Render("→")
-			}
+			// Navigation arrow — all bindings are navigable now
+			// (old types → Resources tab, new types → Configuration tab)
+			navArrow := " " + theme.ActionNavArrowStyle.Render("→")
 
 			line := fmt.Sprintf("%s%s %s%s%s", cursor, typeLabel, name, resID, navArrow)
 			bindingLines = append(bindingLines, line)

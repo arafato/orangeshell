@@ -64,6 +64,7 @@ orangeshell/
     ├── api/
     │   ├── client.go                # Cloudflare SDK v6 client wrapper
     │   ├── builds.go                # Workers Builds API (raw HTTP, not SDK)
+    │   ├── resources.go             # Lightweight resource list (Vectorize, Hyperdrive, mTLS, Secrets Store)
     │   └── token.go                 # Scoped API token auto-provisioning
     ├── service/
     │   ├── service.go               # Service interface, Registry, caching, types
@@ -78,6 +79,7 @@ orangeshell/
     │   ├── finder.go                # Project discovery (recursive walk)
     │   ├── runner.go                # CLI command runner (npx wrangler)
     │   ├── writer.go                # Config file writer (TOML + JSON mutations)
+    │   ├── workflows.go             # Workflow class scanner (source file regex)
     │   ├── create.go                # Project scaffolding via C3
     │   ├── deployments.go           # Parse wrangler deployments list output
     │   ├── versions.go              # Parse wrangler versions list output
@@ -628,7 +630,7 @@ go build -o orangeshell .
 
 ### Binding Type Expansion
 
-37. **Three-tier binding kind pattern**: Binding types fall into three categories: (1) "wizard" types (D1/KV/R2/Queue) that delegate to the existing popup wizard with create-or-select flow, (2) "form" types (AI/Browser/Images, DO, Workflow, Analytics Engine) with inline text inputs, and (3) "picker" types (Service, Vectorize, Hyperdrive, mTLS, Secrets Store) that fetch API resources first, then transition to a pre-filled form. This three-kind classification keeps the UX consistent while reusing existing infrastructure for the mature binding types.
+37. **Three-tier binding kind pattern**: Binding types fall into three categories: (1) "wizard" types (D1/KV/R2/Queue) that delegate to the existing popup wizard with create-or-select flow, (2) "form" types (AI/Browser/Images, DO, Analytics Engine) with inline text inputs, and (3) "picker" types (Service, Vectorize, Hyperdrive, mTLS, Secrets Store, Workflow) that fetch API resources or scan local files first, then transition to a pre-filled form. This three-kind classification keeps the UX consistent while reusing existing infrastructure for the mature binding types.
 
 38. **Singleton vs array bindings need distinct code paths everywhere**: AI, Browser, and Images use `[section]` in TOML (not `[[section]]`) and a plain object in JSON (not an array). The parser `collectBindings()`, writer `formatTOMLBinding()`/`addBindingJSON()`, and remover `removeBindingTOML()`/`removeBindingJSON()` all needed separate branches. Added `isSingletonBindingType()` helper to centralize the check.
 
@@ -641,6 +643,10 @@ go build -o orangeshell .
 42. **Raw HTTP resource list functions use the generic Cloudflare v4 envelope**: All list endpoints (Vectorize, Hyperdrive, mTLS, Secrets Store) return `{success, result[], errors[]}`. A single `parseResourceList(body, idField, nameField)` function handles all four, extracting just ID and Name from each result item via `map[string]interface{}`. Much simpler than defining per-type response structs.
 
 43. **Service bindings use the existing Workers registry, not raw HTTP**: For the "service" resource picker, the Workers service is already registered in the service registry and caches worker lists. Using `m.registry.Get("Workers").List()` avoids duplicating API calls. Only Vectorize, Hyperdrive, mTLS, and Secrets Store need the raw HTTP `ResourceListClient` since they don't have full Service implementations.
+
+44. **Workflow class auto-discovery via local source scan**: The Workflow binding type uses a "picker" kind that scans the project's source files for exported `WorkflowEntrypoint` subclasses instead of calling an API. The scanner (`wrangler/workflows.go`) supports two patterns: JS/TS `export class X extends WorkflowEntrypoint` and Python `class X(WorkflowEntrypoint):`. It reuses the same directory walk logic as the AI tab's file scanner (skip `node_modules`, `.git`, etc.; resolve source dir from `Main` entry). **Known limitations (NOT handled)**: (1) re-exports (`export { MyWorkflow } from './workflows'`), (2) barrel/index re-exports, (3) renamed imports (`import { WorkflowEntrypoint as WF }` then `extends WF`), (4) dynamic class names or factory patterns, (5) Python `__all__` exports, (6) classes in `node_modules` or other skipped directories. These cover edge cases; the standard pattern of a direct `export class ... extends WorkflowEntrypoint` in a source file covers the vast majority of real-world usage. The picker falls back gracefully — if no classes are found, the user sees "No resources found" and can press esc to go back and use the form manually by changing the type or entering values directly.
+
+45. **Dual navigation paths for bindings**: Bindings in EnvBox now have two Enter targets: (1) old types with `NavService()` (KV, R2, D1, Service, Queue) emit `NavigateMsg` → Resources tab via `navigateTo()`, (2) new types without `NavService()` (AI, Vectorize, Hyperdrive, mTLS, Workflow, Secrets Store, Browser, Images, Analytics, DO) emit `NavigateToBindingMsg` → Configuration tab → Bindings category with the specific binding highlighted via `SelectBindingByName()`. Both paths follow the same cross-tab navigation pattern as `ShowEnvVarsMsg`/`ShowTriggersMsg`: `syncConfigProjects()` + `SelectProjectByPath()` + `SetCategory()` + set `activeTab`. The new path adds one extra call: `SelectBindingByName(envName, bindingName)` to pre-position the cursor.
 
 ## General Design Considerations
 ### Design-Patterns

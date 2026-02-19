@@ -758,6 +758,36 @@ func (m Model) writeDirectBindingCmd(configPath, envName string, bindingDef inte
 
 // listBindingResourcesCmd fetches resources for the inline binding picker.
 func (m Model) listBindingResourcesCmd(resourceType string) tea.Cmd {
+	// For "workflow" type, scan local source files for Workflow classes
+	if resourceType == "workflow" {
+		configPath := m.configView.ConfigPath()
+		var mainEntry string
+		if cfg := m.configView.Config(); cfg != nil {
+			mainEntry = cfg.Main
+		}
+		return func() tea.Msg {
+			if configPath == "" {
+				return uiconfig.BindingResourcesLoadedMsg{
+					ResourceType: resourceType,
+					Err:          fmt.Errorf("no project selected"),
+				}
+			}
+			projectDir := filepath.Dir(configPath)
+			classes := wcfg.ScanWorkflowClasses(projectDir, mainEntry)
+			var items []uiconfig.BindingResourceItem
+			for _, className := range classes {
+				items = append(items, uiconfig.BindingResourceItem{
+					ID:   className,
+					Name: className,
+				})
+			}
+			return uiconfig.BindingResourcesLoadedMsg{
+				ResourceType: resourceType,
+				Items:        items,
+			}
+		}
+	}
+
 	// For "service" type, use the registry's Workers service
 	if resourceType == "service" {
 		return func() tea.Msg {

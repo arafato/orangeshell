@@ -242,6 +242,17 @@ func (m Model) viewBindingsDeleteConfirm() []string {
 	)
 }
 
+// SelectBindingByName moves the bindings cursor to the binding matching the
+// given environment and binding name. If no match is found, cursor is unchanged.
+func (m *Model) SelectBindingByName(envName, bindingName string) {
+	for i, item := range m.bindingItems {
+		if item.EnvName == envName && item.Binding.Name == bindingName {
+			m.bindingsCursor = i
+			return
+		}
+	}
+}
+
 // --- Bindings Help ---
 
 func (m Model) helpBindings(base []HelpEntry) []HelpEntry {
@@ -301,7 +312,7 @@ var allBindingTypes = []bindingTypeEntry{
 	{"browser", "Browser", "form", "Browser Rendering (singleton)"},
 	{"images", "Images", "form", "Cloudflare Images (singleton)"},
 	{"mtls_certificate", "mTLS", "picker", "mTLS certificate"},
-	{"workflow", "Workflow", "form", "Workflow binding"},
+	{"workflow", "Workflow", "picker", "Workflow binding (scans source for classes)"},
 	{"secrets_store_secret", "Secrets Store", "picker", "Secrets Store secret"},
 }
 
@@ -381,6 +392,8 @@ func pickerResourceType(writerType string) string {
 		return "mtls_certificate"
 	case "secrets_store_secret":
 		return "secrets_store"
+	case "workflow":
+		return "workflow"
 	}
 	return ""
 }
@@ -746,6 +759,11 @@ func (m *Model) prefillBindingFormFromPicker(res BindingResourceItem) {
 		m.setFormFieldValue("binding", defaultBinding)
 		m.setFormFieldValue("store_id", res.ID)
 		m.setFormFieldValue("secret_name", res.Name)
+	case "workflow":
+		// res.Name is the class name discovered from source files
+		m.setFormFieldValue("binding", defaultBinding)
+		m.setFormFieldValue("class_name", res.Name)
+		// Leave "name" and "script_name" for the user to fill in
 	}
 }
 

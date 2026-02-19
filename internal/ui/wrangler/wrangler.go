@@ -807,11 +807,25 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		// Binding selected — navigate to the binding target
 		bnd := box.SelectedBinding()
-		if bnd != nil && bnd.NavService() != "" {
+		if bnd != nil {
+			if bnd.NavService() != "" {
+				// Old types (KV, R2, D1, Service, Queue) → Resources tab
+				return m, func() tea.Msg {
+					return NavigateMsg{
+						ServiceName: bnd.NavService(),
+						ResourceID:  bnd.ResourceID,
+					}
+				}
+			}
+			// New types (AI, Vectorize, Workflow, etc.) → Configuration tab Bindings
+			configPath := m.configPath
+			envName := box.EnvName
+			bindingName := bnd.Name
 			return m, func() tea.Msg {
-				return NavigateMsg{
-					ServiceName: bnd.NavService(),
-					ResourceID:  bnd.ResourceID,
+				return NavigateToBindingMsg{
+					ConfigPath:  configPath,
+					EnvName:     envName,
+					BindingName: bindingName,
 				}
 			}
 		}

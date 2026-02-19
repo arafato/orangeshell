@@ -93,6 +93,23 @@ func (m Model) IsManaged(resourceID string) bool {
 	return m.managedIDs[resourceID]
 }
 
+// SetAccessProtected sets the set of resource IDs that are Access-protected.
+// Resources in this set will display a lock badge in the list view.
+func (m *Model) SetAccessProtected(ids map[string]bool) {
+	if ids != nil && len(ids) == 0 {
+		ids = nil
+	}
+	m.accessProtectedIDs = ids
+}
+
+// IsAccessProtected returns whether a resource ID is protected by Cloudflare Access.
+func (m Model) IsAccessProtected(resourceID string) bool {
+	if m.accessProtectedIDs == nil {
+		return false
+	}
+	return m.accessProtectedIDs[resourceID]
+}
+
 // DropdownOpen returns whether the service dropdown is currently open.
 func (m Model) DropdownOpen() bool {
 	return m.dropdownOpen

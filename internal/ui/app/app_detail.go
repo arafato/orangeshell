@@ -1,16 +1,25 @@
 package app
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 
+	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/buildstokenpopup"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 )
+
+// accessIndexBuiltMsg is sent when the background Access index build completes.
+type accessIndexBuiltMsg struct {
+	index     *svc.AccessIndex
+	accountID string
+}
 
 // handleDetailMsg handles all detail/resource panel messages.
 // Returns (model, cmd, handled).
@@ -26,12 +35,14 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if msg.Err == nil && msg.Resources != nil {
 			m.registry.SetCache(msg.ServiceName, msg.Resources)
 		}
-		// When Workers list loads, build the binding index in the background.
+		// When Workers list loads, build the binding index and access index in the background.
 		// When a non-Workers service loads and no binding index exists yet,
 		// trigger a Workers fetch + index build so managed detection works.
 		var indexCmd tea.Cmd
+		var accessCmd tea.Cmd
 		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
 			indexCmd = m.buildBindingIndexCmd()
+			accessCmd = m.buildAccessIndexCmd()
 		} else if msg.ServiceName != "Workers" && msg.Err == nil && m.registry.GetBindingIndex() == nil {
 			// Binding index not yet available — kick off Workers fetch + build
 			if m.registry.GetCache("Workers") == nil {
@@ -46,8 +57,15 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			if msg.Err == nil {
 				m.search.SetItems(m.registry.AllSearchItems())
 			}
+			var bgCmds []tea.Cmd
 			if indexCmd != nil {
-				return *m, indexCmd, true
+				bgCmds = append(bgCmds, indexCmd)
+			}
+			if accessCmd != nil {
+				bgCmds = append(bgCmds, accessCmd)
+			}
+			if len(bgCmds) > 0 {
+				return *m, tea.Batch(bgCmds...), true
 			}
 			return *m, nil, true
 		}
@@ -68,6 +86,9 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		if indexCmd != nil {
 			cmds = append(cmds, indexCmd)
+		}
+		if accessCmd != nil {
+			cmds = append(cmds, accessCmd)
 		}
 		if len(cmds) > 0 {
 			return *m, tea.Batch(cmds...), true
@@ -109,6 +130,10 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if msg.Err == nil && msg.Detail != nil && msg.ServiceName != "Workers" {
 			m.enrichDetailWithBoundWorkers(msg.Detail, msg.ServiceName, msg.ResourceID)
 		}
+		// Enrich Workers detail with Access protection info
+		if msg.Err == nil && msg.Detail != nil && msg.ServiceName == "Workers" {
+			m.enrichDetailWithAccessInfo(msg.Detail, msg.ResourceID)
+		}
 		m.detail.SetDetail(msg.Detail, msg.Err)
 		// D1 console initialization is deferred to interactive mode (EnterInteractiveMsg).
 		// However, load the schema in preview mode so it's visible in the read-only detail view.
@@ -142,9 +167,9 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if m.showSearch {
 			m.search.DecrementFetching()
 		}
-		// Rebuild binding index when Workers list is refreshed
+		// Rebuild binding and access indexes when Workers list is refreshed
 		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
-			return *m, m.buildBindingIndexCmd(), true
+			return *m, tea.Batch(m.buildBindingIndexCmd(), m.buildAccessIndexCmd()), true
 		}
 		return *m, nil, true
 
@@ -319,7 +344,92 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			}
 		}
 		return *m, nil, true
+
+	// --- Access index built ---
+
+	case accessIndexBuiltMsg:
+		if m.isStaleAccount(msg.accountID) {
+			return *m, nil, true
+		}
+		m.registry.SetAccessIndex(msg.index)
+		// Update the detail view's access-protected set for list view badges
+		m.detail.SetAccessProtected(msg.index.ProtectedWorkerIDs())
+		// Sync Operations tab badges
+		m.syncAccessBadges()
+		return *m, nil, true
 	}
 
 	return *m, nil, false
+}
+
+// enrichDetailWithAccessInfo appends Access protection detail fields to a Worker's
+// resource detail if any Access Applications protect it.
+func (m Model) enrichDetailWithAccessInfo(detail *svc.ResourceDetail, scriptName string) {
+	idx := m.registry.GetAccessIndex()
+	if idx == nil {
+		return
+	}
+	infos := idx.Lookup(scriptName)
+	if len(infos) == 0 {
+		return
+	}
+
+	for _, info := range infos {
+		var parts []string
+
+		// App name
+		parts = append(parts, fmt.Sprintf("\xf0\x9f\x94\x92 %s", info.AppName)) // lock emoji
+
+		// Policy summary
+		if len(info.Policies) > 0 {
+			var policyParts []string
+			for _, p := range info.Policies {
+				policyParts = append(policyParts, fmt.Sprintf("%s: %s", p.Decision, p.Name))
+			}
+			parts = append(parts, fmt.Sprintf("Policies: %s", strings.Join(policyParts, ", ")))
+		}
+
+		// IdPs
+		if len(info.AllowedIdPs) > 0 {
+			parts = append(parts, fmt.Sprintf("IdPs: %s", strings.Join(info.AllowedIdPs, ", ")))
+		}
+
+		// Session duration
+		if info.SessionDuration != "" {
+			parts = append(parts, fmt.Sprintf("Session: %s", info.SessionDuration))
+		}
+
+		// Protected domain
+		if info.Domain != "" {
+			parts = append(parts, fmt.Sprintf("Domain: %s", info.Domain))
+		}
+
+		detail.Fields = append(detail.Fields, svc.DetailField{
+			Label: "Access",
+			Value: strings.Join(parts, "\n                   "),
+		})
+	}
+}
+
+// syncAccessBadges updates the access badge data on all env boxes and project boxes
+// using the current Access index. Called after the access index is built.
+func (m *Model) syncAccessBadges() {
+	idx := m.registry.GetAccessIndex()
+	if idx == nil {
+		return
+	}
+
+	// Update env boxes (for drilled-in project view)
+	for i := range m.wrangler.EnvBoxCount() {
+		eb := m.wrangler.EnvBoxAt(i)
+		if eb == nil {
+			continue
+		}
+		eb.AccessProtected = idx.IsProtected(eb.WorkerName)
+	}
+
+	// Update project boxes (for monorepo project list)
+	m.wrangler.UpdateAccessBadges(func(workerName string) bool {
+		return idx.IsProtected(workerName)
+	})
 }

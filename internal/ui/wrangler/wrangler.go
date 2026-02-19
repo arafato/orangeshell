@@ -399,6 +399,31 @@ func (m *Model) UpdateDevBadges(badgeFn func(projectName, envName string) DevBad
 	}
 }
 
+// UpdateAccessBadges updates the access badge data on all project boxes in the monorepo list.
+// The badgeFn function is called for each project/env pair to get the access status.
+func (m *Model) UpdateAccessBadges(badgeFn func(workerName string) bool) {
+	for i := range m.projects {
+		entry := &m.projects[i]
+		if entry.config == nil {
+			continue
+		}
+		if entry.box.AccessBadges == nil {
+			entry.box.AccessBadges = make(map[string]bool)
+		}
+		// Clear old badges
+		for k := range entry.box.AccessBadges {
+			delete(entry.box.AccessBadges, k)
+		}
+		// Set new badges
+		for _, envName := range entry.config.EnvNames() {
+			workerName := entry.config.ResolvedEnvName(envName)
+			if workerName != "" && badgeFn(workerName) {
+				entry.box.AccessBadges[envName] = true
+			}
+		}
+	}
+}
+
 // SetEnvDeployment updates deployment/subdomain data on the matching EnvBox.
 func (m *Model) SetEnvDeployment(envName string, dep *DeploymentDisplay, subdomain string) {
 	for i := range m.envBoxes {

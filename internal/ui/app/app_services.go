@@ -84,6 +84,24 @@ func (m Model) buildBindingIndexCmd() tea.Cmd {
 	}
 }
 
+// buildAccessIndexCmd returns a command that fetches Access Applications and custom
+// domains, then builds a reverse index mapping Workers to their Access policies.
+// This runs in the background after Workers are listed, alongside the binding index.
+func (m Model) buildAccessIndexCmd() tea.Cmd {
+	accountID := m.registry.ActiveAccountID()
+	workersSvc := m.getWorkersService()
+	if workersSvc == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		idx := workersSvc.BuildAccessIndex()
+		return accessIndexBuiltMsg{
+			index:     idx,
+			accountID: accountID,
+		}
+	}
+}
+
 // getWorkersService retrieves the WorkersService from the registry (type-asserted).
 func (m Model) getWorkersService() *svc.WorkersService {
 	s := m.registry.Get("Workers")

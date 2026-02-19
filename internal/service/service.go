@@ -50,6 +50,66 @@ type BoundWorker struct {
 	BindingName string // JS variable name used in the worker code (e.g. "MY_KV")
 }
 
+// AccessPolicyInfo describes a single Access policy on an Access Application.
+type AccessPolicyInfo struct {
+	Name     string // Policy name (e.g. "Allow employees")
+	Decision string // Policy decision: "allow", "deny", "bypass", etc.
+}
+
+// AccessInfo describes a Cloudflare Access Application that protects a Worker's URL.
+type AccessInfo struct {
+	AppID           string             // Access Application UUID
+	AppName         string             // Human-readable app name
+	Domain          string             // Primary matched domain/path
+	Policies        []AccessPolicyInfo // Inline policies on this app
+	AllowedIdPs     []string           // Allowed identity provider names/IDs
+	SessionDuration string             // e.g. "24h"
+}
+
+// AccessIndex is a reverse lookup from Worker script names to the Access Applications
+// that protect their URLs. Built in the background after Workers are listed.
+type AccessIndex struct {
+	index map[string][]AccessInfo // key: worker script name → matched Access apps
+}
+
+// NewAccessIndex creates an empty access index.
+func NewAccessIndex() *AccessIndex {
+	return &AccessIndex{index: make(map[string][]AccessInfo)}
+}
+
+// Add records that a Worker is protected by an Access Application.
+func (ai *AccessIndex) Add(scriptName string, info AccessInfo) {
+	ai.index[scriptName] = append(ai.index[scriptName], info)
+}
+
+// Lookup returns all Access Applications protecting the given Worker, or nil.
+func (ai *AccessIndex) Lookup(scriptName string) []AccessInfo {
+	if ai == nil {
+		return nil
+	}
+	return ai.index[scriptName]
+}
+
+// IsProtected returns whether a Worker has any Access Application protecting it.
+func (ai *AccessIndex) IsProtected(scriptName string) bool {
+	if ai == nil {
+		return false
+	}
+	return len(ai.index[scriptName]) > 0
+}
+
+// ProtectedWorkerIDs returns the set of Worker script names that are Access-protected.
+func (ai *AccessIndex) ProtectedWorkerIDs() map[string]bool {
+	if ai == nil {
+		return nil
+	}
+	ids := make(map[string]bool, len(ai.index))
+	for k := range ai.index {
+		ids[k] = true
+	}
+	return ids
+}
+
 // BindingIndex is a reverse lookup from resources to the Workers that bind to them.
 // Key format: "ServiceName:ResourceID" (e.g. "KV:abc-123-uuid").
 type BindingIndex struct {
@@ -131,6 +191,9 @@ type Registry struct {
 
 	// Per-account binding indexes: accountID → BindingIndex
 	bindingIndexes map[string]*BindingIndex
+
+	// Per-account access indexes: accountID → AccessIndex
+	accessIndexes map[string]*AccessIndex
 }
 
 // NewRegistry creates an empty service registry.
@@ -140,6 +203,7 @@ func NewRegistry() *Registry {
 		accountCaches:    make(map[string]map[string]*CacheEntry),
 		deploymentCaches: make(map[string]map[string]*DeploymentCacheEntry),
 		bindingIndexes:   make(map[string]*BindingIndex),
+		accessIndexes:    make(map[string]*AccessIndex),
 	}
 }
 
@@ -249,6 +313,16 @@ func (r *Registry) GetBindingIndex() *BindingIndex {
 // SetBindingIndex stores a binding index for the active account.
 func (r *Registry) SetBindingIndex(idx *BindingIndex) {
 	r.bindingIndexes[r.accountID] = idx
+}
+
+// GetAccessIndex returns the access index for the active account, or nil.
+func (r *Registry) GetAccessIndex() *AccessIndex {
+	return r.accessIndexes[r.accountID]
+}
+
+// SetAccessIndex stores an access index for the active account.
+func (r *Registry) SetAccessIndex(idx *AccessIndex) {
+	r.accessIndexes[r.accountID] = idx
 }
 
 // HasCacheForAccount returns whether any cached data exists for the given account.

@@ -53,6 +53,9 @@ type EnvBox struct {
 	DevKind   string // "local", "remote"
 	DevPort   string // e.g. "8787"
 	DevError  string // short error message for failed state
+
+	// Access protection status (set by app layer via syncAccessBadges)
+	AccessProtected bool // true if this Worker is protected by Cloudflare Access
 }
 
 // NewEnvBox creates an EnvBox from a wrangler config, environment name, and index.
@@ -191,11 +194,17 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 			workerCursor = theme.SelectedItemStyle.Render("> ")
 			workerStyle = theme.SelectedItemStyle
 		}
+		// Access protection badge
+		accessBadge := ""
+		if b.AccessProtected {
+			accessBadge = " " + lipgloss.NewStyle().Foreground(theme.ColorBlue).Bold(true).Render("\xf0\x9f\x94\x92")
+		}
 		navArrow := " " + theme.ActionNavArrowStyle.Render("\u2192") // →
-		workerLine = fmt.Sprintf("%s%s %s%s",
+		workerLine = fmt.Sprintf("%s%s %s%s%s",
 			workerCursor,
 			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Worker")),
 			workerStyle.Render(b.WorkerName),
+			accessBadge,
 			navArrow)
 	}
 

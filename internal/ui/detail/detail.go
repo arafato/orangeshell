@@ -75,6 +75,9 @@ type Model struct {
 	managedIDs   map[string]bool // set of resource IDs that are wrangler-managed
 	managedCount int             // number of managed resources at the front of the slice
 
+	// Access-protected resource detection
+	accessProtectedIDs map[string]bool // set of resource IDs protected by Cloudflare Access
+
 	// List state
 	resources  []service.Resource
 	cursor     int
@@ -942,8 +945,19 @@ func (m Model) viewResourceList(width, height int) []string {
 			nameStyle = theme.SelectedItemStyle
 		}
 
-		name := nameStyle.Render(truncateRunes(r.Name, availableWidth))
-		line := fmt.Sprintf("%s%s", cursor, name)
+		// Access protection badge: reserve space for lock emoji on Workers
+		accessBadge := ""
+		nameWidth := availableWidth
+		if m.service == "Workers" && m.IsAccessProtected(r.ID) {
+			accessBadge = " " + lipgloss.NewStyle().Foreground(theme.ColorBlue).Bold(true).Render("\xf0\x9f\x94\x92")
+			nameWidth = availableWidth - 3 // lock emoji + space
+			if nameWidth < 5 {
+				nameWidth = 5
+			}
+		}
+
+		name := nameStyle.Render(truncateRunes(r.Name, nameWidth))
+		line := fmt.Sprintf("%s%s%s", cursor, name, accessBadge)
 		vLines = append(vLines, visualLine{
 			text:  zone.Mark(ResourceItemZoneID(i), line),
 			resID: i,

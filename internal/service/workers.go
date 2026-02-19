@@ -481,6 +481,257 @@ func (s *WorkersService) GetSubdomain() (string, error) {
 	return resp.Subdomain, nil
 }
 
+// --- Access Index ---
+
+// safeAccessAppsResponse is a hand-rolled struct for the Access Applications endpoint.
+// We use this instead of the SDK's generated type because the SDK uses interface{} for
+// many fields (policies, destinations, etc.) due to union type deserialization.
+// By using client.Get() with this struct, we get predictable deserialization.
+type safeAccessAppsResponse struct {
+	Result     []safeAccessApp `json:"result"`
+	ResultInfo struct {
+		Page       int `json:"page"`
+		PerPage    int `json:"per_page"`
+		TotalPages int `json:"total_pages"`
+		Count      int `json:"count"`
+		Total      int `json:"total_count"`
+	} `json:"result_info"`
+}
+
+type safeAccessApp struct {
+	ID              string             `json:"id"`
+	Name            string             `json:"name"`
+	Domain          string             `json:"domain"`
+	Type            string             `json:"type"`
+	SelfHosted      []string           `json:"self_hosted_domains"`
+	Destinations    []safeDestination  `json:"destinations"`
+	Policies        []safeAccessPolicy `json:"policies"`
+	AllowedIdPs     []string           `json:"allowed_idps"`
+	SessionDuration string             `json:"session_duration"`
+}
+
+type safeDestination struct {
+	Type string `json:"type"`
+	URI  string `json:"uri"`
+}
+
+type safeAccessPolicy struct {
+	Name     string `json:"name"`
+	Decision string `json:"decision"`
+}
+
+// fetchAccessApps fetches all Access Applications for the account using raw HTTP.
+// Returns only self_hosted apps. Returns nil (no error) on 401/403 (silent fallback).
+func (s *WorkersService) fetchAccessApps(ctx context.Context) []safeAccessApp {
+	var allApps []safeAccessApp
+	page := 1
+	perPage := 100
+
+	for {
+		path := fmt.Sprintf("/accounts/%s/access/apps?page=%d&per_page=%d", s.accountID, page, perPage)
+		var resp safeAccessAppsResponse
+		err := s.client.Get(ctx, path, nil, &resp)
+		if err != nil {
+			// Silent fallback on auth errors or any error
+			return nil
+		}
+
+		for _, app := range resp.Result {
+			if app.Type == "self_hosted" {
+				allApps = append(allApps, app)
+			}
+		}
+
+		// Check if there are more pages
+		if resp.ResultInfo.TotalPages <= page || len(resp.Result) == 0 {
+			break
+		}
+		page++
+	}
+
+	return allApps
+}
+
+// fetchCustomDomains fetches all Workers custom domains for the account.
+// Returns a map of scriptName → []hostname.
+func (s *WorkersService) fetchCustomDomains(ctx context.Context) map[string][]string {
+	pager := s.client.Workers.Domains.ListAutoPaging(ctx, workers.DomainListParams{
+		AccountID: cloudflare.F(s.accountID),
+	})
+
+	result := make(map[string][]string)
+	for pager.Next() {
+		d := pager.Current()
+		if d.Service != "" && d.Hostname != "" {
+			result[d.Service] = append(result[d.Service], d.Hostname)
+		}
+	}
+	// Ignore errors silently — custom domains are optional enrichment
+	return result
+}
+
+// collectWorkerURLs builds a map of scriptName → []hostname for all known URLs
+// where a Worker can be reached (routes, custom domains, workers.dev).
+func (s *WorkersService) collectWorkerURLs(ctx context.Context) map[string][]string {
+	urls := make(map[string][]string)
+
+	s.mu.Lock()
+	cachedRaw := s.cachedRaw
+	subdomain := s.cachedSubdomain
+	s.mu.Unlock()
+
+	// Routes: extract hostname from pattern (strip path and wildcard prefix)
+	for scriptName, raw := range cachedRaw {
+		for _, r := range raw.Routes {
+			host := extractHostFromRoute(r.Pattern)
+			if host != "" {
+				urls[scriptName] = append(urls[scriptName], host)
+			}
+		}
+	}
+
+	// Workers.dev subdomain
+	if subdomain == "" {
+		subdomain, _ = s.GetSubdomain()
+	}
+	if subdomain != "" {
+		for scriptName := range cachedRaw {
+			workersDev := fmt.Sprintf("%s.%s.workers.dev", scriptName, subdomain)
+			urls[scriptName] = append(urls[scriptName], workersDev)
+		}
+	}
+
+	// Custom domains
+	customDomains := s.fetchCustomDomains(ctx)
+	for scriptName, hostnames := range customDomains {
+		urls[scriptName] = append(urls[scriptName], hostnames...)
+	}
+
+	return urls
+}
+
+// extractHostFromRoute extracts the hostname from a Workers route pattern.
+// Route patterns look like: "example.com/*", "*.example.com/api/*", "example.com/path"
+// Returns just the hostname part (e.g. "example.com", "*.example.com").
+func extractHostFromRoute(pattern string) string {
+	// Strip protocol prefix if present
+	host := pattern
+	if idx := strings.Index(host, "://"); idx >= 0 {
+		host = host[idx+3:]
+	}
+	// Strip path
+	if idx := strings.Index(host, "/"); idx >= 0 {
+		host = host[:idx]
+	}
+	return strings.ToLower(strings.TrimSpace(host))
+}
+
+// matchDomains checks if any of the Worker's URLs match any of the Access App's domains.
+// Returns the first matched domain, or empty string if no match.
+func matchDomains(workerHosts []string, app safeAccessApp) string {
+	// Collect all domains the Access app covers
+	var accessDomains []string
+	if app.Domain != "" {
+		accessDomains = append(accessDomains, app.Domain)
+	}
+	for _, d := range app.SelfHosted {
+		accessDomains = append(accessDomains, d)
+	}
+	for _, d := range app.Destinations {
+		if d.Type == "public" && d.URI != "" {
+			accessDomains = append(accessDomains, d.URI)
+		}
+	}
+
+	for _, workerHost := range workerHosts {
+		wh := strings.ToLower(workerHost)
+		for _, accessDomain := range accessDomains {
+			ad := strings.ToLower(accessDomain)
+			// Strip protocol prefix from access domain if present
+			if idx := strings.Index(ad, "://"); idx >= 0 {
+				ad = ad[idx+3:]
+			}
+			// Strip path from access domain for host-level matching
+			adHost := ad
+			if idx := strings.Index(adHost, "/"); idx >= 0 {
+				adHost = adHost[:idx]
+			}
+
+			// Exact host match
+			if wh == adHost {
+				return accessDomain
+			}
+
+			// Wildcard subdomain: Access app "*.example.com" matches worker "foo.example.com"
+			if strings.HasPrefix(adHost, "*.") {
+				suffix := adHost[1:] // ".example.com"
+				if strings.HasSuffix(wh, suffix) && wh != adHost {
+					return accessDomain
+				}
+			}
+
+			// Worker wildcard route: worker "*.example.com" matches Access "foo.example.com"
+			if strings.HasPrefix(wh, "*.") {
+				suffix := wh[1:] // ".example.com"
+				if strings.HasSuffix(adHost, suffix) {
+					return accessDomain
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// BuildAccessIndex fetches Access Applications and Workers custom domains, then
+// builds a reverse index mapping Worker script names to the Access apps protecting them.
+// Returns an empty index (not nil) on permission errors (silent fallback).
+func (s *WorkersService) BuildAccessIndex() *AccessIndex {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Fetch Access apps (returns nil on auth errors)
+	apps := s.fetchAccessApps(ctx)
+	if len(apps) == 0 {
+		return NewAccessIndex()
+	}
+
+	// Collect all Worker URLs
+	workerURLs := s.collectWorkerURLs(ctx)
+	if len(workerURLs) == 0 {
+		return NewAccessIndex()
+	}
+
+	// Match Workers to Access apps
+	idx := NewAccessIndex()
+	for scriptName, hosts := range workerURLs {
+		for _, app := range apps {
+			matched := matchDomains(hosts, app)
+			if matched == "" {
+				continue
+			}
+
+			var policies []AccessPolicyInfo
+			for _, p := range app.Policies {
+				policies = append(policies, AccessPolicyInfo{
+					Name:     p.Name,
+					Decision: p.Decision,
+				})
+			}
+
+			idx.Add(scriptName, AccessInfo{
+				AppID:           app.ID,
+				AppName:         app.Name,
+				Domain:          matched,
+				Policies:        policies,
+				AllowedIdPs:     app.AllowedIdPs,
+				SessionDuration: app.SessionDuration,
+			})
+		}
+	}
+
+	return idx
+}
+
 func timeAgo(t time.Time) string {
 	if t.IsZero() {
 		return "unknown"

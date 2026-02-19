@@ -332,6 +332,7 @@ type AuthError struct { StatusCode int; Body string } // Returned on 401/403
 | `LoadDetailMsg` / `DetailLoadedMsg` | Resource detail fetch |
 | `DeleteResourceRequestMsg` | Opens delete confirmation |
 | `bindingIndexBuiltMsg` | Reverse binding index ready |
+| `accessIndexBuiltMsg` | Access protection index ready |
 | `LoadVersionHistoryMsg` / `VersionHistoryLoadedMsg` | Version history fetch |
 | `BuildsEnrichedMsg` / `BuildsAuthFailedMsg` | Builds API enrichment |
 | `FetchBuildLogMsg` / `BuildLogLoadedMsg` | Build log fetch |
@@ -587,6 +588,18 @@ go build -o orangeshell .
 20. **Replace legacy navigation with config tab navigation**: Instead of opening legacy full-screen views (ViewEnvVars/ViewTriggers), navigate to the unified config tab with the appropriate category pre-selected using `syncConfigProjects()` + `SelectProjectByPath()` + `SetCategory()`. This eliminates entire view states and their associated guard conditions.
 
 21. **Guard condition removal cascades**: Removing two ViewState enum values (`ViewEnvVars`, `ViewTriggers`) cascaded into removing ~18 guard conditions across 5 files. Each guard was a `m.viewState != ViewEnvVars && m.viewState != ViewTriggers` check that existed solely to bypass the legacy views. The removals simplified every branch they touched.
+
+### Access Protection Feature
+
+22. **SDK union types use `interface{}` — use raw HTTP instead**: The cloudflare-go v6 SDK's `AccessApplicationListResponse` uses `interface{}` for many fields (policies, destinations, self_hosted_domains, allowed_idps) due to union type deserialization. This is the same class of issue as the Placement field panic (lesson #7). Solution: use `client.Get()` with hand-rolled "safe" structs (`safeAccessApp`, etc.), same pattern as `getSettings()`.
+
+23. **Access protects URLs, not Workers directly**: Access Applications are tied to domains/hostnames, not to Worker scripts. Matching Workers to Access apps requires collecting all Worker URLs (routes, custom domains, workers.dev subdomains) and matching them against Access app domains. Route patterns like `*.example.com/*` need wildcard matching in both directions.
+
+24. **Parallel background indexes work well**: Building both the `BindingIndex` and `AccessIndex` in parallel after Workers list loads (`tea.Batch(buildBindingIndexCmd(), buildAccessIndexCmd())`) adds negligible latency since they use separate API endpoints. The access index fetch (Access apps + custom domains) is fully independent of the binding index fetch (worker settings).
+
+25. **Badge re-sync on config/project reload**: When wrangler config loads or projects are discovered, EnvBoxes and ProjectBoxes are recreated from scratch, losing any previously set badge state. Must call `syncAccessBadges()` (and `syncDevBadges()`) after `ConfigLoadedMsg` and `ProjectsDiscoveredMsg` to reapply badge data from the cached indexes.
+
+26. **Silent permission fallback is cleanest**: For optional enrichment features (Access info), returning an empty index on 401/403 (rather than propagating errors or prompting) keeps the UI clean. Users without the `Access: Apps and Policies Read` permission simply don't see Access badges — no error popups, no toast messages, no degraded UX.
 
 ## General Design Considerations
 ### Design-Patterns

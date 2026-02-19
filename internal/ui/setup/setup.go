@@ -213,6 +213,14 @@ func (m Model) handleAuthMethodKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleCredentialKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
+	// Handle bracketed paste (Cmd+V / Ctrl+V): append all pasted runes at once.
+	if msg.Paste {
+		for _, r := range msg.Runes {
+			m.appendChar(string(r))
+		}
+		return m, nil
+	}
+
 	key := msg.String()
 
 	switch key {
@@ -237,9 +245,9 @@ func (m Model) handleCredentialKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.deleteChar()
 		return m, nil
 	default:
-		// Append printable characters
-		if len(key) == 1 {
-			m.appendChar(key)
+		// Append printable characters (single runes from normal typing)
+		if len(msg.Runes) == 1 {
+			m.appendChar(string(msg.Runes[0]))
 		}
 	}
 

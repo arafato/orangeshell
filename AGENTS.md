@@ -601,6 +601,18 @@ go build -o orangeshell .
 
 26. **Silent permission fallback is cleanest**: For optional enrichment features (Access info), returning an empty index on 401/403 (rather than propagating errors or prompting) keeps the UI clean. Users without the `Access: Apps and Policies Read` permission simply don't see Access badges — no error popups, no toast messages, no degraded UX.
 
+### Restricted API Auth (Fallback Token Pattern)
+
+27. **OAuth scope limitations are systemic**: Cloudflare's OAuth system (client ID `54d11594-...`) only supports a fixed set of scopes (`workers:write`, `d1:write`, etc.). Access/Zero Trust and Workers Builds scopes do not exist. This is a platform limitation, not a bug. Any API requiring `Access: Apps and Policies Read` or `Workers CI Read` will always 403 with an OAuth token.
+
+28. **Auto-provisioning scoped tokens is the cleanest UX**: Rather than prompting users with a popup (old `buildstokenpopup` pattern) or requiring manual config edits, auto-provisioning via `POST /user/tokens` with the Global API Key from env vars (`CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL`) is seamless. The provisioned token is saved to config (`api_token_fallback`) so env vars are only needed once.
+
+29. **TOML tag uniqueness is critical**: Having two struct fields with the same TOML tag (e.g., both `APIToken` and `APITokenFallback` tagged as `toml:"api_token"`) compiles fine but causes silent data corruption during decode — one field shadows the other. Always use distinct TOML tags.
+
+30. **Restricted mode badge communicates degradation**: When fallback credentials are unavailable and auto-provisioning can't run (no env vars), showing a dimmed `(restricted)` badge in the header next to the auth method communicates the limitation without interrupting the workflow. Much better than error popups or toasts.
+
+31. **Fallback auth chain pattern**: For restricted APIs, the auth priority chain should be: (1) dedicated fallback token from config, (2) primary auth method if it has permissions (API Key always does, API Token might), (3) auto-provisioned token via env vars, (4) silent degradation. This pattern applies to both Access API and Workers Builds API and can be extended to future restricted APIs.
+
 ## General Design Considerations
 ### Design-Patterns
 1. The Elm Architecture (MVU)

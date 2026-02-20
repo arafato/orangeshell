@@ -177,4 +177,31 @@ var (
 
 	ActionNavArrowStyle = lipgloss.NewStyle().
 				Foreground(ColorOrangeDim)
+
+	// KV Data Explorer styles
+	KVPromptStyle = lipgloss.NewStyle().
+			Foreground(ColorOrange).
+			Bold(true)
+
+	KVKeyStyle = lipgloss.NewStyle().
+			Foreground(ColorWhite)
+
+	KVValueStyle = lipgloss.NewStyle().
+			Foreground(ColorGray)
+
+	KVExpiryStyle = lipgloss.NewStyle().
+			Foreground(ColorYellow).
+			Italic(true)
+
+	KVBinaryStyle = lipgloss.NewStyle().
+			Foreground(ColorDarkGray).
+			Italic(true)
+
+	KVHeaderStyle = lipgloss.NewStyle().
+			Foreground(ColorOrange).
+			Bold(true)
+
+	KVSelectedRowStyle = lipgloss.NewStyle().
+				Foreground(ColorOrange).
+				Bold(true)
 )

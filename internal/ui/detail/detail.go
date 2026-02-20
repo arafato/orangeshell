@@ -102,6 +102,16 @@ type Model struct {
 	// Scroll offset for detail view
 	scrollOffset int
 
+	// KV Data Explorer state
+	kvInput       textinput.Model      // prefix search input
+	kvActive      bool                 // true when KV explorer is initialized
+	kvKeys        []service.KVKeyEntry // loaded key-value entries
+	kvLoading     bool                 // true while keys are being fetched
+	kvNamespaceID string               // current namespace UUID
+	kvCursor      int                  // selected row in the key table
+	kvScroll      int                  // scroll offset for the key table
+	kvErr         string               // error message from last load
+
 	// D1 SQL console state
 	d1Input      textinput.Model // SQL text input
 	d1Active     bool            // true when D1 console is initialized
@@ -450,7 +460,7 @@ func (m Model) SpinnerInit() tea.Cmd {
 
 // IsLoading returns whether the detail panel is in a loading state (spinner should run).
 func (m Model) IsLoading() bool {
-	return m.loading || m.detailLoading || m.d1SchemaLoading || m.d1Querying || m.versionHistoryLoading || m.buildLogLoading
+	return m.loading || m.detailLoading || m.kvLoading || m.d1SchemaLoading || m.d1Querying || m.versionHistoryLoading || m.buildLogLoading
 }
 
 // UpdateSpinner forwards a message to the embedded spinner and returns the updated model + cmd.
@@ -520,6 +530,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	}
+
+	// When KV explorer is active, forward all messages to the textinput for cursor blink
+	if m.kvActive && m.mode == viewDetail && m.focus == FocusDetail && m.interacting {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			return m.updateKV(msg)
+		default:
+			// Forward cursor blink and other messages to textinput
+			var cmd tea.Cmd
+			m.kvInput, cmd = m.kvInput.Update(msg)
+			return m, cmd
+		}
 	}
 
 	// When D1 console is active, forward all messages to the textinput for cursor blink
@@ -658,6 +681,12 @@ func (m *Model) autoPreview() tea.Cmd {
 	m.detail = nil
 	m.detailID = r.ID
 	m.scrollOffset = 0
+	// Clear stale KV explorer state when previewing a different resource
+	if m.service == "KV" {
+		m.kvKeys = nil
+		m.kvErr = ""
+		m.kvLoading = false
+	}
 	// Clear stale D1 schema when previewing a different resource
 	if m.service == "D1" {
 		m.d1SchemaTables = nil
@@ -1075,6 +1104,17 @@ func (m Model) viewResourceDetail(width, height int) []string {
 	// For Workers, append version history table below the detail fields
 	if m.service == "Workers" {
 		allLines = append(allLines, m.renderVersionHistory(width)...)
+	}
+
+	// For KV with active explorer, use the KV data explorer layout
+	if m.service == "KV" && m.kvActive {
+		return m.viewResourceDetailKV(width, height, title, sep, allLines, copyLineMap)
+	}
+
+	// For KV in preview mode, show hint to open explorer
+	if m.service == "KV" && !m.kvActive {
+		allLines = append(allLines, "")
+		allLines = append(allLines, theme.DimStyle.Render(" Press enter to open data explorer"))
 	}
 
 	// For D1 with active console, use the special D1 split layout

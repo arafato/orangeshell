@@ -754,6 +754,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopAllParallelTails()
 			m.monitoring.Clear()
 			m.detail.ClearD1()
+			m.detail.ClearKV()
 			m.activeTab = tabbar.TabOperations
 			m.viewState = ViewWrangler
 			// Refresh deployment data if stale

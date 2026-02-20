@@ -75,13 +75,56 @@ func (m Model) renderDashboardContent() string {
 	helpText := m.renderHelp()
 
 	parts := []string{headerView, tabBarView, content, helpText}
-	if m.toastMsg != "" && time.Now().Before(m.toastExpiry) {
-		parts = append(parts, theme.SuccessStyle.Render(fmt.Sprintf(" ✓ %s ", m.toastMsg)))
-	} else if m.err != nil {
+	if m.err != nil {
 		parts = append(parts, theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s ", m.err.Error())))
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+	// Overlay toast notification in the upper-right corner at the header line.
+	if m.toastMsg != "" && time.Now().Before(m.toastExpiry) {
+		result = m.overlayToast(result)
+	}
+
+	return result
+}
+
+// overlayToast renders the toast message on the tab bar line, right-aligned.
+// The tab bar starts at line 1 (line 0 is the header). The tab bar is 3 lines
+// tall (top border, content, bottom border) — we target the middle content line.
+func (m Model) overlayToast(rendered string) string {
+	toast := theme.SuccessStyle.Render(fmt.Sprintf(" ✓ %s ", m.toastMsg))
+	toastWidth := ansi.StringWidth(toast)
+
+	lines := strings.Split(rendered, "\n")
+	if len(lines) < 3 || m.width < toastWidth+4 {
+		return rendered
+	}
+
+	// Target the tab bar content line: header=0, tab top border=1, tab content=2
+	targetLine := 2
+	lineWidth := ansi.StringWidth(lines[targetLine])
+
+	// Truncate the line to make room for the toast, then append it
+	if lineWidth+toastWidth <= m.width {
+		// Line is short enough — just pad and append
+		gap := m.width - lineWidth - toastWidth
+		if gap < 0 {
+			gap = 0
+		}
+		padding := strings.Repeat(" ", gap)
+		lines[targetLine] = lines[targetLine] + padding + toast
+	} else {
+		// Line is too long — truncate visually to make room
+		// Use ansi.Truncate to handle ANSI escape codes correctly
+		truncWidth := m.width - toastWidth - 1
+		if truncWidth < 0 {
+			truncWidth = 0
+		}
+		lines[targetLine] = ansi.Truncate(lines[targetLine], truncWidth, "") + " " + toast
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // renderTabContent renders the content area for the currently active tab.
@@ -348,6 +391,9 @@ func (m Model) renderResourcesHelp() []helpEntry {
 		}
 		if m.detail.IsWorkersDetail() {
 			entries = append(entries, helpEntry{"t", "tail"})
+		}
+		if m.detail.KVActive() {
+			entries = append(entries, helpEntry{"enter", "search"}, helpEntry{"ctrl+y", "copy"})
 		}
 		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 		return entries

@@ -695,6 +695,16 @@ go build -o orangeshell .
 
 63. **ResourceListClient must follow the same fallback auth chain as BuildsClient**: Some APIs return 403 with OAuth tokens (same class of issue as lesson 27). Since `newResourceListClient()` creates a single client shared by Vectorize and Hyperdrive services (and binding pickers for mTLS), it tries the Global API Key (from env vars) first — it has the broadest permissions and works for all APIs. Correct chain: (1) env var Global API Key, (2) primary auth method (API Key/Token), (3) `api_token_fallback` for OAuth users, (4) OAuth token as last resort.
 
+### KV Data Explorer
+
+64. **KV Values.Get returns raw `*http.Response`**: Unlike most SDK methods that return deserialized structs, `KV.Namespaces.Values.Get()` returns a raw HTTP response with `application/octet-stream` content. Must manually read the body, check UTF-8 validity, and handle binary values gracefully. Limit reads to 10KB to avoid OOM on large values.
+
+65. **SDK does NOT URL-encode path parameters**: The cloudflare-go v6 SDK uses `fmt.Sprintf` to construct URL paths, meaning special characters in KV key names (e.g., `/`, `%`, `:`) will break the request. Must call `url.PathEscape(keyName)` before passing to `Values.Get()`.
+
+66. **ReadWrite mode is the toggle for interactive data exploration**: Changing a service from `ReadOnly` to `ReadWrite` in the `ServiceEntry` registration enables the tab/enter interactive mode flow (same as D1). The `EnterInteractiveMsg` is the gateway — the app layer initializes the explorer and auto-loads data. No need for a separate "enter explorer" message type.
+
+67. **Sequential value fetching is acceptable for small key sets**: Fetching values individually (1 API call per key, up to 20) after listing keys avoids the `BulkGet` union type issues (lesson #7 class). With a 60s context timeout and typical API latency of ~100ms per call, 20 sequential fetches take ~2s. Acceptable for an interactive explorer with explicit search.
+
 ## General Design Considerations
 ### Design-Patterns
 1. The Elm Architecture (MVU)

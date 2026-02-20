@@ -31,9 +31,10 @@ func (m *Model) fetchStaleForSearch() []tea.Cmd {
 // If the cache is stale, it is shown immediately and a background refresh is triggered.
 // If there is no cache, a loading spinner is shown while data is fetched.
 func (m *Model) navigateToService(name string) tea.Cmd {
-	// Stop any active tail/D1 session when switching services
+	// Stop any active tail/D1/KV session when switching services
 	m.stopTail()
 	m.detail.ClearD1()
+	m.detail.ClearKV()
 
 	m.activeTab = tabbar.TabResources
 	m.viewState = ViewServiceList
@@ -250,7 +251,7 @@ func (m *Model) registerServices(accountID string) {
 	// Populate the Resources tab service dropdown
 	m.detail.SetServices([]detail.ServiceEntry{
 		{Name: "Workers", Integrated: true, Mode: detail.ReadOnly},
-		{Name: "KV", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "KV", Integrated: true, Mode: detail.ReadWrite},
 		{Name: "R2", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "D1", Integrated: true, Mode: detail.ReadWrite},
 		{Name: "Queues", Integrated: true, Mode: detail.ReadOnly},
@@ -273,6 +274,7 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	}
 	m.monitoring.Clear()
 	m.detail.ClearD1()
+	m.detail.ClearKV()
 	m.wrangler.ClearVersionCache()
 	m.wrangler.CloseVersionPicker()
 
@@ -382,6 +384,34 @@ func (m Model) resolveResourceID(resources []svc.Resource, resourceID string) st
 		}
 	}
 	return resourceID
+}
+
+// --- KV Data Explorer helpers ---
+
+// loadKVKeys returns a command that fetches keys (with values) from a KV namespace.
+func (m Model) loadKVKeys(namespaceID, prefix string) tea.Cmd {
+	kvSvc := m.getKVService()
+	if kvSvc == nil {
+		return func() tea.Msg {
+			return detail.KVKeysLoadedMsg{NamespaceID: namespaceID, Err: fmt.Errorf("KV service not available")}
+		}
+	}
+	return func() tea.Msg {
+		keys, err := kvSvc.ListKeysWithValues(namespaceID, prefix, 20)
+		return detail.KVKeysLoadedMsg{NamespaceID: namespaceID, Keys: keys, Err: err}
+	}
+}
+
+// getKVService retrieves the KVService from the registry (type-asserted).
+func (m Model) getKVService() *svc.KVService {
+	s := m.registry.Get("KV")
+	if s == nil {
+		return nil
+	}
+	if kvs, ok := s.(*svc.KVService); ok {
+		return kvs
+	}
+	return nil
 }
 
 // --- D1 SQL console helpers ---

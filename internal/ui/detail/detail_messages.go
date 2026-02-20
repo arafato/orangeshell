@@ -92,11 +92,25 @@ type (
 
 	// EnterInteractiveMsg is emitted when the user enters interactive mode on a
 	// ReadWrite service's detail view. The app layer handles this to initialize
-	// service-specific interactive features (e.g. D1 SQL console).
+	// service-specific interactive features (e.g. D1 SQL console, KV data explorer).
 	EnterInteractiveMsg struct {
 		ServiceName string
 		ResourceID  string
 		Mode        DetailMode
+	}
+
+	// KV Data Explorer messages
+
+	// KVKeysLoadMsg requests the app to load keys (with values) from a KV namespace.
+	KVKeysLoadMsg struct {
+		NamespaceID string
+		Prefix      string
+	}
+	// KVKeysLoadedMsg carries the loaded KV key-value entries back.
+	KVKeysLoadedMsg struct {
+		NamespaceID string
+		Keys        []service.KVKeyEntry
+		Err         error
 	}
 
 	// CopyToClipboardMsg requests the app to copy text to the system clipboard.

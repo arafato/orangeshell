@@ -134,6 +134,9 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			m.enrichDetailWithAccessInfo(msg.Detail, msg.ResourceID)
 		}
 		m.detail.SetDetail(msg.Detail, msg.Err)
+		// KV explorer initialization is deferred to interactive mode (EnterInteractiveMsg).
+		// No preview data is fetched for KV — just show the "press enter" hint.
+
 		// D1 console initialization is deferred to interactive mode (EnterInteractiveMsg).
 		// However, load the schema in preview mode so it's visible in the read-only detail view.
 		if msg.Err == nil && msg.ServiceName == "D1" && msg.Detail != nil {
@@ -217,6 +220,15 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 				return *m, tea.Batch(cmds...), true
 			}
 		}
+		if msg.Mode == detail.ReadWrite && msg.ServiceName == "KV" && msg.ResourceID != "" {
+			// Only init KV explorer if not already active for this namespace
+			if !m.detail.KVActive() || m.detail.KVNamespaceID() != msg.ResourceID {
+				inputCmd := m.detail.InitKVExplorer(msg.ResourceID)
+				// Auto-load first 20 keys (no prefix)
+				loadCmd := m.loadKVKeys(msg.ResourceID, "")
+				return *m, tea.Batch(inputCmd, loadCmd, m.detail.SpinnerInit()), true
+			}
+		}
 		return *m, nil, true
 
 	// --- D1 SQL console messages ---
@@ -246,6 +258,22 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return *m, nil, true
 		}
 		m.detail.SetD1Schema(msg.Tables, msg.Err)
+		return *m, nil, true
+
+	// --- KV Data Explorer messages ---
+
+	case detail.KVKeysLoadMsg:
+		if m.client == nil {
+			return *m, nil, true
+		}
+		return *m, tea.Batch(m.loadKVKeys(msg.NamespaceID, msg.Prefix), m.detail.SpinnerInit()), true
+
+	case detail.KVKeysLoadedMsg:
+		// Staleness check: only apply if we're still on this namespace
+		if msg.NamespaceID != m.detail.KVNamespaceID() {
+			return *m, nil, true
+		}
+		m.detail.SetKVKeys(msg.Keys, msg.Err)
 		return *m, nil, true
 
 	// --- Tail lifecycle messages (single-tail from detail/Resources tab) ---

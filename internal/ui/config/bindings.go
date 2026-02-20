@@ -13,13 +13,6 @@ import (
 
 // --- Messages ---
 
-// OpenBindingsWizardMsg is emitted when the user wants to add a binding via the popup wizard.
-type OpenBindingsWizardMsg struct {
-	ConfigPath string
-	EnvName    string
-	WorkerName string
-}
-
 // DeleteBindingMsg requests removing a binding from the wrangler config.
 type DeleteBindingMsg struct {
 	ConfigPath  string
@@ -293,16 +286,16 @@ func renderTypeBadge(label string) string {
 type bindingTypeEntry struct {
 	WriterType  string // writer key: "d1", "kv", "r2", "queue", "service", etc.
 	Label       string // display label: "D1", "KV", "R2", "Queue", etc.
-	Kind        string // "wizard" (D1/KV/R2/Queue), "form" (simple), "picker" (API list)
+	Kind        string // "form" (simple text inputs), "picker" (API resource list → pre-filled form)
 	Description string // short description for the type selector
 }
 
 // allBindingTypes is the ordered list of all supported binding types.
 var allBindingTypes = []bindingTypeEntry{
-	{"d1", "D1", "wizard", "D1 database"},
-	{"kv", "KV", "wizard", "KV namespace"},
-	{"r2", "R2", "wizard", "R2 bucket"},
-	{"queue", "Queue", "wizard", "Queue producer"},
+	{"d1", "D1", "picker", "D1 database"},
+	{"kv", "KV", "picker", "KV namespace"},
+	{"r2", "R2", "picker", "R2 bucket"},
+	{"queue", "Queue", "picker", "Queue producer"},
 	{"service", "Service", "picker", "Worker service binding"},
 	{"durable_object", "DO", "form", "Durable Object namespace"},
 	{"ai", "AI", "form", "Workers AI binding (singleton)"},
@@ -326,6 +319,27 @@ type bindingFormField struct {
 // bindingFormFields returns the field definitions for the inline form of a given type.
 func bindingFormFields(writerType string) []bindingFormField {
 	switch writerType {
+	case "d1":
+		return []bindingFormField{
+			{"binding", "MY_DB (binding name)", true},
+			{"database_id", "database-uuid (D1 database ID)", true},
+			{"database_name", "my-database (database name)", false},
+		}
+	case "kv":
+		return []bindingFormField{
+			{"binding", "MY_KV (binding name)", true},
+			{"id", "namespace-uuid (KV namespace ID)", true},
+		}
+	case "r2":
+		return []bindingFormField{
+			{"binding", "MY_BUCKET (binding name)", true},
+			{"bucket_name", "my-bucket (R2 bucket name)", true},
+		}
+	case "queue":
+		return []bindingFormField{
+			{"binding", "MY_QUEUE (binding name)", true},
+			{"queue_name", "my-queue (queue name)", true},
+		}
 	case "ai", "browser", "images":
 		// Singletons: only binding name
 		return []bindingFormField{{"binding", "AI (binding name)", true}}
@@ -382,6 +396,14 @@ func bindingFormFields(writerType string) []bindingFormField {
 // ListBindingResourcesMsg. Returns "" if the type doesn't use a picker.
 func pickerResourceType(writerType string) string {
 	switch writerType {
+	case "d1":
+		return "d1"
+	case "kv":
+		return "kv"
+	case "r2":
+		return "r2"
+	case "queue":
+		return "queue"
 	case "service":
 		return "service"
 	case "vectorize":
@@ -420,22 +442,6 @@ func (m Model) updateBindingsTypeSelector(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.addBindingType = entry.WriterType
 
 		switch entry.Kind {
-		case "wizard":
-			// D1/KV/R2/Queue — delegate to existing popup wizard
-			m.mode = modeNormal
-			configPath := m.configPath
-			workerName := ""
-			if m.config != nil {
-				workerName = m.config.Name
-			}
-			envName := m.addBindingEnvName
-			return m, func() tea.Msg {
-				return OpenBindingsWizardMsg{
-					ConfigPath: configPath,
-					EnvName:    envName,
-					WorkerName: workerName,
-				}
-			}
 		case "form":
 			// Simple form — set up text inputs
 			m.initBindingForm(entry.WriterType)
@@ -593,6 +599,15 @@ func (m Model) buildBindingDef(writerType string, values map[string]string) wcfg
 	}
 
 	switch writerType {
+	case "d1":
+		def.ResourceID = values["database_id"]
+		def.ResourceName = values["database_name"]
+	case "kv":
+		def.ResourceID = values["id"]
+	case "r2":
+		def.ResourceName = values["bucket_name"]
+	case "queue":
+		def.ResourceName = values["queue_name"]
 	case "ai", "browser", "images":
 		// Singletons — binding name only
 	case "service":
@@ -606,7 +621,7 @@ func (m Model) buildBindingDef(writerType string, values map[string]string) wcfg
 			def.ExtraFields = map[string]string{"script_name": sn}
 		}
 	case "vectorize":
-		def.ResourceName = values["index_name"]
+		def.ResourceID = values["index_name"]
 	case "hyperdrive":
 		def.ResourceID = values["id"]
 	case "analytics_engine":
@@ -742,6 +757,19 @@ func (m *Model) prefillBindingFormFromPicker(res BindingResourceItem) {
 	defaultBinding := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(res.Name, "-", "_"), ".", "_"))
 
 	switch m.addBindingType {
+	case "d1":
+		m.setFormFieldValue("binding", defaultBinding)
+		m.setFormFieldValue("database_id", res.ID)
+		m.setFormFieldValue("database_name", res.Name)
+	case "kv":
+		m.setFormFieldValue("binding", defaultBinding)
+		m.setFormFieldValue("id", res.ID)
+	case "r2":
+		m.setFormFieldValue("binding", defaultBinding)
+		m.setFormFieldValue("bucket_name", res.Name)
+	case "queue":
+		m.setFormFieldValue("binding", defaultBinding)
+		m.setFormFieldValue("queue_name", res.Name)
 	case "service":
 		// binding = uppercase(name), service = name
 		m.setFormFieldValue("binding", defaultBinding)

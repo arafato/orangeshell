@@ -236,6 +236,19 @@ func (m *Model) registerServices(accountID string) {
 	queuesSvc := svc.NewQueueService(m.client.CF, accountID)
 	m.registry.Register(queuesSvc)
 
+	// Register services backed by raw HTTP (ResourceListClient)
+	rlc := m.newResourceListClient()
+	if rlc != nil {
+		vectorizeSvc := svc.NewVectorizeService(rlc)
+		m.registry.Register(vectorizeSvc)
+
+		hyperdriveSvc := svc.NewHyperdriveService(rlc)
+		m.registry.Register(hyperdriveSvc)
+
+		secretsStoreSvc := svc.NewSecretsStoreService(rlc)
+		m.registry.Register(secretsStoreSvc)
+	}
+
 	// Populate the Resources tab service dropdown
 	m.detail.SetServices([]detail.ServiceEntry{
 		{Name: "Workers", Integrated: true, Mode: detail.ReadOnly},
@@ -243,8 +256,10 @@ func (m *Model) registerServices(accountID string) {
 		{Name: "R2", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "D1", Integrated: true, Mode: detail.ReadWrite},
 		{Name: "Queues", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "Vectorize", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "Hyperdrive", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "Secrets Store", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "Pages", Integrated: false, Mode: detail.ReadOnly},
-		{Name: "Hyperdrive", Integrated: false, Mode: detail.ReadOnly},
 	})
 }
 

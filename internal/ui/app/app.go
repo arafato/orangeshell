@@ -17,7 +17,6 @@ import (
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	uiai "github.com/oarafat/orangeshell/internal/ui/ai"
-	"github.com/oarafat/orangeshell/internal/ui/bindings"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/deployallpopup"
@@ -28,6 +27,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/monitoring"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
+	"github.com/oarafat/orangeshell/internal/ui/resourcepopup"
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/setup"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
@@ -219,10 +219,6 @@ type Model struct {
 	parallelTailSessions []*svc.TailSession
 	parallelTailActive   bool
 
-	// Binding popup overlay
-	showBindings  bool
-	bindingsPopup bindings.Model
-
 	// Add environment popup overlay
 	showEnvPopup bool
 	envPopup     envpopup.Model
@@ -245,6 +241,10 @@ type Model struct {
 
 	// AI tab model
 	aiTab uiai.Model
+
+	// Create resource popup overlay
+	showResourcePopup bool
+	resourcePopup     resourcepopup.Model
 
 	// Deploy all popup overlay
 	showDeployAllPopup bool
@@ -384,7 +384,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Each returns (Model, Cmd, handled). If handled, we're done.
 	handlers := []func(*Model, tea.Msg) (Model, tea.Cmd, bool){
 		(*Model).handleDeletePopupMsg,
-		(*Model).handleBindingsMsg,
+		(*Model).handleResourcePopupMsg,
 		(*Model).handleEnvPopupMsg,
 		(*Model).handleProjectPopupMsg,
 		(*Model).handleRemoveProjectMsg,
@@ -510,6 +510,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.removeProjectPopup, cmd = m.removeProjectPopup.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+		if m.showResourcePopup && m.resourcePopup.IsCreating() {
+			var cmd tea.Cmd
+			m.resourcePopup, cmd = m.resourcePopup.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		if m.showDeployAllPopup && m.deployAllPopup.IsDeploying() {
 			var cmd tea.Cmd
 			m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
@@ -572,11 +577,6 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSearch(msg)
 	}
 
-	// If bindings popup is active, route everything there
-	if m.showBindings {
-		return m.updateBindings(msg)
-	}
-
 	// If deploy all popup is active, route everything there
 	if m.showDeployAllPopup {
 		return m.updateDeployAllPopup(msg)
@@ -590,6 +590,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If delete resource popup is active, route everything there
 	if m.showDeletePopup {
 		return m.updateDeletePopup(msg)
+	}
+
+	// If resource popup is active, route everything there
+	if m.showResourcePopup {
+		return m.updateResourcePopup(msg)
 	}
 
 	// If project popup is active, route everything there
@@ -777,21 +782,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "ctrl+n":
-			if m.activeTab == tabbar.TabOperations && m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {
-				if m.wrangler.IsOnProjectList() {
-					// Monorepo view: create resources only
-					m.showBindings = true
-					m.bindingsPopup = bindings.NewMonorepo()
-					return m, nil
-				} else if m.wrangler.HasConfig() {
-					// Navigate to Configuration tab → Bindings
-					m.syncConfigProjects()
-					configPath := m.wrangler.ConfigPath()
-					m.configView.SelectProjectByPath(configPath)
-					m.configView.SetCategory(uiconfig.CategoryBindings)
-					m.activeTab = tabbar.TabConfiguration
-					return m, nil
-				}
+			// Resources tab: open resource creation popup
+			if m.activeTab == tabbar.TabResources {
+				m.showResourcePopup = true
+				m.resourcePopup = resourcepopup.New()
+				return m, nil
 			}
 		case "ctrl+p":
 			if m.activeTab == tabbar.TabOperations && m.viewState == ViewWrangler && !m.wrangler.IsDirBrowserActive() {

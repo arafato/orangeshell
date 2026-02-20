@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/oarafat/orangeshell/internal/api"
 	svc "github.com/oarafat/orangeshell/internal/service"
-	"github.com/oarafat/orangeshell/internal/ui/bindings"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
@@ -19,80 +18,6 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
-
-// --- Binding popup helpers ---
-
-// updateBindings forwards messages to the bindings popup when it's active.
-func (m Model) updateBindings(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.bindingsPopup, cmd = m.bindingsPopup.Update(msg)
-	return m, cmd
-}
-
-// listResourcesCmd fetches existing resources for the binding popup picker.
-func (m Model) listResourcesCmd(resourceType string) tea.Cmd {
-	return func() tea.Msg {
-		var items []bindings.ResourceItem
-
-		s := m.registry.Get(resourceTypeToServiceName(resourceType))
-		if s == nil {
-			return bindings.ResourcesLoadedMsg{
-				ResourceType: resourceType,
-				Err:          fmt.Errorf("service not available"),
-			}
-		}
-
-		resources, err := s.List()
-		if err != nil {
-			return bindings.ResourcesLoadedMsg{
-				ResourceType: resourceType,
-				Err:          err,
-			}
-		}
-
-		for _, r := range resources {
-			items = append(items, bindings.ResourceItem{
-				ID:   r.ID,
-				Name: r.Name,
-			})
-		}
-
-		return bindings.ResourcesLoadedMsg{
-			ResourceType: resourceType,
-			Items:        items,
-		}
-	}
-}
-
-// createResourceCmd runs a wrangler CLI command to create a new resource.
-func (m Model) createResourceCmd(resourceType, name string) tea.Cmd {
-	accountID := m.registry.ActiveAccountID()
-	return func() tea.Msg {
-		result := wcfg.CreateResource(context.Background(), wcfg.CreateResourceCmd{
-			ResourceType: resourceType,
-			Name:         name,
-			AccountID:    accountID,
-		})
-		return bindings.CreateResourceDoneMsg{
-			ResourceType: resourceType,
-			Name:         name,
-			Success:      result.Success,
-			Output:       result.Output,
-			ResourceID:   result.ResourceID,
-		}
-	}
-}
-
-// writeBindingCmd writes a binding definition into the wrangler config file.
-func (m Model) writeBindingCmd(configPath, envName string, binding wcfg.BindingDef) tea.Cmd {
-	return func() tea.Msg {
-		err := wcfg.AddBinding(configPath, envName, binding)
-		if err != nil {
-			return bindings.WriteBindingDoneMsg{Success: false, Err: err}
-		}
-		return bindings.WriteBindingDoneMsg{Success: true}
-	}
-}
 
 // --- Add environment popup helpers ---
 
@@ -330,6 +255,25 @@ func resourceTypeToServiceName(resourceType string) string {
 	}
 }
 
+// registryServiceName maps a binding picker resource type to its service name
+// in the registry. Returns "" if the type is not backed by the registry (i.e.
+// uses the raw HTTP ResourceListClient instead).
+func registryServiceName(resourceType string) string {
+	switch resourceType {
+	case "d1":
+		return "D1"
+	case "kv":
+		return "KV"
+	case "r2":
+		return "R2"
+	case "queue":
+		return "Queues"
+	case "service":
+		return "Workers"
+	}
+	return ""
+}
+
 // --- On-demand refresh helpers ---
 
 // isMutatingAction returns true if the wrangler action modifies live deployment state.
@@ -397,52 +341,6 @@ func (m *Model) handleDeletePopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			m.backgroundRefresh(msg.ServiceName),
 			toastTick(),
 		), true
-	}
-	return *m, nil, false
-}
-
-// handleBindingsMsg handles all binding popup messages.
-func (m *Model) handleBindingsMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
-	switch msg := msg.(type) {
-	case bindings.CloseMsg:
-		m.showBindings = false
-		return *m, nil, true
-
-	case bindings.ListResourcesMsg:
-		return *m, m.listResourcesCmd(msg.ResourceType), true
-
-	case bindings.ResourcesLoadedMsg:
-		m.bindingsPopup, _ = m.bindingsPopup.Update(msg)
-		return *m, nil, true
-
-	case bindings.CreateResourceMsg:
-		return *m, m.createResourceCmd(msg.ResourceType, msg.Name), true
-
-	case bindings.CreateResourceDoneMsg:
-		m.bindingsPopup, _ = m.bindingsPopup.Update(msg)
-		return *m, nil, true
-
-	case bindings.WriteBindingMsg:
-		return *m, m.writeBindingCmd(msg.ConfigPath, msg.EnvName, msg.Binding), true
-
-	case bindings.WriteBindingDoneMsg:
-		var cmd tea.Cmd
-		m.bindingsPopup, cmd = m.bindingsPopup.Update(msg)
-		return *m, cmd, true
-
-	case bindings.DoneMsg:
-		m.showBindings = false
-		if msg.ConfigPath != "" {
-			m.reloadWranglerConfig(msg.ConfigPath, "Binding added")
-			m.configView.ReloadConfig()
-		}
-		// If a resource was created, refresh the corresponding service cache
-		if msg.ResourceType != "" {
-			if svcName := resourceTypeToServiceName(msg.ResourceType); svcName != "" {
-				return *m, m.backgroundRefresh(svcName), true
-			}
-		}
-		return *m, nil, true
 	}
 	return *m, nil, false
 }
@@ -688,12 +586,6 @@ func (m *Model) syncConfigProjects() {
 // handleConfigViewMsg handles messages emitted by the config view's categories.
 func (m *Model) handleConfigViewMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
-	// --- Bindings: open wizard ---
-	case uiconfig.OpenBindingsWizardMsg:
-		m.showBindings = true
-		m.bindingsPopup = bindings.NewProject(msg.ConfigPath, msg.EnvName, msg.WorkerName)
-		return *m, nil, true
-
 	// --- Bindings: delete ---
 	case uiconfig.DeleteBindingMsg:
 		return *m, m.removeBindingForConfigCmd(msg.ConfigPath, msg.EnvName, msg.BindingName, msg.BindingType), true
@@ -742,7 +634,7 @@ func (m *Model) handleConfigViewMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 }
 
 // writeDirectBindingCmd writes a binding definition into the wrangler config file.
-// Used by the inline binding form (not the popup wizard).
+// Used by the inline binding form/picker flow.
 func (m Model) writeDirectBindingCmd(configPath, envName string, bindingDef interface{}) tea.Cmd {
 	def, ok := bindingDef.(wcfg.BindingDef)
 	if !ok {
@@ -788,14 +680,14 @@ func (m Model) listBindingResourcesCmd(resourceType string) tea.Cmd {
 		}
 	}
 
-	// For "service" type, use the registry's Workers service
-	if resourceType == "service" {
+	// For types backed by the service registry, use it directly
+	if svcName := registryServiceName(resourceType); svcName != "" {
 		return func() tea.Msg {
-			s := m.registry.Get("Workers")
+			s := m.registry.Get(svcName)
 			if s == nil {
 				return uiconfig.BindingResourcesLoadedMsg{
 					ResourceType: resourceType,
-					Err:          fmt.Errorf("Workers service not available"),
+					Err:          fmt.Errorf("%s service not available", svcName),
 				}
 			}
 			resources, err := s.List()

@@ -11,7 +11,8 @@ import (
 // isCopyableLabel returns true if a detail field label should get a copy icon.
 func isCopyableLabel(label string) bool {
 	switch label {
-	case "Database ID", "Namespace ID", "Name", "Title", "Bucket Name":
+	case "Database ID", "Namespace ID", "Name", "Title", "Bucket Name",
+		"Index Name", "Config ID", "Store ID":
 		return true
 	}
 	return false
@@ -25,7 +26,7 @@ func copyIcon() string {
 // isDeletableService returns true for services that support resource deletion from the list view.
 func isDeletableService(name string) bool {
 	switch name {
-	case "KV", "D1", "R2", "Queues":
+	case "KV", "D1", "R2", "Queues", "Vectorize", "Hyperdrive", "Secrets Store":
 		return true
 	}
 	return false

@@ -41,10 +41,10 @@ func (m Model) viewDashboard() string {
 		{m.wrangler.IsVersionPickerActive(), func() string { return m.wrangler.VersionPickerView(w, h) }},
 		{m.showLauncher, func() string { return m.launcher.View(w, h) }},
 		{m.showSearch, func() string { return m.search.View(w, h) }},
-		{m.showBindings, func() string { return m.bindingsPopup.View(w, h) }},
 		{m.showDeployAllPopup, func() string { return m.deployAllPopup.View(w, h) }},
 		{m.showEnvPopup, func() string { return m.envPopup.View(w, h) }},
 		{m.showDeletePopup, func() string { return m.deletePopup.View(w, h) }},
+		{m.showResourcePopup, func() string { return m.resourcePopup.View(w, h) }},
 		{m.showProjectPopup, func() string { return m.projectPopup.View(w, h) }},
 		{m.showRemoveProjectPopup, func() string { return m.removeProjectPopup.View(w, h) }},
 		{m.showActions, func() string { return m.actionsPopup.View(w, h) }},
@@ -295,7 +295,6 @@ func (m Model) renderOperationsHelp() []helpEntry {
 			{"ctrl+l", "resources"},
 			{"ctrl+k", "search"},
 			{"ctrl+p", "actions"},
-			{"ctrl+n", "bindings"},
 			{"[/]", "accounts"},
 		}
 		if m.wrangler.HasConfig() && !m.wrangler.IsOnProjectList() {
@@ -320,6 +319,7 @@ func (m Model) renderResourcesHelp() []helpEntry {
 			{"j/k", "navigate"},
 			{"enter", "select"},
 			{"esc", "close"},
+			{"ctrl+n", "new resource"},
 		}
 	}
 
@@ -338,7 +338,7 @@ func (m Model) renderResourcesHelp() []helpEntry {
 				entries = append(entries, helpEntry{"d", "delete"})
 			}
 		}
-		entries = append(entries, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
+		entries = append(entries, helpEntry{"ctrl+n", "new resource"}, helpEntry{"ctrl+k", "search"}, helpEntry{"[/]", "accounts"}, helpEntry{"q", "quit"})
 		return entries
 	case detail.FocusDetail:
 		// Interactive mode — detail pane focused for scrolling/editing
@@ -356,6 +356,7 @@ func (m Model) renderResourcesHelp() []helpEntry {
 	// Placeholder state (no service loaded)
 	return []helpEntry{
 		{"s", "service"},
+		{"ctrl+n", "new resource"},
 		{"ctrl+l", "resources"},
 		{"ctrl+k", "search"},
 		{"[/]", "accounts"},

@@ -62,6 +62,12 @@ func (b Binding) NavService() string {
 		return "Workers"
 	case "queue_producer", "queue_consumer":
 		return "Queues"
+	case "vectorize":
+		return "Vectorize"
+	case "hyperdrive":
+		return "Hyperdrive"
+	case "secrets_store_secret":
+		return "Secrets Store"
 	default:
 		return ""
 	}

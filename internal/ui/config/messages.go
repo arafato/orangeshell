@@ -57,10 +57,10 @@ type DeleteCronDoneMsg struct {
 
 // --- Inline binding add messages ---
 // These message types are used by the inline add-binding flow in the
-// Configuration tab's Bindings category (for types beyond D1/KV/R2/Queue).
+// Configuration tab's Bindings category (all binding types).
 
 // WriteDirectBindingMsg requests the app to write a binding into the wrangler
-// config file. Used by the inline add-binding form/picker (not the popup wizard).
+// config file. Used by the inline add-binding form/picker flow.
 type WriteDirectBindingMsg struct {
 	ConfigPath string
 	EnvName    string
@@ -73,10 +73,9 @@ type WriteDirectBindingDoneMsg struct {
 }
 
 // ListBindingResourcesMsg requests the app to fetch API resources for the
-// inline binding picker (e.g. Vectorize indexes, Hyperdrive configs, mTLS certs,
-// Secrets Store stores, or Workers for Service bindings).
+// inline binding picker. Supports all picker-kind binding types.
 type ListBindingResourcesMsg struct {
-	ResourceType string // "vectorize", "hyperdrive", "mtls_certificate", "secrets_store", "service"
+	ResourceType string // "d1", "kv", "r2", "queue", "service", "vectorize", "hyperdrive", "mtls_certificate", "secrets_store", "workflow"
 }
 
 // BindingResourceItem is a lightweight resource entry returned by the API.

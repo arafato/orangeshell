@@ -2,6 +2,7 @@ package wrangler
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
@@ -132,12 +133,15 @@ func CreateProjectFromTemplate(ctx context.Context, cmd CreateFromTemplateCmd) C
 
 // CreateResourceCmd describes a wrangler CLI resource creation command.
 type CreateResourceCmd struct {
-	// ResourceType is one of: "d1", "kv", "r2", "queue"
+	// ResourceType is one of: "d1", "kv", "r2", "queue", "vectorize", "hyperdrive", "secrets_store"
 	ResourceType string
 	// Name is the resource name to create.
 	Name string
 	// AccountID is passed as CLOUDFLARE_ACCOUNT_ID env var.
 	AccountID string
+	// ExtraArgs holds type-specific CLI flags (e.g., "--dimensions=768", "--metric=cosine").
+	// Keys are flag names (without --), values are flag values.
+	ExtraArgs map[string]string
 }
 
 // CreateResourceResult holds the output of a resource creation command.
@@ -193,8 +197,19 @@ func buildCreateArgs(cmd CreateResourceCmd) []string {
 		args = append(args, "r2", "bucket", "create", cmd.Name)
 	case "queue":
 		args = append(args, "queues", "create", cmd.Name)
+	case "vectorize":
+		args = append(args, "vectorize", "create", cmd.Name)
+	case "hyperdrive":
+		args = append(args, "hyperdrive", "create", cmd.Name)
+	case "secrets_store":
+		args = append(args, "secrets-store", "store", "create", cmd.Name, "--remote")
 	default:
 		args = append(args, cmd.ResourceType, "create", cmd.Name)
+	}
+
+	// Append type-specific extra flags
+	for k, v := range cmd.ExtraArgs {
+		args = append(args, fmt.Sprintf("--%s=%s", k, v))
 	}
 
 	return args
@@ -211,6 +226,12 @@ func ResourceTypeLabel(resourceType string) string {
 		return "R2 Bucket"
 	case "queue":
 		return "Queue"
+	case "vectorize":
+		return "Vectorize Index"
+	case "hyperdrive":
+		return "Hyperdrive Config"
+	case "secrets_store":
+		return "Secrets Store"
 	default:
 		return resourceType
 	}
@@ -280,6 +301,21 @@ func parseResourceID(resourceType, output string) string {
 	case "queue":
 		// Queue name is the identifier — return empty to use the name
 		return ""
+	case "vectorize":
+		// Vectorize index name is the identifier — return empty to use the name
+		return ""
+	case "hyperdrive":
+		// Hyperdrive returns a UUID in the output
+		uuidRe := regexp.MustCompile(`[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`)
+		if m := uuidRe.FindString(output); m != "" {
+			return m
+		}
+	case "secrets_store":
+		// Secrets Store returns a UUID for the store
+		uuidRe := regexp.MustCompile(`[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`)
+		if m := uuidRe.FindString(output); m != "" {
+			return m
+		}
 	}
 	return ""
 }

@@ -809,7 +809,7 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 		bnd := box.SelectedBinding()
 		if bnd != nil {
 			if bnd.NavService() != "" {
-				// Old types (KV, R2, D1, Service, Queue) → Resources tab
+				// Types with a browsable service → Resources tab
 				return m, func() tea.Msg {
 					return NavigateMsg{
 						ServiceName: bnd.NavService(),
@@ -817,7 +817,7 @@ func (m Model) updateInside(msg tea.KeyMsg) (Model, tea.Cmd) {
 					}
 				}
 			}
-			// New types (AI, Vectorize, Workflow, etc.) → Configuration tab Bindings
+			// Types without a browsable service (AI, Workflow, DO, etc.) → Configuration tab Bindings
 			configPath := m.configPath
 			envName := box.EnvName
 			bindingName := bnd.Name

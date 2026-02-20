@@ -73,6 +73,9 @@ orangeshell/
     │   ├── r2.go                    # R2Service: CRUD + Deleter
     │   ├── d1.go                    # D1Service: CRUD + SQL console + schema
     │   ├── queues.go                # QueueService: CRUD + name→UUID resolution
+    │   ├── vectorize.go             # VectorizeService: list/get/delete (raw HTTP)
+    │   ├── hyperdrive.go            # HyperdriveService: list/get/delete (raw HTTP)
+    │   ├── secretsstore.go          # SecretsStoreService: list/get/delete + secrets table
     │   └── tail.go                  # TailSession: WebSocket live log streaming
     ├── wrangler/
     │   ├── config.go                # WranglerConfig parser (TOML/JSON/JSONC)
@@ -80,7 +83,7 @@ orangeshell/
     │   ├── runner.go                # CLI command runner (npx wrangler)
     │   ├── writer.go                # Config file writer (TOML + JSON mutations)
     │   ├── workflows.go             # Workflow class scanner (source file regex)
-    │   ├── create.go                # Project scaffolding via C3
+    │   ├── create.go                # Project scaffolding via C3 + resource creation
     │   ├── deployments.go           # Parse wrangler deployments list output
     │   ├── versions.go              # Parse wrangler versions list output
     │   └── templates.go             # Cloudflare template catalog fetch
@@ -102,7 +105,8 @@ orangeshell/
         │   ├── app_ai.go            # AI tab orchestration + handleAIMsg
         │   ├── app_detail.go        # handleDetailMsg: detail/resource message handler
         │   ├── app_monitoring_msgs.go  # handleMonitoringMsg: monitoring message handler
-        │   └── app_overlays.go      # handleOverlayMsg: search/actions/launcher
+        │   ├── app_overlays.go      # handleOverlayMsg: search/actions/launcher
+        │   └── app_resource_popup.go # handleResourcePopupMsg: resource creation popup
         ├── tabbar/tabbar.go         # Tab bar (stateless rendering)
         ├── header/header.go         # Header: version, account tabs
         ├── setup/setup.go           # First-run auth wizard
@@ -144,10 +148,10 @@ orangeshell/
         │   ├── prompt.go            # System prompt construction
         │   ├── settings.go          # AI settings: provider/model/deploy
         │   └── provision.go         # AI Worker auto-deployment
+        ├── resourcepopup/resourcepopup.go   # Ctrl+N resource creation popup
         ├── search/search.go         # Ctrl+K fuzzy search overlay
         ├── launcher/launcher.go     # Ctrl+L service launcher
         ├── actions/actions.go       # Ctrl+P command palette
-        ├── bindings/bindings.go     # Ctrl+N binding creation wizard
         ├── envpopup/envpopup.go     # Add/delete environment popup
         ├── deletepopup/deletepopup.go       # Delete resource confirmation
         ├── projectpopup/projectpopup.go     # Create project wizard
@@ -182,15 +186,15 @@ Every UI component follows `Init() → Update(msg) → View()`. The root `app.Mo
 
 The root `Update()` in `app.go` uses a two-tier dispatch:
 
-1. **Handler chain** (first): An array of `func(*Model, tea.Msg) (Model, tea.Cmd, bool)` handlers. Each returns `(result, cmd, handled)`. If `handled == true`, processing stops. Currently covers 10 domain handlers for popup messages.
+1. **Handler chain** (first): An array of `func(*Model, tea.Msg) (Model, tea.Cmd, bool)` handlers. Each returns `(result, cmd, handled)`. If `handled == true`, processing stops. Currently covers 15 domain handlers.
 
-2. **Type switch** (second): A large `switch msg := msg.(type)` handles the remaining ~60+ message types inline.
+2. **Type switch** (second): A small `switch msg := msg.(type)` handles the remaining ~6 message types inline (lifecycle, window size, spinner ticks).
 
 Handler chain functions are defined in `app_config_ops.go` and take `*Model` as their first argument.
 
 ### 3.3 Overlay/Popup Pattern
 
-All 10 popups follow this pattern:
+All 9 popups follow this pattern:
 
 1. **Separate package** with `Model`, `New()`, `Update()`, `View(termWidth, termHeight int) string`
 2. **Visibility flag** on root model: `showXxx bool` + `xxxPopup ModelType`
@@ -235,7 +239,7 @@ type Service interface {
 type Deleter interface { Delete(ctx context.Context, id string) error }
 ```
 
-Five implementations: `WorkersService`, `KVService`, `R2Service`, `D1Service`, `QueueService`.
+Eight implementations: `WorkersService`, `KVService`, `R2Service`, `D1Service`, `QueueService`, `VectorizeService`, `HyperdriveService`, `SecretsStoreService`.
 
 **Binding Index**: After Workers are listed, `BuildBindingIndex()` concurrently fetches settings for all workers and builds a reverse map (`"ServiceName:ResourceID"` → `[]BoundWorker`). Powers: managed resource highlighting, "Worker(s)" enrichment in detail views, and binding warnings in delete confirmations.
 
@@ -359,7 +363,8 @@ type AuthError struct { StatusCode int; Body string } // Returned on 401/403
 |---------|---------|
 | `config.SetVarMsg` / `config.DeleteVarMsg` | Env variable CRUD |
 | `config.AddCronMsg` / `config.DeleteCronMsg` | Cron CRUD |
-| `config.OpenBindingsWizardMsg` | Open binding wizard |
+| `config.ListBindingResourcesMsg` / `config.BindingResourcesLoadedMsg` | Binding picker resource fetch |
+| `config.WriteDirectBindingMsg` / `config.WriteDirectBindingDoneMsg` | Inline binding write |
 | `envpopup.CreateEnvMsg` / `envpopup.DeleteEnvMsg` | Environment CRUD |
 
 ---
@@ -402,7 +407,7 @@ ColorBlue      = "#729FCF"  // Info, labels
 | `ctrl+k` | Global | Fuzzy search |
 | `ctrl+l` | Global | Service launcher |
 | `ctrl+p` | Global | Action palette |
-| `ctrl+n` | Global | New binding wizard |
+| `ctrl+n` | Resources tab | New resource creation popup |
 | `ctrl+s` | AI tab | AI settings |
 | `t` | Monitoring | Start tail |
 | `a` / `d` | Monitoring tree | Add/remove worker from grid |
@@ -466,14 +471,13 @@ Located in Resources tab → Worker detail view.
 ### Large Files
 | Lines | File | Issue |
 |-------|------|-------|
-| ~1558 | `wrangler/wrangler.go` | Monorepo + single-project + env boxes + dir browser + version picker |
-| ~1112 | `app/app.go` | Root model + Update (reduced from ~1952 via handler chain expansion) |
+| ~1122 | `app/app.go` | Root model + Update (reduced from ~1952 via handler chain expansion) |
 
-**Combined app package**: ~6,200 lines across 14 files.
+**Combined app package**: ~6,600 lines across 16 files.
 
 ### Specific Issues
 
-1. **Boolean overlay management**: 10 separate `showXxx bool` + popup model field pairs. Could use an overlay stack or enum.
+1. **Boolean overlay management**: 9 separate `showXxx bool` + popup model field pairs. Could use an overlay stack or enum.
 
 2. **Stale-account guard duplication**: `m.isStaleAccount(msg.AccountID)` checked in 10+ places. Could be a single guard at the top of Update.
 
@@ -490,6 +494,8 @@ Located in Resources tab → Worker detail view.
 3. **Phase 3**: Removed legacy `envvars/` and `triggers/` packages (~1,466 lines deleted). Migrated shared message types into `config/messages.go`. Removed `ViewEnvVars`/`ViewTriggers` enum values, ~18 guard conditions, 4 model fields. All env var/trigger actions now route to the unified Configuration tab.
 
 4. **Phase 4**: Deleted unused `theme/keys.go`.
+
+5. **Phase 5 (Phase C)**: Eliminated the `bindings/` popup wizard package (~769 lines deleted). Converted D1/KV/R2/Queue binding types from `Kind: "wizard"` to `Kind: "picker"`, unifying all binding creation through the inline picker→form flow on the Configuration tab. Removed `OpenBindingsWizardMsg`, `showBindings`/`bindingsPopup` fields, `handleBindingsMsg` handler, and 4 helper functions (`updateBindings`, `listResourcesCmd`, `createResourceCmd`, `writeBindingCmd`). The handler chain shrank from 16→15 handlers.
 
 ---
 
@@ -523,7 +529,7 @@ go build -o orangeshell .
 - Bubble Tea value receiver convention for `Update()`; pointer receivers for mutators
 - Orange border/accent for focused; dark gray for unfocused
 - Pill/button style for category tabs — active has orange background
-- Popup wizard for binding creation (multi-step flow)
+- Inline picker→form flow for binding creation (select resource → pre-filled form)
 - Inline edit/add/delete for env vars, triggers, environments
 - Delete confirmations: cursor-based No/Yes (`h`/`l` + enter)
 - Dev mode: yellow/gold borders and badges
@@ -630,7 +636,7 @@ go build -o orangeshell .
 
 ### Binding Type Expansion
 
-37. **Three-tier binding kind pattern**: Binding types fall into three categories: (1) "wizard" types (D1/KV/R2/Queue) that delegate to the existing popup wizard with create-or-select flow, (2) "form" types (AI/Browser/Images, DO, Analytics Engine) with inline text inputs, and (3) "picker" types (Service, Vectorize, Hyperdrive, mTLS, Secrets Store, Workflow) that fetch API resources or scan local files first, then transition to a pre-filled form. This three-kind classification keeps the UX consistent while reusing existing infrastructure for the mature binding types.
+37. **Two-tier binding kind pattern**: Binding types fall into two categories: (1) "form" types (AI/Browser/Images, DO, Analytics Engine) with inline text inputs, and (2) "picker" types (D1, KV, R2, Queue, Service, Vectorize, Hyperdrive, mTLS, Secrets Store, Workflow) that fetch API resources or scan local files first, then transition to a pre-filled form. The picker types use the service registry for D1/KV/R2/Queue/Workers, raw HTTP for Vectorize/Hyperdrive/mTLS/Secrets Store, and local file scanning for Workflow.
 
 38. **Singleton vs array bindings need distinct code paths everywhere**: AI, Browser, and Images use `[section]` in TOML (not `[[section]]`) and a plain object in JSON (not an array). The parser `collectBindings()`, writer `formatTOMLBinding()`/`addBindingJSON()`, and remover `removeBindingTOML()`/`removeBindingJSON()` all needed separate branches. Added `isSingletonBindingType()` helper to centralize the check.
 
@@ -646,7 +652,47 @@ go build -o orangeshell .
 
 44. **Workflow class auto-discovery via local source scan**: The Workflow binding type uses a "picker" kind that scans the project's source files for exported `WorkflowEntrypoint` subclasses instead of calling an API. The scanner (`wrangler/workflows.go`) supports two patterns: JS/TS `export class X extends WorkflowEntrypoint` and Python `class X(WorkflowEntrypoint):`. It reuses the same directory walk logic as the AI tab's file scanner (skip `node_modules`, `.git`, etc.; resolve source dir from `Main` entry). **Known limitations (NOT handled)**: (1) re-exports (`export { MyWorkflow } from './workflows'`), (2) barrel/index re-exports, (3) renamed imports (`import { WorkflowEntrypoint as WF }` then `extends WF`), (4) dynamic class names or factory patterns, (5) Python `__all__` exports, (6) classes in `node_modules` or other skipped directories. These cover edge cases; the standard pattern of a direct `export class ... extends WorkflowEntrypoint` in a source file covers the vast majority of real-world usage. The picker falls back gracefully — if no classes are found, the user sees "No resources found" and can press esc to go back and use the form manually by changing the type or entering values directly.
 
-45. **Dual navigation paths for bindings**: Bindings in EnvBox now have two Enter targets: (1) old types with `NavService()` (KV, R2, D1, Service, Queue) emit `NavigateMsg` → Resources tab via `navigateTo()`, (2) new types without `NavService()` (AI, Vectorize, Hyperdrive, mTLS, Workflow, Secrets Store, Browser, Images, Analytics, DO) emit `NavigateToBindingMsg` → Configuration tab → Bindings category with the specific binding highlighted via `SelectBindingByName()`. Both paths follow the same cross-tab navigation pattern as `ShowEnvVarsMsg`/`ShowTriggersMsg`: `syncConfigProjects()` + `SelectProjectByPath()` + `SetCategory()` + set `activeTab`. The new path adds one extra call: `SelectBindingByName(envName, bindingName)` to pre-position the cursor.
+45. **Dual navigation paths for bindings**: Bindings in EnvBox now have two Enter targets: (1) types with `NavService()` (KV, R2, D1, Service, Queue, Vectorize, Hyperdrive, Secrets Store) emit `NavigateMsg` → Resources tab via `navigateTo()`, (2) types without `NavService()` (AI, mTLS, Workflow, Browser, Images, Analytics, DO) emit `NavigateToBindingMsg` → Configuration tab → Bindings category with the specific binding highlighted via `SelectBindingByName()`. Both paths follow the same cross-tab navigation pattern as `ShowEnvVarsMsg`/`ShowTriggersMsg`: `syncConfigProjects()` + `SelectProjectByPath()` + `SetCategory()` + set `activeTab`. The new path adds one extra call: `SelectBindingByName(envName, bindingName)` to pre-position the cursor.
+
+### Resource Tab Expansion & Service Registry
+
+46. **New services use `ResourceListClient` not Cloudflare SDK**: The 5 original services (Workers, KV, R2, D1, Queues) use the cloudflare-go v6 SDK. New services (Vectorize, Hyperdrive, Secrets Store) use raw HTTP via `ResourceListClient` because the SDK either doesn't cover these APIs or has union type deserialization issues. The service constructor takes `*api.ResourceListClient` instead of `*cloudflare.Client`. The `ResourceListClient` is constructed from auth credentials via `newResourceListClient()` in `app_config_ops.go`.
+
+47. **Binding index now indexes 8 binding types**: `BuildBindingIndex()` in `workers.go` indexes all bindings with `NavService != ""`. After Phase B6, this includes: KV (`kv_namespace`), D1 (`d1`), R2 (`r2_bucket`), Service (`service`), Queue (`queue`), Vectorize (`vectorize` → `NavResource: b.IndexName`), Hyperdrive (`hyperdrive` → `NavResource: b.ID`), and Secrets Store (`secrets_store_secret` → `NavResource: b.StoreID`). The `safeBinding` struct has `StoreID` and `SecretName` JSON fields for Secrets Store deserialization. Delete guards now work for all eight resource types.
+
+48. **Delete guard has two paths — immediate and deferred**: When the user presses `d` on a resource: (1) if the binding index is already built, lookup bound workers immediately and show confirm/blocked popup, (2) if index is not built, show a spinner popup via `NewLoading()`, stash the request in `pendingDeleteReq`, kick off Workers fetch + index build, then transition the popup via `SetBindingWarnings()` when the index arrives. New deletable services just need to be added to `isDeletableService()` in `detail_helpers.go`.
+
+49. **Non-integrated services show "(coming soon)" and are non-selectable**: The `Integrated: false` flag on `ServiceEntry` causes dimmed rendering with "(coming soon)" suffix, and the Enter key guard prevents `SelectServiceMsg` from being emitted. Converting a service from non-integrated to integrated just requires setting `Integrated: true` and registering the service in the registry.
+
+50. **Separation of resource creation and binding creation**: Resource creation (D1 databases, KV namespaces, Vectorize indexes, etc.) belongs on the Resources tab (Ctrl+N = "New Resource"). Binding creation (assigning an existing resource to a worker) belongs on the Configuration tab (inline picker flow). The old binding wizard popup conflated both. Splitting them simplifies both flows: resource creation is a standalone popup with type-specific fields, binding creation is always "select from existing + enter binding name".
+
+51. **Secrets Store has nested resources**: A store contains secrets. The Resources tab shows stores as top-level items with secrets listed in the detail view (same pattern as D1 showing tables). The binding config needs both `store_id` and `secret_name`. For binding creation, the picker lists stores and the form has a `secret_name` field for manual entry (two-step picker deferred per lesson 62). For resource creation, creating a store is the primary action.
+
+52. **Refactor `doGet` into generic `doRequest` for method reuse**: When adding `DoDelete` to `ResourceListClient`, extract the shared HTTP logic (URL construction, auth headers, status checking) into a `doRequest(ctx, method, path)` method. `doGet` becomes a one-liner wrapper. This avoids duplicating auth header setup across GET/DELETE/POST methods.
+
+53. **Cloudflare DELETE APIs may return 200 or 204**: Some Cloudflare v4 DELETE endpoints return 200 with `{success: true}`, others return 204 No Content. The `doRequest` status check should accept any 2xx status (`200 <= code < 300`) rather than checking `== 200` only. This prevents false failures on perfectly valid delete operations.
+
+54. **Cache eviction after delete uses index-based splice**: After a successful delete via raw HTTP, evict the entry from the service's `cached []Resource` slice using index-based removal (`append(cached[:i], cached[i+1:]...)`). This matches the SDK-backed services' pattern of `delete(cachedRaw, id)` — both ensure subsequent `SearchItems()` and list rendering don't show stale entries.
+
+### Resource Creation Popup (Phase A)
+
+55. **ExtraArgs map extends CreateResourceCmd without breaking callers**: Adding `ExtraArgs map[string]string` to `CreateResourceCmd` is backward-compatible because Go zero-values the nil map, and `buildCreateArgs()` only iterates non-nil maps. Existing callers that create D1/KV/R2/Queue resources don't need changes — they simply don't set ExtraArgs.
+
+56. **Dynamic extra fields via fieldDef slice**: Instead of hard-coding forms per resource type, the resource popup uses `extraFieldDefs(resourceType)` to return a slice of `fieldDef` structs (key, label, placeholder, required, validate). The Update and View functions iterate this slice generically, so adding a new resource type with custom fields requires zero changes to the popup's core logic — just a new case in `extraFieldDefs()`.
+
+57. **Resource popup is tab-scoped, not global**: Unlike the old Ctrl+N binding wizard which was global (worked on Operations tab), the new resource popup is scoped to the Resources tab only. This aligns with the architectural separation: Resources tab owns creation/deletion, Configuration tab owns binding assignment. The popup handler is added to the handler chain alongside other popup handlers.
+
+58. **Wrangler CLI flags use `--key=value` format**: When passing extra args to wrangler (e.g., `--dimensions=768`), the `=` format is preferred over `--key value` because wrangler's argument parser handles it consistently across all subcommands. The `buildCreateArgs()` function formats ExtraArgs as `--key=value` strings appended after the base command.
+
+### Binding Wizard Elimination (Phase C)
+
+59. **Wizard→picker conversion is minimal when the picker infra exists**: Converting D1/KV/R2/Queue from `Kind: "wizard"` to `Kind: "picker"` required only: (a) change the kind string, (b) add `pickerResourceType()` cases, (c) add `bindingFormFields()` definitions, (d) add `prefillBindingFormFromPicker()` cases, (e) add `buildBindingDef()` cases, and (f) extend `listBindingResourcesCmd()` to handle the new resource types via the existing service registry. The entire picker/form infrastructure from Phase B6 was reusable without modification.
+
+60. **Service registry is the cleanest resource list source for binding pickers**: D1/KV/R2/Queue resources are already cached in the service registry. Using `m.registry.Get("D1").List()` for the binding picker avoids duplicating API calls that the old popup wizard made via a separate `listResourcesCmd()` code path. A single `registryServiceName()` helper maps picker resource types to registry service names, keeping the mapping centralized.
+
+61. **Eliminating a popup removes ~5 integration points**: Removing the `bindings/` popup eliminated: (1) the `showBindings`/`bindingsPopup` fields on the root model, (2) the `handleBindingsMsg` handler in the handler chain, (3) the `updateBindings` input routing guard in `updateDashboard`, (4) the overlay entry in `viewDashboard`, (5) four helper functions (`listResourcesCmd`, `createResourceCmd`, `writeBindingCmd`, `updateBindings`), and (6) the import of the `bindings` package in two app files. This is the standard cost of each popup in the current architecture.
+
+62. **Two-step pickers can be deferred**: The Secrets Store binding needs both a store ID and a secret name. A two-step picker (pick store → pick secret) would require a new `modeAddBindingPickerStep2`, additional state fields, and a second async fetch cycle. The simpler alternative — picker lists stores, form has `secret_name` for manual entry — is functional and avoids significant complexity. Two-step pickers can be added later as a UX enhancement without architectural changes.
 
 ## General Design Considerations
 ### Design-Patterns

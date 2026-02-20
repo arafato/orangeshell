@@ -118,8 +118,6 @@ type safeBinding struct {
 	IndexName    string `json:"index_name,omitempty"`
 	WorkflowName string `json:"workflow_name,omitempty"`
 	Pipeline     string `json:"pipeline,omitempty"`
-	StoreID      string `json:"store_id,omitempty"`
-	SecretName   string `json:"secret_name,omitempty"`
 }
 
 type safeTailConsumer struct {
@@ -400,13 +398,6 @@ func parseBindings(bindings []safeBinding) []BindingInfo {
 			bi.Detail = b.IndexName
 			bi.NavService = "Vectorize"
 			bi.NavResource = b.IndexName
-		case "secrets_store_secret":
-			bi.TypeDisplay = "Secrets Store"
-			bi.Detail = b.SecretName
-			if b.StoreID != "" {
-				bi.NavService = "Secrets Store"
-				bi.NavResource = b.StoreID
-			}
 		case "secret_text":
 			bi.TypeDisplay = "Secret"
 			bi.Detail = "(value hidden)"

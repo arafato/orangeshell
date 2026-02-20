@@ -736,8 +736,6 @@ func (m Model) listBindingResourcesCmd(resourceType string) tea.Cmd {
 			apiItems, err = rlc.ListHyperdriveConfigs(ctx)
 		case "mtls_certificate":
 			apiItems, err = rlc.ListMTLSCertificates(ctx)
-		case "secrets_store":
-			apiItems, err = rlc.ListSecretsStoreStores(ctx)
 		default:
 			err = fmt.Errorf("unsupported resource type: %s", resourceType)
 		}
@@ -761,17 +759,32 @@ func (m Model) listBindingResourcesCmd(resourceType string) tea.Cmd {
 }
 
 // newResourceListClient creates a resource list client from the current auth config.
+// The Global API Key (from env vars) is tried first since it has the broadest permissions
+// and works for all APIs (some reject OAuth and scoped tokens).
+// Fallback chain: (1) env var API Key, (2) primary auth, (3) fallback token, (4) OAuth token.
 func (m Model) newResourceListClient() *api.ResourceListClient {
 	accountID := m.registry.ActiveAccountID()
 	if accountID == "" {
 		return nil
 	}
+
+	// 1. Prefer Global API Key from env vars — broadest permissions
+	if m.cfg.APIKey != "" && m.cfg.Email != "" {
+		return api.NewResourceListClientWithCreds(accountID, m.cfg.Email, m.cfg.APIKey, "")
+	}
+
+	// 2. Use primary credentials
 	switch m.cfg.AuthMethod {
 	case "apikey":
 		return api.NewResourceListClientWithCreds(accountID, m.cfg.Email, m.cfg.APIKey, "")
 	case "apitoken":
 		return api.NewResourceListClientWithCreds(accountID, "", "", m.cfg.APIToken)
 	case "oauth":
+		// 3. Try dedicated fallback token from config
+		if m.cfg.APITokenFallback != "" {
+			return api.NewResourceListClientWithCreds(accountID, "", "", m.cfg.APITokenFallback)
+		}
+		// 4. Last resort: OAuth token (may 403 for some restricted endpoints)
 		token := m.cfg.OAuthAccessToken
 		if token == "" {
 			return nil

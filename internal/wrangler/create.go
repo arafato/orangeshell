@@ -133,7 +133,7 @@ func CreateProjectFromTemplate(ctx context.Context, cmd CreateFromTemplateCmd) C
 
 // CreateResourceCmd describes a wrangler CLI resource creation command.
 type CreateResourceCmd struct {
-	// ResourceType is one of: "d1", "kv", "r2", "queue", "vectorize", "hyperdrive", "secrets_store"
+	// ResourceType is one of: "d1", "kv", "r2", "queue", "vectorize", "hyperdrive"
 	ResourceType string
 	// Name is the resource name to create.
 	Name string
@@ -201,8 +201,6 @@ func buildCreateArgs(cmd CreateResourceCmd) []string {
 		args = append(args, "vectorize", "create", cmd.Name)
 	case "hyperdrive":
 		args = append(args, "hyperdrive", "create", cmd.Name)
-	case "secrets_store":
-		args = append(args, "secrets-store", "store", "create", cmd.Name, "--remote")
 	default:
 		args = append(args, cmd.ResourceType, "create", cmd.Name)
 	}
@@ -230,8 +228,6 @@ func ResourceTypeLabel(resourceType string) string {
 		return "Vectorize Index"
 	case "hyperdrive":
 		return "Hyperdrive Config"
-	case "secrets_store":
-		return "Secrets Store"
 	default:
 		return resourceType
 	}
@@ -306,12 +302,6 @@ func parseResourceID(resourceType, output string) string {
 		return ""
 	case "hyperdrive":
 		// Hyperdrive returns a UUID in the output
-		uuidRe := regexp.MustCompile(`[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`)
-		if m := uuidRe.FindString(output); m != "" {
-			return m
-		}
-	case "secrets_store":
-		// Secrets Store returns a UUID for the store
 		uuidRe := regexp.MustCompile(`[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`)
 		if m := uuidRe.FindString(output); m != "" {
 			return m

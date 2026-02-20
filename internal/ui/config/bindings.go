@@ -306,7 +306,6 @@ var allBindingTypes = []bindingTypeEntry{
 	{"images", "Images", "form", "Cloudflare Images (singleton)"},
 	{"mtls_certificate", "mTLS", "picker", "mTLS certificate"},
 	{"workflow", "Workflow", "picker", "Workflow binding (scans source for classes)"},
-	{"secrets_store_secret", "Secrets Store", "picker", "Secrets Store secret"},
 }
 
 // bindingFormField describes a single field in the inline binding form.
@@ -382,12 +381,6 @@ func bindingFormFields(writerType string) []bindingFormField {
 			{"class_name", "MyWorkflow (must match exported class)", true},
 			{"script_name", "other-worker (optional, if external)", false},
 		}
-	case "secrets_store_secret":
-		return []bindingFormField{
-			{"binding", "MY_SECRET (binding name)", true},
-			{"store_id", "store-id (Secrets Store ID)", true},
-			{"secret_name", "my-secret (secret name)", true},
-		}
 	}
 	return nil
 }
@@ -412,8 +405,6 @@ func pickerResourceType(writerType string) string {
 		return "hyperdrive"
 	case "mtls_certificate":
 		return "mtls_certificate"
-	case "secrets_store_secret":
-		return "secrets_store"
 	case "workflow":
 		return "workflow"
 	}
@@ -636,9 +627,6 @@ func (m Model) buildBindingDef(writerType string, values map[string]string) wcfg
 		if sn := values["script_name"]; sn != "" {
 			def.ExtraFields = map[string]string{"script_name": sn}
 		}
-	case "secrets_store_secret":
-		def.ResourceID = values["store_id"]
-		def.ResourceName = values["secret_name"]
 	}
 
 	return def
@@ -783,10 +771,6 @@ func (m *Model) prefillBindingFormFromPicker(res BindingResourceItem) {
 	case "mtls_certificate":
 		m.setFormFieldValue("binding", defaultBinding)
 		m.setFormFieldValue("certificate_id", res.ID)
-	case "secrets_store_secret":
-		m.setFormFieldValue("binding", defaultBinding)
-		m.setFormFieldValue("store_id", res.ID)
-		m.setFormFieldValue("secret_name", res.Name)
 	case "workflow":
 		// res.Name is the class name discovered from source files
 		m.setFormFieldValue("binding", defaultBinding)
@@ -890,8 +874,6 @@ func typeColor(label string) lipgloss.Color {
 		return lipgloss.Color("#F87171") // light red
 	case "Workflow":
 		return lipgloss.Color("#2DD4BF") // teal
-	case "Secrets Store":
-		return lipgloss.Color("#C084FC") // purple
 	default:
 		return theme.ColorGray
 	}

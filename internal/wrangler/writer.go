@@ -177,7 +177,7 @@ func deleteEnvironmentJSON(data []byte, envName string) ([]byte, error) {
 type BindingDef struct {
 	// Type is one of: "d1", "kv", "r2", "queue", "service", "durable_object",
 	// "ai", "browser", "images", "vectorize", "hyperdrive", "analytics_engine",
-	// "mtls_certificate", "workflow", "secrets_store_secret"
+	// "mtls_certificate", "workflow"
 	Type string
 	// BindingName is the JS variable name (e.g. "MY_DB").
 	BindingName string
@@ -186,7 +186,7 @@ type BindingDef struct {
 	// ResourceName is the human name (used for D1's database_name field).
 	ResourceName string
 	// ExtraFields holds additional type-specific fields (e.g. "class_name", "script_name"
-	// for Workflows; "store_id", "secret_name" for Secrets Store). Keys are the
+	// for Workflows). Keys are the
 	// config field names; values are strings. Nil for simple types.
 	ExtraFields map[string]string
 }
@@ -329,11 +329,6 @@ func formatTOMLBinding(b BindingDef) string {
 		if v := b.ExtraFields["script_name"]; v != "" {
 			sb.WriteString(fmt.Sprintf("script_name = %q\n", v))
 		}
-	case "secrets_store_secret":
-		sb.WriteString("[[secrets_store_secrets]]\n")
-		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
-		sb.WriteString(fmt.Sprintf("store_id = %q\n", b.ResourceID))
-		sb.WriteString(fmt.Sprintf("secret_name = %q\n", b.ResourceName))
 	}
 
 	return sb.String()
@@ -414,11 +409,6 @@ func formatTOMLEnvBinding(envName string, b BindingDef) string {
 		if v := b.ExtraFields["script_name"]; v != "" {
 			sb.WriteString(fmt.Sprintf("script_name = %q\n", v))
 		}
-	case "secrets_store_secret":
-		sb.WriteString(fmt.Sprintf("[[%s.secrets_store_secrets]]\n", prefix))
-		sb.WriteString(fmt.Sprintf("binding = %q\n", b.BindingName))
-		sb.WriteString(fmt.Sprintf("store_id = %q\n", b.ResourceID))
-		sb.WriteString(fmt.Sprintf("secret_name = %q\n", b.ResourceName))
 	}
 
 	return sb.String()
@@ -581,8 +571,6 @@ func jsonArrayKey(resourceType string) string {
 		return "mtls_certificates"
 	case "workflow":
 		return "workflows"
-	case "secrets_store_secret":
-		return "secrets_store_secrets"
 	default:
 		return resourceType
 	}
@@ -655,8 +643,6 @@ func bindingTypeToConfigKey(bindingType string) string {
 		return "mtls_certificates"
 	case "workflow":
 		return "workflows"
-	case "secrets_store_secret":
-		return "secrets_store_secrets"
 	default:
 		return bindingType
 	}
@@ -1405,12 +1391,6 @@ func buildJSONEntry(b BindingDef) []byte {
 		}
 		if v := b.ExtraFields["script_name"]; v != "" {
 			m["script_name"] = v
-		}
-	case "secrets_store_secret":
-		m = map[string]string{
-			"binding":     b.BindingName,
-			"store_id":    b.ResourceID,
-			"secret_name": b.ResourceName,
 		}
 	default:
 		m = map[string]string{

@@ -64,7 +64,7 @@ orangeshell/
     ├── api/
     │   ├── client.go                # Cloudflare SDK v6 client wrapper
     │   ├── builds.go                # Workers Builds API (raw HTTP, not SDK)
-    │   ├── resources.go             # Lightweight resource list (Vectorize, Hyperdrive, mTLS, Secrets Store)
+    │   ├── resources.go             # Lightweight resource list (Vectorize, Hyperdrive, mTLS)
     │   └── token.go                 # Scoped API token auto-provisioning
     ├── service/
     │   ├── service.go               # Service interface, Registry, caching, types
@@ -75,7 +75,6 @@ orangeshell/
     │   ├── queues.go                # QueueService: CRUD + name→UUID resolution
     │   ├── vectorize.go             # VectorizeService: list/get/delete (raw HTTP)
     │   ├── hyperdrive.go            # HyperdriveService: list/get/delete (raw HTTP)
-    │   ├── secretsstore.go          # SecretsStoreService: list/get/delete + secrets table
     │   └── tail.go                  # TailSession: WebSocket live log streaming
     ├── wrangler/
     │   ├── config.go                # WranglerConfig parser (TOML/JSON/JSONC)
@@ -239,7 +238,7 @@ type Service interface {
 type Deleter interface { Delete(ctx context.Context, id string) error }
 ```
 
-Eight implementations: `WorkersService`, `KVService`, `R2Service`, `D1Service`, `QueueService`, `VectorizeService`, `HyperdriveService`, `SecretsStoreService`.
+Seven implementations: `WorkersService`, `KVService`, `R2Service`, `D1Service`, `QueueService`, `VectorizeService`, `HyperdriveService`.
 
 **Binding Index**: After Workers are listed, `BuildBindingIndex()` concurrently fetches settings for all workers and builds a reverse map (`"ServiceName:ResourceID"` → `[]BoundWorker`). Powers: managed resource highlighting, "Worker(s)" enrichment in detail views, and binding warnings in delete confirmations.
 
@@ -636,7 +635,7 @@ go build -o orangeshell .
 
 ### Binding Type Expansion
 
-37. **Two-tier binding kind pattern**: Binding types fall into two categories: (1) "form" types (AI/Browser/Images, DO, Analytics Engine) with inline text inputs, and (2) "picker" types (D1, KV, R2, Queue, Service, Vectorize, Hyperdrive, mTLS, Secrets Store, Workflow) that fetch API resources or scan local files first, then transition to a pre-filled form. The picker types use the service registry for D1/KV/R2/Queue/Workers, raw HTTP for Vectorize/Hyperdrive/mTLS/Secrets Store, and local file scanning for Workflow.
+37. **Two-tier binding kind pattern**: Binding types fall into two categories: (1) "form" types (AI/Browser/Images, DO, Analytics Engine) with inline text inputs, and (2) "picker" types (D1, KV, R2, Queue, Service, Vectorize, Hyperdrive, mTLS, Workflow) that fetch API resources or scan local files first, then transition to a pre-filled form. The picker types use the service registry for D1/KV/R2/Queue/Workers, raw HTTP for Vectorize/Hyperdrive/mTLS, and local file scanning for Workflow.
 
 38. **Singleton vs array bindings need distinct code paths everywhere**: AI, Browser, and Images use `[section]` in TOML (not `[[section]]`) and a plain object in JSON (not an array). The parser `collectBindings()`, writer `formatTOMLBinding()`/`addBindingJSON()`, and remover `removeBindingTOML()`/`removeBindingJSON()` all needed separate branches. Added `isSingletonBindingType()` helper to centralize the check.
 
@@ -646,19 +645,19 @@ go build -o orangeshell .
 
 41. **interface{} message fields avoid import cycles**: `WriteDirectBindingMsg.BindingDef` is typed as `interface{}` because the `config` UI package defines the message but the value is a `wcfg.BindingDef`. The app layer (which imports both packages) does the type assertion. This avoids the config UI package importing wrangler types in its message definitions, which would create import cycle risk.
 
-42. **Raw HTTP resource list functions use the generic Cloudflare v4 envelope**: All list endpoints (Vectorize, Hyperdrive, mTLS, Secrets Store) return `{success, result[], errors[]}`. A single `parseResourceList(body, idField, nameField)` function handles all four, extracting just ID and Name from each result item via `map[string]interface{}`. Much simpler than defining per-type response structs.
+42. **Raw HTTP resource list functions use the generic Cloudflare v4 envelope**: All list endpoints (Vectorize, Hyperdrive, mTLS) return `{success, result[], errors[]}`. A single `parseResourceList(body, idField, nameField)` function handles all of them, extracting just ID and Name from each result item via `map[string]interface{}`. Much simpler than defining per-type response structs.
 
-43. **Service bindings use the existing Workers registry, not raw HTTP**: For the "service" resource picker, the Workers service is already registered in the service registry and caches worker lists. Using `m.registry.Get("Workers").List()` avoids duplicating API calls. Only Vectorize, Hyperdrive, mTLS, and Secrets Store need the raw HTTP `ResourceListClient` since they don't have full Service implementations.
+43. **Service bindings use the existing Workers registry, not raw HTTP**: For the "service" resource picker, the Workers service is already registered in the service registry and caches worker lists. Using `m.registry.Get("Workers").List()` avoids duplicating API calls. Only Vectorize, Hyperdrive, and mTLS need the raw HTTP `ResourceListClient` since they don't have full Service implementations.
 
 44. **Workflow class auto-discovery via local source scan**: The Workflow binding type uses a "picker" kind that scans the project's source files for exported `WorkflowEntrypoint` subclasses instead of calling an API. The scanner (`wrangler/workflows.go`) supports two patterns: JS/TS `export class X extends WorkflowEntrypoint` and Python `class X(WorkflowEntrypoint):`. It reuses the same directory walk logic as the AI tab's file scanner (skip `node_modules`, `.git`, etc.; resolve source dir from `Main` entry). **Known limitations (NOT handled)**: (1) re-exports (`export { MyWorkflow } from './workflows'`), (2) barrel/index re-exports, (3) renamed imports (`import { WorkflowEntrypoint as WF }` then `extends WF`), (4) dynamic class names or factory patterns, (5) Python `__all__` exports, (6) classes in `node_modules` or other skipped directories. These cover edge cases; the standard pattern of a direct `export class ... extends WorkflowEntrypoint` in a source file covers the vast majority of real-world usage. The picker falls back gracefully — if no classes are found, the user sees "No resources found" and can press esc to go back and use the form manually by changing the type or entering values directly.
 
-45. **Dual navigation paths for bindings**: Bindings in EnvBox now have two Enter targets: (1) types with `NavService()` (KV, R2, D1, Service, Queue, Vectorize, Hyperdrive, Secrets Store) emit `NavigateMsg` → Resources tab via `navigateTo()`, (2) types without `NavService()` (AI, mTLS, Workflow, Browser, Images, Analytics, DO) emit `NavigateToBindingMsg` → Configuration tab → Bindings category with the specific binding highlighted via `SelectBindingByName()`. Both paths follow the same cross-tab navigation pattern as `ShowEnvVarsMsg`/`ShowTriggersMsg`: `syncConfigProjects()` + `SelectProjectByPath()` + `SetCategory()` + set `activeTab`. The new path adds one extra call: `SelectBindingByName(envName, bindingName)` to pre-position the cursor.
+45. **Dual navigation paths for bindings**: Bindings in EnvBox now have two Enter targets: (1) types with `NavService()` (KV, R2, D1, Service, Queue, Vectorize, Hyperdrive) emit `NavigateMsg` → Resources tab via `navigateTo()`, (2) types without `NavService()` (AI, mTLS, Workflow, Browser, Images, Analytics, DO) emit `NavigateToBindingMsg` → Configuration tab → Bindings category with the specific binding highlighted via `SelectBindingByName()`. Both paths follow the same cross-tab navigation pattern as `ShowEnvVarsMsg`/`ShowTriggersMsg`: `syncConfigProjects()` + `SelectProjectByPath()` + `SetCategory()` + set `activeTab`. The new path adds one extra call: `SelectBindingByName(envName, bindingName)` to pre-position the cursor.
 
 ### Resource Tab Expansion & Service Registry
 
-46. **New services use `ResourceListClient` not Cloudflare SDK**: The 5 original services (Workers, KV, R2, D1, Queues) use the cloudflare-go v6 SDK. New services (Vectorize, Hyperdrive, Secrets Store) use raw HTTP via `ResourceListClient` because the SDK either doesn't cover these APIs or has union type deserialization issues. The service constructor takes `*api.ResourceListClient` instead of `*cloudflare.Client`. The `ResourceListClient` is constructed from auth credentials via `newResourceListClient()` in `app_config_ops.go`.
+46. **New services use `ResourceListClient` not Cloudflare SDK**: The 5 original services (Workers, KV, R2, D1, Queues) use the cloudflare-go v6 SDK. New services (Vectorize, Hyperdrive) use raw HTTP via `ResourceListClient` because the SDK either doesn't cover these APIs or has union type deserialization issues. The service constructor takes `*api.ResourceListClient` instead of `*cloudflare.Client`. The `ResourceListClient` is constructed from auth credentials via `newResourceListClient()` in `app_config_ops.go`.
 
-47. **Binding index now indexes 8 binding types**: `BuildBindingIndex()` in `workers.go` indexes all bindings with `NavService != ""`. After Phase B6, this includes: KV (`kv_namespace`), D1 (`d1`), R2 (`r2_bucket`), Service (`service`), Queue (`queue`), Vectorize (`vectorize` → `NavResource: b.IndexName`), Hyperdrive (`hyperdrive` → `NavResource: b.ID`), and Secrets Store (`secrets_store_secret` → `NavResource: b.StoreID`). The `safeBinding` struct has `StoreID` and `SecretName` JSON fields for Secrets Store deserialization. Delete guards now work for all eight resource types.
+47. **Binding index now indexes 7 binding types**: `BuildBindingIndex()` in `workers.go` indexes all bindings with `NavService != ""`. This includes: KV (`kv_namespace`), D1 (`d1`), R2 (`r2_bucket`), Service (`service`), Queue (`queue`), Vectorize (`vectorize` → `NavResource: b.IndexName`), and Hyperdrive (`hyperdrive` → `NavResource: b.ID`). Delete guards now work for all seven resource types.
 
 48. **Delete guard has two paths — immediate and deferred**: When the user presses `d` on a resource: (1) if the binding index is already built, lookup bound workers immediately and show confirm/blocked popup, (2) if index is not built, show a spinner popup via `NewLoading()`, stash the request in `pendingDeleteReq`, kick off Workers fetch + index build, then transition the popup via `SetBindingWarnings()` when the index arrives. New deletable services just need to be added to `isDeletableService()` in `detail_helpers.go`.
 
@@ -666,7 +665,7 @@ go build -o orangeshell .
 
 50. **Separation of resource creation and binding creation**: Resource creation (D1 databases, KV namespaces, Vectorize indexes, etc.) belongs on the Resources tab (Ctrl+N = "New Resource"). Binding creation (assigning an existing resource to a worker) belongs on the Configuration tab (inline picker flow). The old binding wizard popup conflated both. Splitting them simplifies both flows: resource creation is a standalone popup with type-specific fields, binding creation is always "select from existing + enter binding name".
 
-51. **Secrets Store has nested resources**: A store contains secrets. The Resources tab shows stores as top-level items with secrets listed in the detail view (same pattern as D1 showing tables). The binding config needs both `store_id` and `secret_name`. For binding creation, the picker lists stores and the form has a `secret_name` field for manual entry (two-step picker deferred per lesson 62). For resource creation, creating a store is the primary action.
+51. **Secrets Store removed (beta)**: Secrets Store was removed from the codebase while the API is in beta. The API had several issues: no GET single store endpoint (405), OAuth scope gaps (`secrets_store:write` missing from orangeshell's flow), Global API Key unable to list secrets within stores, and secret creation requiring wrangler CLI interactive prompts. Will re-add when the API reaches GA and stabilizes.
 
 52. **Refactor `doGet` into generic `doRequest` for method reuse**: When adding `DoDelete` to `ResourceListClient`, extract the shared HTTP logic (URL construction, auth headers, status checking) into a `doRequest(ctx, method, path)` method. `doGet` becomes a one-liner wrapper. This avoids duplicating auth header setup across GET/DELETE/POST methods.
 
@@ -692,7 +691,9 @@ go build -o orangeshell .
 
 61. **Eliminating a popup removes ~5 integration points**: Removing the `bindings/` popup eliminated: (1) the `showBindings`/`bindingsPopup` fields on the root model, (2) the `handleBindingsMsg` handler in the handler chain, (3) the `updateBindings` input routing guard in `updateDashboard`, (4) the overlay entry in `viewDashboard`, (5) four helper functions (`listResourcesCmd`, `createResourceCmd`, `writeBindingCmd`, `updateBindings`), and (6) the import of the `bindings` package in two app files. This is the standard cost of each popup in the current architecture.
 
-62. **Two-step pickers can be deferred**: The Secrets Store binding needs both a store ID and a secret name. A two-step picker (pick store → pick secret) would require a new `modeAddBindingPickerStep2`, additional state fields, and a second async fetch cycle. The simpler alternative — picker lists stores, form has `secret_name` for manual entry — is functional and avoids significant complexity. Two-step pickers can be added later as a UX enhancement without architectural changes.
+62. **Two-step pickers can be deferred**: Some binding types may need two-step resource selection (e.g., pick a parent resource → pick a child). A two-step picker would require a new `modeAddBindingPickerStep2`, additional state fields, and a second async fetch cycle. This can be added later as a UX enhancement without architectural changes.
+
+63. **ResourceListClient must follow the same fallback auth chain as BuildsClient**: Some APIs return 403 with OAuth tokens (same class of issue as lesson 27). Since `newResourceListClient()` creates a single client shared by Vectorize and Hyperdrive services (and binding pickers for mTLS), it tries the Global API Key (from env vars) first — it has the broadest permissions and works for all APIs. Correct chain: (1) env var Global API Key, (2) primary auth method (API Key/Token), (3) `api_token_fallback` for OAuth users, (4) OAuth token as last resort.
 
 ## General Design Considerations
 ### Design-Patterns

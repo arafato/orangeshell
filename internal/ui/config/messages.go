@@ -75,7 +75,7 @@ type WriteDirectBindingDoneMsg struct {
 // ListBindingResourcesMsg requests the app to fetch API resources for the
 // inline binding picker. Supports all picker-kind binding types.
 type ListBindingResourcesMsg struct {
-	ResourceType string // "d1", "kv", "r2", "queue", "service", "vectorize", "hyperdrive", "mtls_certificate", "secrets_store", "workflow"
+	ResourceType string // "d1", "kv", "r2", "queue", "service", "vectorize", "hyperdrive", "mtls_certificate", "workflow"
 }
 
 // BindingResourceItem is a lightweight resource entry returned by the API.

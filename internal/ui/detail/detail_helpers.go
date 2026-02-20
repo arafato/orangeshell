@@ -26,7 +26,7 @@ func copyIcon() string {
 // isDeletableService returns true for services that support resource deletion from the list view.
 func isDeletableService(name string) bool {
 	switch name {
-	case "KV", "D1", "R2", "Queues", "Vectorize", "Hyperdrive", "Secrets Store":
+	case "KV", "D1", "R2", "Queues", "Vectorize", "Hyperdrive":
 		return true
 	}
 	return false

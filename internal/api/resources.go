@@ -112,15 +112,6 @@ func (r *ResourceListClient) ListMTLSCertificates(ctx context.Context) ([]Resour
 	return parseResourceList(body, "id", "name")
 }
 
-// ListSecretsStoreStores returns all Secrets Store stores.
-func (r *ResourceListClient) ListSecretsStoreStores(ctx context.Context) ([]ResourceItem, error) {
-	body, err := r.doGet(ctx, "secrets_store/stores")
-	if err != nil {
-		return nil, err
-	}
-	return parseResourceList(body, "id", "name")
-}
-
 // --- Get functions (single-resource detail) ---
 
 // VectorizeIndexDetail holds detail fields for a Vectorize index.
@@ -218,99 +209,6 @@ func (r *ResourceListClient) GetHyperdriveConfig(ctx context.Context, id string)
 		}
 	}
 	return d, nil
-}
-
-// SecretsStoreDetail holds detail fields for a Secrets Store store.
-type SecretsStoreDetail struct {
-	ID      string
-	Name    string
-	Secrets []SecretsStoreSecret
-}
-
-// SecretsStoreSecret represents a single secret within a store.
-type SecretsStoreSecret struct {
-	ID      string
-	Name    string
-	Scopes  string
-	Comment string
-}
-
-// GetSecretsStoreStore returns detail for a single Secrets Store store,
-// including the list of secrets within it.
-func (r *ResourceListClient) GetSecretsStoreStore(ctx context.Context, storeID string) (*SecretsStoreDetail, error) {
-	// Fetch store detail
-	body, err := r.doGet(ctx, "secrets_store/stores/"+storeID)
-	if err != nil {
-		return nil, err
-	}
-	var resp cfSingleResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("parsing API response: %w", err)
-	}
-	if !resp.Success {
-		if len(resp.Errors) > 0 {
-			return nil, fmt.Errorf("API error: %s", resp.Errors[0].Message)
-		}
-		return nil, fmt.Errorf("API returned success=false")
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(resp.Result, &m); err != nil {
-		return nil, fmt.Errorf("parsing result: %w", err)
-	}
-	d := &SecretsStoreDetail{
-		ID:   stringFromMap(m, "id"),
-		Name: stringFromMap(m, "name"),
-	}
-
-	// Fetch secrets within the store
-	secrets, err := r.ListSecretsStoreSecrets(ctx, storeID)
-	if err == nil {
-		d.Secrets = secrets
-	}
-
-	return d, nil
-}
-
-// ListSecretsStoreSecrets returns all secrets within a Secrets Store store.
-func (r *ResourceListClient) ListSecretsStoreSecrets(ctx context.Context, storeID string) ([]SecretsStoreSecret, error) {
-	body, err := r.doGet(ctx, fmt.Sprintf("secrets_store/stores/%s/secrets", storeID))
-	if err != nil {
-		return nil, err
-	}
-	var resp cfListResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("parsing API response: %w", err)
-	}
-	if !resp.Success {
-		if len(resp.Errors) > 0 {
-			return nil, fmt.Errorf("API error: %s", resp.Errors[0].Message)
-		}
-		return nil, fmt.Errorf("API returned success=false")
-	}
-	var secrets []SecretsStoreSecret
-	for _, raw := range resp.Result {
-		var m map[string]interface{}
-		if err := json.Unmarshal(raw, &m); err != nil {
-			continue
-		}
-		s := SecretsStoreSecret{
-			ID:      stringFromMap(m, "id"),
-			Name:    stringFromMap(m, "name"),
-			Comment: stringFromMap(m, "comment"),
-		}
-		// Scopes may be an array of strings
-		if scopes, ok := m["scopes"].([]interface{}); ok {
-			var parts []string
-			for _, sc := range scopes {
-				if str, ok := sc.(string); ok {
-					parts = append(parts, str)
-				}
-			}
-			s.Scopes = joinStrings(parts, ", ")
-		}
-		secrets = append(secrets, s)
-	}
-	return secrets, nil
 }
 
 // --- Response parsing ---

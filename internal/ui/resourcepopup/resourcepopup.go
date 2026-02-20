@@ -26,7 +26,7 @@ const (
 // --- Resource type entries ---
 
 type resourceTypeEntry struct {
-	Code  string // Internal code: "d1", "kv", "r2", "queue", "vectorize", "hyperdrive", "secrets_store"
+	Code  string // Internal code: "d1", "kv", "r2", "queue", "vectorize", "hyperdrive"
 	Label string // Human-readable label
 	Desc  string // Short description
 }
@@ -38,7 +38,6 @@ var resourceTypes = []resourceTypeEntry{
 	{Code: "queue", Label: "Queue", Desc: "Message queue"},
 	{Code: "vectorize", Label: "Vectorize Index", Desc: "Vector search index"},
 	{Code: "hyperdrive", Label: "Hyperdrive Config", Desc: "Database connection accelerator"},
-	{Code: "secrets_store", Label: "Secrets Store", Desc: "Managed secrets storage"},
 }
 
 // --- Extra field definitions per resource type ---
@@ -286,8 +285,6 @@ func namePlaceholder(resourceType string) string {
 		return "my-index"
 	case "hyperdrive":
 		return "my-config"
-	case "secrets_store":
-		return "my-store"
 	default:
 		return "my-resource"
 	}
@@ -629,8 +626,6 @@ func serviceNameForType(resourceType string) string {
 		return "Vectorize"
 	case "hyperdrive":
 		return "Hyperdrive"
-	case "secrets_store":
-		return "Secrets Store"
 	default:
 		return ""
 	}

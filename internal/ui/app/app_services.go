@@ -245,8 +245,6 @@ func (m *Model) registerServices(accountID string) {
 		hyperdriveSvc := svc.NewHyperdriveService(rlc)
 		m.registry.Register(hyperdriveSvc)
 
-		secretsStoreSvc := svc.NewSecretsStoreService(rlc)
-		m.registry.Register(secretsStoreSvc)
 	}
 
 	// Populate the Resources tab service dropdown
@@ -258,7 +256,6 @@ func (m *Model) registerServices(accountID string) {
 		{Name: "Queues", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "Vectorize", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "Hyperdrive", Integrated: true, Mode: detail.ReadOnly},
-		{Name: "Secrets Store", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "Pages", Integrated: false, Mode: detail.ReadOnly},
 	})
 }

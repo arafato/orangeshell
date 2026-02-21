@@ -208,25 +208,42 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	case detail.EnterInteractiveMsg:
 		// User entered interactive mode on a ReadWrite service — initialize interactive features.
 		if msg.Mode == detail.ReadWrite && msg.ServiceName == "D1" && msg.ResourceID != "" {
-			// Only init D1 console if not already active for this database
-			if !m.detail.D1Active() || m.detail.D1DatabaseID() != msg.ResourceID {
-				inputCmd := m.detail.InitD1Console(msg.ResourceID)
-				// InitD1Console preserves schema if already loaded for this DB;
-				// only re-fetch if schema is not yet available.
-				cmds := []tea.Cmd{inputCmd}
-				if m.detail.IsLoading() {
-					cmds = append(cmds, m.loadD1Schema(msg.ResourceID), m.detail.SpinnerInit())
+			if msg.IsLocal && msg.LocalResource != nil {
+				// Local D1: init console and load schema from local emulator
+				if !m.detail.D1Active() || m.detail.D1DatabaseID() != msg.ResourceID {
+					inputCmd := m.detail.InitD1Console(msg.ResourceID)
+					lr := *msg.LocalResource
+					schemaCmd := m.loadLocalD1Schema(lr, msg.ResourceID)
+					return *m, tea.Batch(inputCmd, schemaCmd, m.detail.SpinnerInit()), true
 				}
-				return *m, tea.Batch(cmds...), true
+			} else {
+				// Remote D1: init console with schema fetch
+				if !m.detail.D1Active() || m.detail.D1DatabaseID() != msg.ResourceID {
+					inputCmd := m.detail.InitD1Console(msg.ResourceID)
+					cmds := []tea.Cmd{inputCmd}
+					if m.detail.IsLoading() {
+						cmds = append(cmds, m.loadD1Schema(msg.ResourceID), m.detail.SpinnerInit())
+					}
+					return *m, tea.Batch(cmds...), true
+				}
 			}
 		}
 		if msg.Mode == detail.ReadWrite && msg.ServiceName == "KV" && msg.ResourceID != "" {
-			// Only init KV explorer if not already active for this namespace
-			if !m.detail.KVActive() || m.detail.KVNamespaceID() != msg.ResourceID {
-				inputCmd := m.detail.InitKVExplorer(msg.ResourceID)
-				// Auto-load first 20 keys (no prefix)
-				loadCmd := m.loadKVKeys(msg.ResourceID, "")
-				return *m, tea.Batch(inputCmd, loadCmd, m.detail.SpinnerInit()), true
+			if msg.IsLocal && msg.LocalResource != nil {
+				// Local KV: init explorer and auto-load keys via CLI
+				if !m.detail.KVActive() || m.detail.KVNamespaceID() != msg.ResourceID {
+					inputCmd := m.detail.InitKVExplorer(msg.ResourceID)
+					lr := *msg.LocalResource
+					loadCmd := m.loadLocalKVKeys(lr, "")
+					return *m, tea.Batch(inputCmd, loadCmd, m.detail.SpinnerInit()), true
+				}
+			} else {
+				// Remote KV: init explorer and auto-load keys via API
+				if !m.detail.KVActive() || m.detail.KVNamespaceID() != msg.ResourceID {
+					inputCmd := m.detail.InitKVExplorer(msg.ResourceID)
+					loadCmd := m.loadKVKeys(msg.ResourceID, "")
+					return *m, tea.Batch(inputCmd, loadCmd, m.detail.SpinnerInit()), true
+				}
 			}
 		}
 		return *m, nil, true
@@ -271,6 +288,38 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	case detail.KVKeysLoadedMsg:
 		// Staleness check: only apply if we're still on this namespace
 		if msg.NamespaceID != m.detail.KVNamespaceID() {
+			return *m, nil, true
+		}
+		m.detail.SetKVKeys(msg.Keys, msg.Err)
+		return *m, nil, true
+
+	// --- Local emulator messages ---
+
+	case detail.LocalResourcesUpdatedMsg:
+		m.detail.SetLocalResources(msg.Resources)
+		return *m, nil, true
+
+	case detail.LocalD1QueryMsg:
+		return *m, m.executeLocalD1Query(msg.LocalResource, msg.SQL), true
+
+	case detail.LocalD1QueryResultMsg:
+		m.detail.SetD1QueryResult(msg.Result, msg.Err)
+		// If the query changed the DB, auto-refresh the local schema
+		if msg.Result != nil && msg.Result.ChangedDB {
+			if lr := m.detail.ActiveLocalResource(); lr != nil {
+				m.detail.SetD1SchemaLoading()
+				dbID := m.detail.D1DatabaseID()
+				return *m, tea.Batch(m.loadLocalD1Schema(*lr, dbID), m.detail.SpinnerInit()), true
+			}
+		}
+		return *m, nil, true
+
+	case detail.LocalKVKeysLoadMsg:
+		return *m, tea.Batch(m.loadLocalKVKeys(msg.LocalResource, msg.Prefix), m.detail.SpinnerInit()), true
+
+	case detail.LocalKVKeysLoadedMsg:
+		// Staleness check: only apply if we're still on the KV explorer
+		if !m.detail.KVActive() {
 			return *m, nil, true
 		}
 		m.detail.SetKVKeys(msg.Keys, msg.Err)

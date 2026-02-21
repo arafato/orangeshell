@@ -173,7 +173,7 @@ func (s *D1Service) ExecuteQuery(id, sql string) (*D1QueryResult, error) {
 	}
 
 	// Format as ASCII table
-	output := formatASCIITable(r.Results.Columns, r.Results.Rows)
+	output := FormatASCIITable(r.Results.Columns, r.Results.Rows)
 
 	return &D1QueryResult{
 		Output:    output,
@@ -209,8 +209,9 @@ func formatQueryMeta(meta d1.DatabaseRawResponseMeta) string {
 	return strings.Join(parts, "  ")
 }
 
-// formatASCIITable renders columns and rows as an aligned ASCII table.
-func formatASCIITable(columns []string, rows [][]interface{}) string {
+// FormatASCIITable renders columns and rows as an aligned ASCII table.
+// Exported for use by the local emulator D1 query result converter.
+func FormatASCIITable(columns []string, rows [][]interface{}) string {
 	if len(columns) == 0 {
 		return "(empty result)"
 	}

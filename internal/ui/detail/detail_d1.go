@@ -122,6 +122,14 @@ func (m Model) updateD1(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.d1Querying = true
 		m.d1Output = append(m.d1Output, theme.D1PromptStyle.Render("sql> ")+theme.ValueStyle.Render(sql))
 		m.d1Input.Reset()
+
+		// Route to local or remote handler
+		if m.isLocalResource && m.activeLocalResource != nil {
+			lr := *m.activeLocalResource
+			return m, func() tea.Msg {
+				return LocalD1QueryMsg{LocalResource: lr, SQL: sql}
+			}
+		}
 		dbID := m.d1DatabaseID
 		return m, func() tea.Msg {
 			return D1QueryMsg{DatabaseID: dbID, SQL: sql}

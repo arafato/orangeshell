@@ -45,25 +45,33 @@ func (m *Model) SetManagedResources(ids map[string]bool) {
 	copy(sorted, m.resources)
 	m.resources = sorted
 
-	// Stable sort: managed first, then unmanaged, preserving order within each group
-	sort.SliceStable(m.resources, func(i, j int) bool {
-		iManaged := ids[m.resources[i].ID]
-		jManaged := ids[m.resources[j].ID]
+	// Stable sort only the REMOTE portion (indices localCount onwards).
+	// Local entries at the front are pinned in place — they're not in the
+	// managedIDs set and must always appear before remote entries.
+	remoteSlice := m.resources[m.localCount:]
+	sort.SliceStable(remoteSlice, func(i, j int) bool {
+		iManaged := ids[remoteSlice[i].ID]
+		jManaged := ids[remoteSlice[j].ID]
 		if iManaged != jManaged {
 			return iManaged // managed before unmanaged
 		}
 		return false // preserve original order within group
 	})
 
-	// Count managed items
+	// Count managed items (among remote entries only)
 	m.managedCount = 0
-	for _, r := range m.resources {
+	for _, r := range remoteSlice {
 		if ids[r.ID] {
 			m.managedCount++
 		} else {
 			break
 		}
 	}
+
+	// Keep remoteResources in sync with the sorted order so that future
+	// rebuildCombinedResources() calls preserve the managed-first ordering.
+	m.remoteResources = make([]service.Resource, len(remoteSlice))
+	copy(m.remoteResources, remoteSlice)
 
 	// Restore cursor position (match by ID, then fall back to Name for bindings
 	// that store a resource name rather than a UUID, e.g. Queues)

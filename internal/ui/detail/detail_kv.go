@@ -94,6 +94,14 @@ func (m Model) updateKV(msg tea.KeyMsg) (Model, tea.Cmd) {
 		prefix := strings.TrimSpace(m.kvInput.Value())
 		m.kvLoading = true
 		m.kvErr = ""
+
+		// Route to local or remote handler
+		if m.isLocalResource && m.activeLocalResource != nil {
+			lr := *m.activeLocalResource
+			return m, func() tea.Msg {
+				return LocalKVKeysLoadMsg{LocalResource: lr, Prefix: prefix}
+			}
+		}
 		nsID := m.kvNamespaceID
 		return m, func() tea.Msg {
 			return KVKeysLoadMsg{NamespaceID: nsID, Prefix: prefix}

@@ -44,9 +44,10 @@ type RouteConfig struct {
 
 // Binding represents a normalized resource binding.
 type Binding struct {
-	Name       string // JS binding name (e.g. "MY_KV")
-	Type       string // normalized type: kv_namespace, r2_bucket, d1, service, etc.
-	ResourceID string // the identifying value (namespace_id, bucket_name, database_id, etc.)
+	Name        string // JS binding name (e.g. "MY_KV")
+	Type        string // normalized type: kv_namespace, r2_bucket, d1, service, etc.
+	ResourceID  string // the identifying value (namespace_id, bucket_name, database_id, etc.)
+	DisplayName string // human-readable name for CLI commands (e.g. D1 database_name); empty if same as Name
 }
 
 // NavService returns the dashboard service name for cross-linking, or empty if not navigable.
@@ -414,7 +415,7 @@ func collectBindings(
 		if id == "" {
 			id = b.Name
 		}
-		bindings = append(bindings, Binding{Name: b.Binding, Type: "d1", ResourceID: id})
+		bindings = append(bindings, Binding{Name: b.Binding, Type: "d1", ResourceID: id, DisplayName: b.Name})
 	}
 	for _, b := range svcs {
 		bindings = append(bindings, Binding{Name: b.Binding, Type: "service", ResourceID: b.Service})

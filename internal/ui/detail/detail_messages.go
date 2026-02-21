@@ -94,9 +94,11 @@ type (
 	// ReadWrite service's detail view. The app layer handles this to initialize
 	// service-specific interactive features (e.g. D1 SQL console, KV data explorer).
 	EnterInteractiveMsg struct {
-		ServiceName string
-		ResourceID  string
-		Mode        DetailMode
+		ServiceName   string
+		ResourceID    string
+		Mode          DetailMode
+		IsLocal       bool                    // true when entering interactive mode on a local emulator resource
+		LocalResource *wrangler.LocalResource // the local resource (nil for remote)
 	}
 
 	// KV Data Explorer messages
@@ -109,6 +111,37 @@ type (
 	// KVKeysLoadedMsg carries the loaded KV key-value entries back.
 	KVKeysLoadedMsg struct {
 		NamespaceID string
+		Keys        []service.KVKeyEntry
+		Err         error
+	}
+
+	// Local emulator messages
+
+	// LocalResourcesUpdatedMsg carries local D1/KV resources discovered from active dev sessions.
+	// The detail model merges these into the resource list with yellow styling.
+	LocalResourcesUpdatedMsg struct {
+		Resources []wrangler.LocalResource
+	}
+
+	// LocalD1QueryMsg requests the app to execute a SQL query against a local D1 database.
+	LocalD1QueryMsg struct {
+		LocalResource wrangler.LocalResource
+		SQL           string
+	}
+	// LocalD1QueryResultMsg carries the result of a local D1 SQL query.
+	LocalD1QueryResultMsg struct {
+		Result *service.D1QueryResult
+		Err    error
+	}
+
+	// LocalKVKeysLoadMsg requests the app to load keys from a local KV namespace.
+	LocalKVKeysLoadMsg struct {
+		LocalResource wrangler.LocalResource
+		Prefix        string
+	}
+	// LocalKVKeysLoadedMsg carries the loaded local KV key-value entries back.
+	LocalKVKeysLoadedMsg struct {
+		BindingName string
 		Keys        []service.KVKeyEntry
 		Err         error
 	}

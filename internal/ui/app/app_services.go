@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/oarafat/orangeshell/internal/api"
@@ -11,6 +12,7 @@ import (
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
+	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
 
 // fetchStaleForSearch triggers background refreshes for any stale service caches so search
@@ -619,6 +621,112 @@ func (m Model) provisionFallbackTokenCmd() tea.Cmd {
 			token:     token,
 			accountID: accountID,
 			err:       err,
+		}
+	}
+}
+
+// --- Local emulator helpers ---
+
+// executeLocalD1Query returns a command that runs a SQL query against a local D1 database
+// via the wrangler CLI (npx wrangler d1 execute --local).
+func (m Model) executeLocalD1Query(lr wcfg.LocalResource, sql string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		localResult, err := wcfg.ExecuteLocalD1Query(ctx, lr, sql)
+		if err != nil {
+			return detail.LocalD1QueryResultMsg{Err: err}
+		}
+
+		// Convert wrangler.LocalD1QueryResult → service.D1QueryResult
+		var output string
+		if len(localResult.Columns) > 0 {
+			output = svc.FormatASCIITable(localResult.Columns, localResult.Rows)
+		} else if localResult.ChangedDB {
+			output = "Query OK"
+		} else {
+			output = "(empty result)"
+		}
+
+		return detail.LocalD1QueryResultMsg{
+			Result: &svc.D1QueryResult{
+				Output:    output,
+				Meta:      localResult.Meta,
+				ChangedDB: localResult.ChangedDB,
+			},
+		}
+	}
+}
+
+// loadLocalD1Schema returns a command that introspects a local D1 database schema
+// via the wrangler CLI (sqlite_master + PRAGMA table_info + PRAGMA foreign_key_list).
+func (m Model) loadLocalD1Schema(lr wcfg.LocalResource, databaseID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		localTables, err := wcfg.QueryLocalD1Schema(ctx, lr)
+		if err != nil {
+			return detail.D1SchemaLoadedMsg{DatabaseID: databaseID, Err: err}
+		}
+
+		// Convert wrangler.LocalSchemaTable → service.SchemaTable
+		tables := make([]svc.SchemaTable, 0, len(localTables))
+		for _, lt := range localTables {
+			st := svc.SchemaTable{Name: lt.Name}
+			for _, lc := range lt.Columns {
+				st.Columns = append(st.Columns, svc.SchemaColumn{
+					Name:    lc.Name,
+					Type:    lc.Type,
+					NotNull: lc.NotNull,
+					PK:      lc.PK,
+				})
+			}
+			for _, lf := range lt.FKs {
+				st.FKs = append(st.FKs, svc.SchemaFK{
+					FromCol: lf.FromCol,
+					ToTable: lf.ToTable,
+					ToCol:   lf.ToCol,
+				})
+			}
+			tables = append(tables, st)
+		}
+
+		return detail.D1SchemaLoadedMsg{DatabaseID: databaseID, Tables: tables}
+	}
+}
+
+// loadLocalKVKeys returns a command that fetches keys (with values) from a local KV namespace
+// via the wrangler CLI (npx wrangler kv key list/get --local).
+func (m Model) loadLocalKVKeys(lr wcfg.LocalResource, prefix string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		entries, err := wcfg.ListLocalKVKeysWithValues(ctx, lr, prefix, 20)
+		if err != nil {
+			return detail.LocalKVKeysLoadedMsg{
+				BindingName: lr.BindingName,
+				Err:         err,
+			}
+		}
+
+		// Convert wrangler.LocalKVKeyValueEntry → service.KVKeyEntry
+		kvKeys := make([]svc.KVKeyEntry, 0, len(entries))
+		for _, e := range entries {
+			kvKeys = append(kvKeys, svc.KVKeyEntry{
+				Name:       e.Name,
+				Value:      e.Value,
+				Expiration: e.Expiration,
+				ValueSize:  e.ValueSize,
+				IsBinary:   false, // local CLI returns text
+			})
+		}
+
+		return detail.LocalKVKeysLoadedMsg{
+			BindingName: lr.BindingName,
+			Keys:        kvKeys,
 		}
 	}
 }

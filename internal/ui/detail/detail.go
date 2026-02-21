@@ -79,11 +79,13 @@ type Model struct {
 	accessProtectedIDs map[string]bool // set of resource IDs protected by Cloudflare Access
 
 	// List state
-	resources  []service.Resource
-	cursor     int
-	loading    bool
-	refreshing bool // true when showing cached data while a background refresh is in flight
-	err        error
+	resources       []service.Resource // combined list: local entries (prefix) + remote entries
+	remoteResources []service.Resource // remote-only resources (from API)
+	localCount      int                // number of local entries at the front of resources slice
+	cursor          int
+	loading         bool
+	refreshing      bool // true when showing cached data while a background refresh is in flight
+	err             error
 
 	// Detail state
 	detail        *service.ResourceDetail
@@ -101,6 +103,11 @@ type Model struct {
 
 	// Scroll offset for detail view
 	scrollOffset int
+
+	// Local emulator state
+	localResources      []wrangler.LocalResource // local D1/KV resources from active dev sessions
+	isLocalResource     bool                     // true when the selected resource is a local emulator entry
+	activeLocalResource *wrangler.LocalResource  // the local resource currently selected (nil if remote)
 
 	// KV Data Explorer state
 	kvInput       textinput.Model      // prefix search input
@@ -188,7 +195,9 @@ func (m *Model) SetService(name string) tea.Cmd {
 	}
 	m.service = name
 	m.mode = viewList
+	m.remoteResources = nil
 	m.resources = nil
+	m.localCount = 0
 	m.cursor = 0
 	m.loading = true
 	m.refreshing = false
@@ -201,12 +210,17 @@ func (m *Model) SetService(name string) tea.Cmd {
 	m.managedIDs = nil
 	m.managedCount = 0
 	m.interacting = false
+	m.isLocalResource = false
+	m.activeLocalResource = nil
 
 	// Clear version history when switching services
 	m.versionHistory = nil
 	m.versionHistoryLoading = false
 	m.versionHistoryErr = nil
 	m.versionHistoryScript = ""
+
+	// Rebuild combined list to include any local resources for the new service
+	m.rebuildCombinedResources()
 
 	return func() tea.Msg {
 		return LoadResourcesMsg{ServiceName: name}
@@ -231,6 +245,8 @@ func (m *Model) SetServiceWithCache(name string, cached []service.Resource) (tea
 	m.managedIDs = nil
 	m.managedCount = 0
 	m.interacting = false
+	m.isLocalResource = false
+	m.activeLocalResource = nil
 
 	refreshCmd := tea.Cmd(func() tea.Msg {
 		return LoadResourcesMsg{ServiceName: name}
@@ -238,16 +254,19 @@ func (m *Model) SetServiceWithCache(name string, cached []service.Resource) (tea
 
 	if cached != nil {
 		// Show cached data immediately, mark as refreshing
-		m.resources = cached
-		m.cursor = 0
+		m.remoteResources = cached
 		m.loading = false
 		m.refreshing = true
+		m.rebuildCombinedResources()
+		m.cursor = 0
 
-		// Auto-preview first resource
+		// Auto-preview first resource (skip local entries — preview remote first)
 		var previewCmd tea.Cmd
-		if len(cached) > 0 {
+		firstRemoteIdx := m.localCount
+		if firstRemoteIdx < len(m.resources) {
+			m.cursor = firstRemoteIdx
 			m.mode = viewDetail
-			r := cached[0]
+			r := m.resources[firstRemoteIdx]
 			m.detailLoading = true
 			m.detailID = r.ID
 			previewCmd = func() tea.Msg {
@@ -258,7 +277,8 @@ func (m *Model) SetServiceWithCache(name string, cached []service.Resource) (tea
 	}
 
 	// No cache — show loading spinner
-	m.resources = nil
+	m.remoteResources = nil
+	m.rebuildCombinedResources()
 	m.cursor = 0
 	m.loading = true
 	m.refreshing = false
@@ -282,16 +302,21 @@ func (m *Model) SetServiceFresh(name string, cached []service.Resource) tea.Cmd 
 	m.err = nil
 	m.managedIDs = nil
 	m.managedCount = 0
-	m.resources = cached
-	m.cursor = 0
+	m.remoteResources = cached
 	m.loading = false
 	m.refreshing = false
 	m.interacting = false
+	m.isLocalResource = false
+	m.activeLocalResource = nil
+	m.rebuildCombinedResources()
+	m.cursor = 0
 
-	// Auto-preview first resource
-	if len(cached) > 0 {
+	// Auto-preview first remote resource (skip local entries)
+	firstRemoteIdx := m.localCount
+	if firstRemoteIdx < len(m.resources) {
+		m.cursor = firstRemoteIdx
 		m.mode = viewDetail
-		r := cached[0]
+		r := m.resources[firstRemoteIdx]
 		m.detailLoading = true
 		m.detailID = r.ID
 		return func() tea.Msg {
@@ -306,29 +331,34 @@ func (m *Model) SetServiceFresh(name string, cached []service.Resource) tea.Cmd 
 func (m *Model) SetResources(resources []service.Resource, err error, notIntegrated bool) tea.Cmd {
 	m.loading = false
 	m.refreshing = false
-	m.resources = resources
+	m.remoteResources = resources
 	m.err = err
-	m.cursor = 0
 	m.notIntegrated = notIntegrated
+	m.rebuildCombinedResources()
+	m.cursor = 0
 
 	// If a cross-tab navigation is pending, position cursor on the target resource
 	// and skip auto-preview (the detail is already loading for the target).
-	if m.pendingNavigateID != "" && err == nil && len(resources) > 0 {
+	if m.pendingNavigateID != "" && err == nil && len(m.resources) > 0 {
 		m.applyCursorForPendingNavigate()
 		return nil
 	}
 
-	// Auto-preview: switch to detail view and load first resource
-	if err == nil && !notIntegrated && len(resources) > 0 {
-		m.mode = viewDetail
-		r := resources[0]
-		m.detailLoading = true
-		m.detailErr = nil
-		m.detail = nil
-		m.detailID = r.ID
-		m.scrollOffset = 0
-		return func() tea.Msg {
-			return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
+	// Auto-preview: switch to detail view and load first remote resource (skip local entries)
+	if err == nil && !notIntegrated && len(m.resources) > 0 {
+		firstRemoteIdx := m.localCount
+		if firstRemoteIdx < len(m.resources) {
+			m.cursor = firstRemoteIdx
+			m.mode = viewDetail
+			r := m.resources[firstRemoteIdx]
+			m.detailLoading = true
+			m.detailErr = nil
+			m.detail = nil
+			m.detailID = r.ID
+			m.scrollOffset = 0
+			return func() tea.Msg {
+				return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
+			}
 		}
 	}
 	return nil
@@ -347,12 +377,13 @@ func (m *Model) RefreshResources(resources []service.Resource) {
 		selectedID = m.resources[m.cursor].ID
 	}
 
-	m.resources = resources
+	m.remoteResources = resources
 	m.err = nil
+	m.rebuildCombinedResources()
 
 	// Restore cursor position
 	if selectedID != "" {
-		for i, r := range resources {
+		for i, r := range m.resources {
 			if r.ID == selectedID {
 				m.cursor = i
 				return
@@ -360,8 +391,8 @@ func (m *Model) RefreshResources(resources []service.Resource) {
 		}
 	}
 	// If the previously selected resource is gone, clamp cursor
-	if m.cursor >= len(resources) {
-		m.cursor = len(resources) - 1
+	if m.cursor >= len(m.resources) {
+		m.cursor = len(m.resources) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
@@ -453,6 +484,113 @@ func (m *Model) applyCursorForPendingNavigate() {
 	// Resource not found in list (may arrive after re-sort) — keep pending
 }
 
+// --- Local emulator helpers ---
+
+// SetLocalResources updates the set of local D1/KV resources from active dev sessions.
+// Rebuilds the combined resource list to include local entries at the top.
+func (m *Model) SetLocalResources(resources []wrangler.LocalResource) {
+	m.localResources = resources
+	m.rebuildCombinedResources()
+}
+
+// rebuildCombinedResources merges local entries (for the current service) with remote
+// resources into the combined m.resources slice. Local entries appear first with yellow
+// styling. Preserves cursor position when possible.
+func (m *Model) rebuildCombinedResources() {
+	locals := m.localResourcesForService()
+
+	// Preserve currently selected resource ID
+	var selectedID string
+	if m.cursor >= 0 && m.cursor < len(m.resources) {
+		selectedID = m.resources[m.cursor].ID
+	}
+
+	// Build combined list: local entries first, then remote
+	combined := make([]service.Resource, 0, len(locals)+len(m.remoteResources))
+	for _, lr := range locals {
+		combined = append(combined, service.Resource{
+			ID:          makeLocalResourceID(lr),
+			Name:        lr.BindingName,
+			ServiceType: lr.ResourceType,
+			Summary:     fmt.Sprintf("[local] %s", lr.EnvName),
+		})
+	}
+	combined = append(combined, m.remoteResources...)
+
+	m.resources = combined
+	m.localCount = len(locals)
+
+	// Restore cursor position
+	if selectedID != "" {
+		for i, r := range m.resources {
+			if r.ID == selectedID {
+				m.cursor = i
+				return
+			}
+		}
+	}
+	// Clamp cursor
+	if m.cursor >= len(m.resources) {
+		m.cursor = len(m.resources) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+// LocalResources returns the current local resources.
+func (m Model) LocalResources() []wrangler.LocalResource {
+	return m.localResources
+}
+
+// IsLocalResource returns true if the currently selected resource is a local emulator entry.
+func (m Model) IsLocalResource() bool {
+	return m.isLocalResource
+}
+
+// ActiveLocalResource returns the local resource currently being viewed, or nil.
+func (m Model) ActiveLocalResource() *wrangler.LocalResource {
+	return m.activeLocalResource
+}
+
+// localResourcesForService returns only the local resources matching the current service type.
+func (m Model) localResourcesForService() []wrangler.LocalResource {
+	if len(m.localResources) == 0 || m.service == "" {
+		return nil
+	}
+	var matched []wrangler.LocalResource
+	for _, lr := range m.localResources {
+		if lr.ResourceType == m.service {
+			matched = append(matched, lr)
+		}
+	}
+	return matched
+}
+
+// localResourceIDPrefix is prepended to local resource display IDs to distinguish
+// them from remote resources. This prefix is used in the resource list only.
+const localResourceIDPrefix = "local:"
+
+// makeLocalResourceID creates a unique ID for a local resource entry in the list.
+func makeLocalResourceID(lr wrangler.LocalResource) string {
+	return localResourceIDPrefix + lr.BindingName + ":" + lr.ConfigPath
+}
+
+// isLocalResourceID returns true if the resource ID was generated for a local entry.
+func isLocalResourceID(id string) bool {
+	return len(id) > len(localResourceIDPrefix) && id[:len(localResourceIDPrefix)] == localResourceIDPrefix
+}
+
+// findLocalResource finds the LocalResource matching a local resource ID.
+func (m Model) findLocalResource(id string) *wrangler.LocalResource {
+	for i, lr := range m.localResources {
+		if makeLocalResourceID(lr) == id {
+			return &m.localResources[i]
+		}
+	}
+	return nil
+}
+
 // SpinnerInit returns the command to start the spinner ticking.
 func (m Model) SpinnerInit() tea.Cmd {
 	return m.spinner.Tick
@@ -488,16 +626,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				for i := range m.resources {
 					if z := zone.Get(ResourceItemZoneID(i)); z != nil && z.InBounds(mouseMsg) {
 						if i == m.cursor && m.focus == FocusList {
-							// Already selected — enter interactive mode (ReadWrite only)
-							if m.activeServiceMode() == ReadWrite {
+							// Already selected — enter interactive mode (ReadWrite or local)
+							canInteract := m.activeServiceMode() == ReadWrite || m.isLocalResource
+							if canInteract {
 								m.interacting = true
 								m.focus = FocusDetail
 								m.scrollOffset = 0
 								if m.detail != nil {
 									svc := m.service
 									resID := m.detailID
+									isLocal := m.isLocalResource
+									var lr *wrangler.LocalResource
+									if isLocal {
+										lr = m.activeLocalResource
+									}
 									return m, func() tea.Msg {
-										return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite}
+										return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite, IsLocal: isLocal, LocalResource: lr}
 									}
 								}
 							}
@@ -584,13 +728,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				if len(m.resources) > 0 && m.cursor < len(m.resources) {
 					m.focus = FocusDetail
 					m.scrollOffset = 0
-					if m.activeServiceMode() == ReadWrite {
+					canInteract := m.activeServiceMode() == ReadWrite || m.isLocalResource
+					if canInteract {
 						m.interacting = true
 						if m.detail != nil {
 							svc := m.service
 							resID := m.detailID
+							isLocal := m.isLocalResource
+							var lr *wrangler.LocalResource
+							if isLocal {
+								lr = m.activeLocalResource
+							}
 							return m, func() tea.Msg {
-								return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite}
+								return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite, IsLocal: isLocal, LocalResource: lr}
 							}
 						}
 					}
@@ -631,23 +781,30 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case "enter":
 		// Switch to interactive mode — only for ReadWrite services (e.g. D1 SQL console).
-		// ReadOnly services (Workers, KV, R2, Queues) have preview-only detail.
-		if m.activeServiceMode() == ReadWrite && len(m.resources) > 0 && m.cursor < len(m.resources) && m.mode == viewDetail {
+		// ReadOnly services (Workers, R2, Queues) have preview-only detail.
+		// Local resources are always ReadWrite (D1 SQL console or KV explorer).
+		canInteract := m.activeServiceMode() == ReadWrite || m.isLocalResource
+		if canInteract && len(m.resources) > 0 && m.cursor < len(m.resources) && m.mode == viewDetail {
 			m.interacting = true
 			m.focus = FocusDetail
 			m.scrollOffset = 0
 			if m.detail != nil {
 				svc := m.service
 				resID := m.detailID
+				isLocal := m.isLocalResource
+				var lr *wrangler.LocalResource
+				if isLocal {
+					lr = m.activeLocalResource
+				}
 				return m, func() tea.Msg {
-					return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite}
+					return EnterInteractiveMsg{ServiceName: svc, ResourceID: resID, Mode: ReadWrite, IsLocal: isLocal, LocalResource: lr}
 				}
 			}
 			return m, nil
 		}
 	case "d":
-		// Delete resource — only for deletable services (not Workers)
-		if isDeletableService(m.service) && len(m.resources) > 0 && m.cursor < len(m.resources) {
+		// Delete resource — only for deletable services (not Workers), not for local resources
+		if isDeletableService(m.service) && !m.isLocalResource && len(m.resources) > 0 && m.cursor < len(m.resources) {
 			r := m.resources[m.cursor]
 			return m, func() tea.Msg {
 				return DeleteResourceRequestMsg{
@@ -671,6 +828,56 @@ func (m *Model) autoPreview() tea.Cmd {
 	r := m.resources[m.cursor]
 	m.mode = viewDetail
 
+	// Check if this is a local resource
+	if isLocalResourceID(r.ID) {
+		lr := m.findLocalResource(r.ID)
+		if lr == nil {
+			return nil
+		}
+		m.isLocalResource = true
+		m.activeLocalResource = lr
+		m.detailID = r.ID
+		m.detailLoading = false
+		m.detailErr = nil
+		m.scrollOffset = 0
+		// Build a synthetic detail for the local resource
+		m.detail = &service.ResourceDetail{
+			Resource: service.Resource{
+				ID:          r.ID,
+				Name:        lr.BindingName,
+				ServiceType: lr.ResourceType,
+				Summary:     "[local]",
+			},
+			Fields: []service.DetailField{
+				{Label: "Binding", Value: lr.BindingName},
+				{Label: "Type", Value: lr.ResourceType},
+				{Label: "Environment", Value: lr.EnvName},
+				{Label: "Project", Value: lr.ProjectDir},
+				{Label: "Source", Value: "[local emulator]"},
+			},
+		}
+		if lr.ResourceID != "" {
+			m.detail.Fields = append(m.detail.Fields, service.DetailField{
+				Label: "Remote ID", Value: lr.ResourceID,
+			})
+		}
+		// Clear stale explorer state
+		if m.service == "KV" {
+			m.kvKeys = nil
+			m.kvErr = ""
+			m.kvLoading = false
+		}
+		if m.service == "D1" {
+			m.d1SchemaTables = nil
+			m.d1SchemaErr = ""
+			m.d1SchemaLoading = false
+		}
+		return nil
+	}
+
+	// Remote resource
+	m.isLocalResource = false
+	m.activeLocalResource = nil
 	// Staleness check: if we already have detail for this resource, skip re-fetch
 	if r.ID == m.detailID && (m.detail != nil || m.detailLoading) {
 		return nil
@@ -939,7 +1146,13 @@ func (m Model) viewResourceList(width, height int) []string {
 	// Build visual lines: resource items + optional separator between managed/unmanaged.
 	// visualLines holds rendered strings; visualToRes maps visual index → resource index
 	// (-1 for separator lines that aren't selectable).
-	hasUnmanaged := m.managedIDs != nil && m.managedCount > 0 && m.managedCount < len(m.resources)
+	// Note: managedCount is relative to remote resources only; adjust for local prefix.
+	adjustedManagedCount := m.managedCount + m.localCount
+	hasUnmanaged := m.managedIDs != nil && m.managedCount > 0 && m.managedCount < len(m.remoteResources)
+
+	// Yellow style for local entries
+	localNameStyle := lipgloss.NewStyle().Foreground(theme.ColorYellow)
+	localBadgeStyle := lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true)
 
 	type visualLine struct {
 		text  string
@@ -948,8 +1161,15 @@ func (m Model) viewResourceList(width, height int) []string {
 	var vLines []visualLine
 
 	for i, r := range m.resources {
-		// Insert separator before first unmanaged item
-		if hasUnmanaged && i == m.managedCount {
+		isLocal := i < m.localCount
+
+		// Insert blank line separator between local and remote entries
+		if m.localCount > 0 && i == m.localCount {
+			vLines = append(vLines, visualLine{text: "", resID: -1})
+		}
+
+		// Insert separator before first unmanaged remote item
+		if !isLocal && hasUnmanaged && i == adjustedManagedCount {
 			separatorLabel := "unmanaged"
 			if m.service != "Workers" {
 				separatorLabel = "unbound"
@@ -962,23 +1182,41 @@ func (m Model) viewResourceList(width, height int) []string {
 		}
 
 		cursor := " "
-		nameStyle := theme.NormalItemStyle
-		if m.IsManaged(r.ID) {
-			nameStyle = theme.NormalItemStyle // white for managed
-		} else if m.managedIDs != nil {
-			nameStyle = theme.DimStyle // dim/gray for unmanaged
+		var nameStyle lipgloss.Style
+
+		if isLocal {
+			// Local entries: yellow styling
+			nameStyle = localNameStyle
+			if i == m.cursor {
+				cursor = lipgloss.NewStyle().Foreground(theme.ColorYellow).Render(">")
+				nameStyle = lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true)
+			}
+		} else {
+			// Remote entries: normal managed/unmanaged styling
+			nameStyle = theme.NormalItemStyle
+			if m.IsManaged(r.ID) {
+				nameStyle = theme.NormalItemStyle // white for managed
+			} else if m.managedIDs != nil {
+				nameStyle = theme.DimStyle // dim/gray for unmanaged
+			}
+			if i == m.cursor {
+				cursor = theme.SelectedItemStyle.Render(">")
+				nameStyle = theme.SelectedItemStyle
+			}
 		}
 
-		if i == m.cursor {
-			cursor = theme.SelectedItemStyle.Render(">")
-			nameStyle = theme.SelectedItemStyle
-		}
-
-		// Access protection badge: reserve space for lock emoji on Workers
-		accessBadge := ""
+		// Local badge and access protection badge
+		var badge string
 		nameWidth := availableWidth
-		if m.service == "Workers" && m.IsAccessProtected(r.ID) {
-			accessBadge = " " + lipgloss.NewStyle().Foreground(theme.ColorBlue).Bold(true).Render("\xf0\x9f\x94\x92")
+		if isLocal {
+			localBadge := localBadgeStyle.Render("[local]")
+			badge = " " + localBadge
+			nameWidth = availableWidth - 8 // "[local]" + space
+			if nameWidth < 5 {
+				nameWidth = 5
+			}
+		} else if m.service == "Workers" && m.IsAccessProtected(r.ID) {
+			badge = " " + lipgloss.NewStyle().Foreground(theme.ColorBlue).Bold(true).Render("\xf0\x9f\x94\x92")
 			nameWidth = availableWidth - 3 // lock emoji + space
 			if nameWidth < 5 {
 				nameWidth = 5
@@ -986,7 +1224,7 @@ func (m Model) viewResourceList(width, height int) []string {
 		}
 
 		name := nameStyle.Render(truncateRunes(r.Name, nameWidth))
-		line := fmt.Sprintf("%s%s%s", cursor, name, accessBadge)
+		line := fmt.Sprintf("%s%s%s", cursor, name, badge)
 		vLines = append(vLines, visualLine{
 			text:  zone.Mark(ResourceItemZoneID(i), line),
 			resID: i,
@@ -1065,8 +1303,14 @@ func (m Model) viewResourceDetail(width, height int) []string {
 
 	d := m.detail
 
-	// Title + copy icon
-	title := theme.DimStyle.Render(fmt.Sprintf(" %s ", m.service)) + theme.TitleStyle.Render(d.Name) + copyIcon()
+	// Title + copy icon (yellow [local] badge for local resources)
+	var title string
+	if m.isLocalResource {
+		localBadge := lipgloss.NewStyle().Foreground(theme.ColorYellow).Bold(true).Render("[local]")
+		title = theme.DimStyle.Render(fmt.Sprintf(" %s ", m.service)) + localBadge + " " + lipgloss.NewStyle().Foreground(theme.ColorYellow).Render(d.Name)
+	} else {
+		title = theme.DimStyle.Render(fmt.Sprintf(" %s ", m.service)) + theme.TitleStyle.Render(d.Name) + copyIcon()
+	}
 	sepWidth := width - 3
 	if sepWidth < 0 {
 		sepWidth = 0
@@ -1123,20 +1367,23 @@ func (m Model) viewResourceDetail(width, height int) []string {
 	}
 
 	// For D1 in preview mode, render schema below fields (read-only)
+	// Local D1 resources skip the schema preview (no remote API) — just show the hint.
 	if m.service == "D1" && !m.d1Active {
-		schemaSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
-			strings.Repeat("─", sepWidth))
-		allLines = append(allLines, "", schemaSep)
-		if m.d1SchemaLoading {
-			allLines = append(allLines, fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading schema...")))
-		} else if m.d1SchemaErr != "" {
-			allLines = append(allLines, theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s", m.d1SchemaErr)))
-		} else if len(m.d1SchemaTables) > 0 {
-			allLines = append(allLines, " "+theme.D1SchemaTitleStyle.Render("Schema"))
-			allLines = append(allLines, m.renderSchemaStyled(m.d1SchemaTables)...)
-		} else {
-			allLines = append(allLines, " "+theme.D1SchemaTitleStyle.Render("Schema"))
-			allLines = append(allLines, theme.DimStyle.Render(" No tables found"))
+		if !m.isLocalResource {
+			schemaSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
+				strings.Repeat("─", sepWidth))
+			allLines = append(allLines, "", schemaSep)
+			if m.d1SchemaLoading {
+				allLines = append(allLines, fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading schema...")))
+			} else if m.d1SchemaErr != "" {
+				allLines = append(allLines, theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s", m.d1SchemaErr)))
+			} else if len(m.d1SchemaTables) > 0 {
+				allLines = append(allLines, " "+theme.D1SchemaTitleStyle.Render("Schema"))
+				allLines = append(allLines, m.renderSchemaStyled(m.d1SchemaTables)...)
+			} else {
+				allLines = append(allLines, " "+theme.D1SchemaTitleStyle.Render("Schema"))
+				allLines = append(allLines, theme.DimStyle.Render(" No tables found"))
+			}
 		}
 		allLines = append(allLines, "")
 		allLines = append(allLines, theme.DimStyle.Render(" Press enter to open SQL console"))

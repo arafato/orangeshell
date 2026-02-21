@@ -68,10 +68,12 @@ func (m *Model) startDevServer(action, projectName, envName, configPath, scriptN
 		EnvName:     envName,
 		DevKind:     dr.devKind,
 		RunnerKey:   key,
+		ConfigPath:  configPath,
 	})
 	m.monitoring.AddDevToGrid(dsName, dr.devKind)
 	m.refreshMonitoringWorkerTree()
 	m.syncDevBadges()
+	m.syncLocalResources()
 
 	cmd := wcfg.Command{
 		Action:     action,

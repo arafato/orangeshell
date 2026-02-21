@@ -50,6 +50,7 @@ type devSession struct {
 	DevKind     string // "local" or "remote"
 	Port        string // extracted from wrangler dev output (e.g. "8787")
 	RunnerKey   string // key into devRunners map
+	ConfigPath  string // path to the wrangler config file (for local resource discovery)
 }
 
 // devScriptName returns the prefixed script name used to identify dev panes
@@ -213,6 +214,7 @@ func (m *Model) cleanupAllDevSessions() {
 	m.devSessions = nil
 	m.devRunners = make(map[string]*devRunner)
 	m.refreshMonitoringWorkerTree()
+	m.syncLocalResources()
 }
 
 // cleanupDevSessionByKey removes a single dev session by its runner key.
@@ -240,6 +242,7 @@ func (m *Model) cleanupDevSessionByKey(key string) {
 
 	m.refreshMonitoringWorkerTree()
 	m.syncDevBadges()
+	m.syncLocalResources()
 }
 
 // hasDevRunnerFor returns true if a dev server is active (running or failed) for the given project/env.
@@ -322,6 +325,24 @@ func (m *Model) syncDevBadges() {
 			Status: info.Status,
 		}
 	})
+}
+
+// syncLocalResources discovers all local D1/KV resources from active dev sessions
+// and updates the detail model. Called after dev sessions start or stop.
+func (m *Model) syncLocalResources() {
+	var allLocal []wcfg.LocalResource
+	for _, ds := range m.devSessions {
+		if ds.ConfigPath == "" {
+			continue
+		}
+		cfg, err := wcfg.Parse(ds.ConfigPath)
+		if err != nil {
+			continue
+		}
+		locals := wcfg.DiscoverLocalResources(cfg, ds.EnvName)
+		allLocal = append(allLocal, locals...)
+	}
+	m.detail.SetLocalResources(allLocal)
 }
 
 // triggerDevCron fires an HTTP GET to the dev server's /cdn-cgi/handler/scheduled

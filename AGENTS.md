@@ -705,6 +705,24 @@ go build -o orangeshell .
 
 67. **Sequential value fetching is acceptable for small key sets**: Fetching values individually (1 API call per key, up to 20) after listing keys avoids the `BulkGet` union type issues (lesson #7 class). With a 60s context timeout and typical API latency of ~100ms per call, 20 sequential fetches take ~2s. Acceptable for an interactive explorer with explicit search.
 
+### Local Emulator Integration
+
+68. **D1 and KV CLI commands use different identifier types**: `wrangler d1 execute <DATABASE_NAME>` uses the `database_name` from the config's `[[d1_databases]]` section. `wrangler kv key list --binding=<BINDING>` uses the JS binding name. A single `BindingName` field on `LocalResource` stores whichever identifier the CLI command needs, not necessarily the JS binding name.
+
+69. **`Binding.DisplayName` preserves CLI-facing names through the parser**: The `Binding` struct's `Name` is always the JS binding name, but `DisplayName` stores the resource-specific name (e.g., D1's `database_name`) needed by CLI commands. Without this, the `BindingName` → CLI argument mapping breaks for D1.
+
+70. **Synchronous local resource discovery on dev session lifecycle**: `syncLocalResources()` re-parses wrangler configs synchronously on dev session start/stop. This is fast (<1ms per config) since it's just TOML/JSON parsing and binding extraction, not I/O. No need for async commands. The method scans all active `devSessions` and calls `m.detail.SetLocalResources()` to update the resource list.
+
+71. **Local data persists after dev server stops**: Wrangler CLI `--local` commands read/write files in `.wrangler/state/` independently of the dev server process. When a dev server fails (non-zero exit), local entries remain visible and queryable because the session stays in `devSessions` with "failed" status. When the dev server exits cleanly (code 0), `cleanupDevSessionByKey` removes the session and `syncLocalResources` removes the local entries.
+
+72. **Export shared formatting functions for cross-layer reuse**: `FormatASCIITable` in `service/d1.go` was initially unexported. The local emulator app-layer code needs to convert `wrangler.LocalD1QueryResult` → `service.D1QueryResult`, which requires the same table formatting. Exporting it avoids code duplication. The pattern: if a function is pure (no state, no side effects) and useful across package boundaries, export it.
+
+73. **Local resources are always interactable regardless of service ReadWrite mode**: The `canInteract` check in the detail model uses `m.activeServiceMode() == ReadWrite || m.isLocalResource`. This means KV (which is ReadWrite remotely) and D1 (also ReadWrite) both work as expected. But even if a service were ReadOnly for remote resources, local entries would still be interactable — the local emulator always supports read/write operations.
+
+74. **`SetManagedResources` sort must exclude local entries**: The managed/unmanaged sort in `SetManagedResources` was sorting the entire `m.resources` slice, which includes local entries prepended by `rebuildCombinedResources`. Local entries have IDs like `local:binding:path` that are never in the `managedIDs` set, so they sort to the "unmanaged" section — breaking the invariant that local entries occupy indices `0..localCount-1`. The fix: sort only `m.resources[localCount:]` (the remote portion). Also sync `remoteResources` with the sorted order so future `rebuildCombinedResources` calls preserve managed-first ordering.
+
+75. **Pointer-receiver mutations + value-receiver Update = state desync trap**: When a pointer-receiver method (like `SetManagedResources`, `SetResources`, `RefreshResources`) mutates `cursor` or reorders `resources` without also updating correlated state (`isLocalResource`, `detailID`, `activeLocalResource`), the next value-receiver `Update()` call sees inconsistent state. The cursor points at one resource but the detail/local flags describe a different one. Any method that changes cursor position or resource ordering must either (a) also update the correlated preview state, or (b) trigger an `autoPreview()` to re-sync.
+
 ## General Design Considerations
 ### Design-Patterns
 1. The Elm Architecture (MVU)

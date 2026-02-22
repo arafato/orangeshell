@@ -408,6 +408,7 @@ ColorBlue      = "#729FCF"  // Info, labels
 | `ctrl+p` | Global | Action palette |
 | `ctrl+n` | Resources tab | New resource creation popup |
 | `ctrl+s` | AI tab | AI settings |
+| `esc` | AI tab (streaming) | Stop/cancel AI response |
 | `t` | Monitoring | Start tail |
 | `a` / `d` | Monitoring tree | Add/remove worker from grid |
 | `c` | Monitoring (dev) | Fire cron trigger |
@@ -442,9 +443,14 @@ Dual-pane: Context (30%) + Chat (70%).
 
 **Context sources**: Log sources from monitoring grid + file sources from project code. Selection persists across updates. `BuildSystemPrompt()` interleaves logs chronologically with `[worker-name]` prefixes. Budget: ~120K chars total, 40K reserved for files.
 
-**Client**: SSE streaming to deployed AI Worker proxy (`orangeshell-ai`). Three Workers AI presets: Fast (Llama 3.1 8B), Balanced (Llama 3.3 70B), Deep (DeepSeek R1 32B). Default `max_tokens`: 4096.
+**Backends**: Three backend types are supported via the `Backend` interface (`StreamResponse`, `Name`, `Close`):
+- **Workers AI** (`workers_ai`): SSE streaming to deployed AI Worker proxy (`orangeshell-ai`). Three presets: Fast (Llama 3.1 8B), Balanced (Llama 3.3 70B), Deep (DeepSeek R1 32B). Default `max_tokens`: 4096.
+- **HTTP/OpenAI** (`http` + `openai` protocol): OpenAI-compatible `/v1/chat/completions` SSE streaming. Works with Ollama, LM Studio, vLLM.
+- **HTTP/OpenCode** (`http` + `opencode` protocol): OpenCode `serve` session-based API. **Chat-only mode** — tool use happens server-side but our client only renders text deltas. The `tools` field on `PromptInput` is `Record<string, boolean>` (not an array), deprecated in favor of session-level permissions; we omit it entirely. Full agent support (permission handling, file diff rendering, tool call visualization) would require rebuilding the OpenCode TUI. `Close()` clears the cached session ID; called on ESC cancel to avoid stale `session.idle` events from previous prompts poisoning new streams. Trade-off: loses multi-turn context after ESC. Future improvement: `POST /session/:id/abort`.
 
-**Provisioning**: Auto-deploys from template at `arafato/orangeshell/templates/ai-worker` via GitHub API. Generates 32-byte base64url secret. Sets `AUTH_SECRET` via `wrangler secret put`.
+**Stream cancellation**: ESC during streaming cancels the context, preserves partial text, increments a generation counter (`aiStreamGen`), and calls `backend.Close()`. Stale messages from cancelled streams are dropped via generation mismatch.
+
+**Provisioning**: Auto-deploys Workers AI proxy from template at `arafato/orangeshell/templates/ai-worker` via GitHub API. Generates 32-byte base64url secret. Sets `AUTH_SECRET` via `wrangler secret put`.
 
 ---
 
@@ -738,6 +744,36 @@ go build -o orangeshell .
 80. **Single fallback token breaks multi-account**: The original `api_token_fallback` was a single string scoped to one account. When switching accounts, the token lacked permissions for the new account, causing 403 on Access/Builds APIs. Fix: replace with `FallbackTokens map[string]string` (`[fallback_tokens]` TOML table) mapping `accountID → token`. Auto-provisioning now runs per-account, and each token is stored separately.
 
 81. **Per-session toast deduplication via map**: The `restrictedToastShown map[string]bool` on the root model tracks which account IDs have shown the "restricted mode" toast during the current session. Without this, switching between two restricted accounts would show the toast on every switch, which is annoying. The map is session-scoped (not persisted) — restarting the app shows the toast once more for each restricted account.
+
+### AI Backend Abstraction
+
+82. **Interface + wrapper is the cleanest refactoring path for client abstractions**: The `Backend` interface (`StreamResponse`, `Name`, `Close`) wraps the existing `WorkersAIClient` with zero behavior change. The `WorkersAIBackend` wrapper bakes in the model ID so the interface doesn't need it per-request. The app layer's streaming bridge (`aiStreamBatchMsg` / `aiStreamContinueMsg` / `AIChatStreamDoneMsg`) works unchanged — all backends produce the same `<-chan string` protocol. The single point of change was `startAIChatStream()` in `app_ai.go`.
+
+83. **Backend lifecycle should be managed by the model that owns the settings**: `RebuildBackend()` on the AI model is called from 4 places: `LoadConfig()`, `AIConfigSaveMsg` handler, `aiProvisionDoneMsg` handler, and `aiDeprovisionDoneMsg` handler. Each corresponds to a settings change event. The AI model owns both the settings and the backend instance, so it decides which `Backend` implementation to create based on `backendType`.
+
+84. **OpenAI-compatible SSE protocol is well-standardized**: The `/v1/chat/completions` streaming format (`data: {"choices":[{"delta":{"content":"..."}}]}` followed by `data: [DONE]`) works identically across Ollama, LM Studio, vLLM, and other OpenAI-compatible servers. The `go-sse` library handles the SSE parsing, and JSON chunk parsing is straightforward.
+
+85. **OpenCode serve uses session-based messaging with global SSE**: Unlike OpenAI where each request has its own SSE stream, OpenCode uses a single global `/event` SSE stream for all events, with `prompt_async` sending fire-and-forget requests. The client must filter events by `sessionID` and `role == "assistant"`. Events contain the full accumulated text, not deltas, so the client must track `lastTextLen` and compute deltas itself. Session IDs are reused across messages for multi-turn conversations.
+
+86. **Dynamic settings sections via `visibleSections()` pattern**: When the settings UI has conditionally visible sections (Workers AI shows Model/Deploy, HTTP shows Endpoint/Protocol/Model/APIKey), a `visibleSections()` method returns the ordered list of visible sections based on current state. Navigation (`nextSection`/`prevSection`) iterates this list rather than incrementing/decrementing an enum. This avoids cursor jumping to invisible sections.
+
+87. **Text input fields in settings require their own key handling branch**: When a settings section is a text input (`isTextInputSection()`), the Update function must handle character insertion, cursor movement, backspace, paste, etc. before falling through to the navigation keys. The `j`/`k` keys still navigate between sections but also emit a save command. This two-tier dispatch (text input first, then navigation) reuses the same cursor/rune logic as the chat input.
+
+### Monitoring Log Export
+
+88. **Log exporter as a standalone struct with mutex protection**: `LogExporter` in `monitoring/export.go` is a goroutine-safe struct with `sync.Mutex` protecting all file handles. The app layer calls `WriteLines()` from multiple message handlers (parallel tail, dev output, single tail, system messages) which may interleave. The mutex ensures atomic writes. File handles are opened lazily per-worker on first write.
+
+89. **Combined + per-worker files serve different consumers**: External tools like `lnav` benefit from a combined interleaved file (`export-TIMESTAMP-combined.log`), while per-worker files (`export-TIMESTAMP-workername.log`) are useful for targeted analysis or piping to AI agents. The combined file includes `[worker-name]` prefixes; per-worker files omit them since the context is implicit.
+
+90. **Four log ingestion points must all forward to the exporter**: Tail logs enter the monitoring grid via: (1) `parallelTailLogMsg` (API WebSocket tails), (2) dev output (wrangler dev process pipe), (3) `detail.TailLogMsg` (single worker tail), (4) system messages (cron trigger results). Missing any point causes incomplete exports. Each point already calls `GridAppendLines()` — adding `logExporter.WriteLines()` alongside is the minimal change.
+
+91. **Ctrl+P action popup is tab-extensible**: Adding actions to a new tab requires only: (a) a `buildXxxActionsPopup()` method, (b) a new case in the `ctrl+p` key handler dispatch, (c) new action string handlers in `handleActionSelect()`. The monitoring tab is the 4th tab to get Ctrl+P support (after Operations, Resources detail, and monorepo project list).
+
+92. **OpenCode `serve` uses a proprietary protocol, not OpenAI-compatible**: OpenCode's HTTP server exposes a custom REST + SSE API with stateful sessions (`POST /session`), async prompts (`POST /session/:id/prompt_async`), and a global SSE event stream (`GET /event`) shared across all sessions. Text content streams via `message.part.delta` events with `{"field":"text","delta":"..."}` — these are true deltas, not accumulated text. Completion is signalled by `session.idle` or `session.status` with `type: "idle"`. This is fundamentally different from OpenAI's stateless per-request SSE format. The two protocols cannot be unified — both must be implemented as separate code paths.
+
+93. **Stream cancellation requires context + generation counter at every continuation point**: To cancel an AI stream via ESC, a cancellable `context.Context` is passed to `Backend.StreamResponse()`. The cancel func is stored on the app model (pointer-receiver mutator). Each stream gets a monotonically increasing `aiStreamGen` counter. On ESC: (1) call cancel func, (2) send `AIChatStreamDoneMsg{}` directly to save partial text, (3) nil out the cancel func. The outstanding `readNextAIChunk` Cmd will eventually return stale `aiStreamContinueMsg` or `aiStreamDoneMsg` — these carry the old generation and are dropped by checking `msg.gen != m.aiStreamGen`. The `IsStreaming()` check alone is insufficient because a new stream may already be active when the stale message arrives, and the stale `AIChatStreamDoneMsg` would kill the new stream by setting `streaming = false`. The generation counter cleanly distinguishes current from stale messages without requiring the AI tab to track stream identity.
+
+94. **OpenCode PromptInput.tools is Record<string, boolean>, not an array**: The `tools` field on OpenCode's `prompt_async` body is validated by Zod as `z.record(z.string(), z.boolean()).optional()`. Sending `"tools":[]` (an array) causes a 400 validation error. The field is also deprecated in favor of session-level permissions (`POST /session/:id` with `permission` field). The safest approach for chat-only integration is to omit the `tools` field entirely — tool use still happens server-side, but our client only sees text deltas from `message.part.delta` events. Tool calls that require permission approval will eventually time out or complete autonomously depending on the OpenCode agent's permission configuration.
 
 ## General Design Considerations
 ### Design-Patterns

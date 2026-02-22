@@ -9,6 +9,7 @@ import (
 
 	"github.com/oarafat/orangeshell/internal/config"
 	uiai "github.com/oarafat/orangeshell/internal/ui/ai"
+	"github.com/oarafat/orangeshell/internal/ui/tabbar"
 )
 
 // --- AI provisioning message types ---
@@ -209,12 +210,16 @@ func (m Model) gatherAIFileContext() []uiai.FileContextData {
 	return result
 }
 
-// startAIChatStream starts a streaming AI chat request using the Workers AI client.
+// startAIChatStream starts a streaming AI chat request using the active backend.
 // It reads the streaming response channel and converts chunks into Bubble Tea messages.
-func (m Model) startAIChatStream(userMessage string) tea.Cmd {
-	workerURL := m.aiTab.WorkerURL()
-	secret := m.aiTab.Secret()
-	preset := m.aiTab.ModelPreset()
+// Uses a pointer receiver because it stores the cancel func for ESC interruption.
+func (m *Model) startAIChatStream(userMessage string) tea.Cmd {
+	backend := m.aiTab.Backend()
+	if backend == nil {
+		return func() tea.Msg {
+			return uiai.AIChatStreamDoneMsg{Err: fmt.Errorf("no AI backend configured")}
+		}
+	}
 
 	// Build the system prompt with context from selected monitoring panes and source files
 	contextData := m.gatherAIContext()
@@ -227,27 +232,26 @@ func (m Model) startAIChatStream(userMessage string) tea.Cmd {
 	}
 	messages = append(messages, m.aiTab.ConversationMessages()...)
 
-	modelID := uiai.ModelID(preset)
+	// Create a cancellable context so ESC can abort the stream.
+	ctx, cancel := context.WithCancel(context.Background())
+	m.aiStreamCancel = cancel
+	m.aiStreamGen++
+	gen := m.aiStreamGen
 
 	return func() tea.Msg {
-		client := &uiai.WorkersAIClient{
-			WorkerURL: workerURL,
-			Secret:    secret,
-		}
-
-		ctx := context.Background()
-		ch := client.StreamResponse(ctx, modelID, messages)
+		ch := backend.StreamResponse(ctx, messages)
 
 		// Read the first chunk to start streaming
 		chunk, ok := <-ch
 		if !ok {
-			return uiai.AIChatStreamDoneMsg{}
+			return aiStreamDoneMsg{gen: gen}
 		}
 
 		// Check for error messages from the client (same check as readNextAIChunk)
 		if len(chunk) > 6 && chunk[:6] == "error:" {
-			return uiai.AIChatStreamDoneMsg{
-				Err: fmt.Errorf("%s", chunk[7:]),
+			return aiStreamDoneMsg{
+				inner: uiai.AIChatStreamDoneMsg{Err: fmt.Errorf("%s", chunk[7:])},
+				gen:   gen,
 			}
 		}
 
@@ -255,6 +259,7 @@ func (m Model) startAIChatStream(userMessage string) tea.Cmd {
 		return aiStreamBatchMsg{
 			firstChunk: chunk,
 			ch:         ch,
+			gen:        gen,
 		}
 	}
 }
@@ -265,24 +270,34 @@ func (m Model) startAIChatStream(userMessage string) tea.Cmd {
 type aiStreamBatchMsg struct {
 	firstChunk string
 	ch         <-chan string
+	gen        uint64 // stream generation — stale messages are dropped
+}
+
+// aiStreamDoneMsg is the internal (app-layer) wrapper around AIChatStreamDoneMsg
+// that carries the stream generation for stale-message detection.
+type aiStreamDoneMsg struct {
+	inner uiai.AIChatStreamDoneMsg
+	gen   uint64
 }
 
 // readNextAIChunk reads the next chunk from the streaming channel.
-func readNextAIChunk(ch <-chan string) tea.Cmd {
+func readNextAIChunk(ch <-chan string, gen uint64) tea.Cmd {
 	return func() tea.Msg {
 		chunk, ok := <-ch
 		if !ok {
-			return uiai.AIChatStreamDoneMsg{}
+			return aiStreamDoneMsg{gen: gen}
 		}
 		// Check for error messages from the client
 		if len(chunk) > 6 && chunk[:6] == "error:" {
-			return uiai.AIChatStreamDoneMsg{
-				Err: fmt.Errorf("%s", chunk[7:]),
+			return aiStreamDoneMsg{
+				inner: uiai.AIChatStreamDoneMsg{Err: fmt.Errorf("%s", chunk[7:])},
+				gen:   gen,
 			}
 		}
 		return aiStreamContinueMsg{
 			chunk: chunk,
 			ch:    ch,
+			gen:   gen,
 		}
 	}
 }
@@ -291,16 +306,44 @@ func readNextAIChunk(ch <-chan string) tea.Cmd {
 type aiStreamContinueMsg struct {
 	chunk string
 	ch    <-chan string
+	gen   uint64 // stream generation — stale messages are dropped
 }
 
 // handleAIMsg handles all AI-related messages.
 // Returns (model, cmd, handled).
 func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		// ESC while streaming on the AI tab → cancel the active stream
+		if msg.String() == "esc" && m.activeTab == tabbar.TabAI && m.aiTab.IsStreaming() {
+			if m.aiStreamCancel != nil {
+				m.aiStreamCancel()
+				m.aiStreamCancel = nil
+			}
+			// Close the backend to clear cached session state (e.g., OpenCode
+			// session ID). Without this, the next prompt's SSE listener would
+			// see stale session.idle events from the cancelled prompt and
+			// terminate prematurely. For stateless backends (Workers AI,
+			// OpenAI-compatible) Close() is a no-op.
+			if b := m.aiTab.Backend(); b != nil {
+				_ = b.Close()
+			}
+			// Tell the chat model the stream was cancelled (not an error)
+			m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamDoneMsg{})
+			return *m, nil, true
+		}
+		return *m, nil, false
+
 	case uiai.AIConfigSaveMsg:
 		m.cfg.AIProvider = msg.Provider
 		m.cfg.AIModelPreset = msg.ModelPreset
+		m.cfg.AIBackendType = msg.BackendType
+		m.cfg.AIHTTPEndpoint = msg.HTTPEndpoint
+		m.cfg.AIHTTPProtocol = msg.HTTPProtocol
+		m.cfg.AIHTTPModel = msg.HTTPModel
+		m.cfg.AIHTTPAPIKey = msg.HTTPAPIKey
 		_ = m.cfg.Save()
+		m.aiTab.RebuildBackend()
 		return *m, nil, true
 
 	case uiai.AIProvisionRequestMsg:
@@ -328,6 +371,7 @@ func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			m.cfg.AIWorkerSecret = msg.Secret
 			m.cfg.AIProvider = config.AIProviderWorkersAI
 			_ = m.cfg.Save()
+			m.aiTab.RebuildBackend()
 			m.setToast("AI Worker deployed successfully")
 		}
 		return *m, nil, true
@@ -342,6 +386,7 @@ func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			m.cfg.AIWorkerURL = ""
 			m.cfg.AIWorkerSecret = ""
 			_ = m.cfg.Save()
+			m.aiTab.RebuildBackend()
 			m.setToast("AI Worker removed")
 		}
 		return *m, nil, true
@@ -354,14 +399,32 @@ func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, m.startAIChatStream(msg.UserMessage), true
 
 	case aiStreamBatchMsg:
-		// First chunk arrived — deliver it and start reading more
+		// First chunk arrived — deliver it and start reading more.
+		// Drop stale messages from a cancelled/previous stream.
+		if msg.gen != m.aiStreamGen || !m.aiTab.IsStreaming() {
+			return *m, nil, true
+		}
 		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.firstChunk})
-		return *m, readNextAIChunk(msg.ch), true
+		return *m, readNextAIChunk(msg.ch, msg.gen), true
 
 	case aiStreamContinueMsg:
-		// Subsequent chunk — deliver and continue reading
+		// Subsequent chunk — deliver and continue reading.
+		// Drop stale messages from a cancelled/previous stream.
+		if msg.gen != m.aiStreamGen || !m.aiTab.IsStreaming() {
+			return *m, nil, true
+		}
 		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.chunk})
-		return *m, readNextAIChunk(msg.ch), true
+		return *m, readNextAIChunk(msg.ch, msg.gen), true
+
+	case aiStreamDoneMsg:
+		// Stream completed (naturally or via cancellation).
+		// Drop stale done messages from a previous/cancelled stream.
+		if msg.gen != m.aiStreamGen {
+			return *m, nil, true
+		}
+		m.aiStreamCancel = nil
+		m.aiTab, _ = m.aiTab.Update(msg.inner)
+		return *m, nil, true
 
 	case uiai.AIChatNewConversationMsg:
 		m.aiTab.NewConversation()

@@ -53,6 +53,11 @@ type Model struct {
 
 	// workerSecret is kept in memory (loaded from config) for API calls.
 	workerSecret string
+
+	// backend is the active AI backend used for streaming responses.
+	// Created lazily when the first chat message is sent, or eagerly
+	// when settings change. Nil means no backend is configured yet.
+	backend Backend
 }
 
 // New creates a new AI tab model.
@@ -72,10 +77,12 @@ func (m *Model) SetSize(w, h int) {
 	m.height = h
 }
 
-// LoadConfig populates the AI tab state from the persistent config.
+// LoadConfig populates the AI tab state from the persistent config
+// and rebuilds the active backend from the loaded settings.
 func (m *Model) LoadConfig(cfg *config.Config) {
 	m.settings.LoadFromConfig(cfg)
 	m.workerSecret = cfg.AIWorkerSecret
+	m.RebuildBackend()
 }
 
 // SetWorkerURL updates the deployed worker URL (called after provisioning).
@@ -103,9 +110,16 @@ func (m *Model) SetDeployProgress(status string) {
 	m.settings.deployProgress = status
 }
 
-// IsProvisioned returns true if the AI Worker has been deployed.
+// IsProvisioned returns true if the AI backend is ready to use.
+// For Workers AI, this means the proxy Worker is deployed.
+// For HTTP backends, this means an endpoint URL is configured.
 func (m Model) IsProvisioned() bool {
-	return m.settings.workerURL != ""
+	switch m.settings.backendType {
+	case config.AIBackendHTTP:
+		return m.settings.httpEndpoint != ""
+	default:
+		return m.settings.workerURL != ""
+	}
 }
 
 // WorkerURL returns the deployed AI Worker URL.
@@ -123,6 +137,66 @@ func (m Model) ModelPreset() config.AIModelPreset {
 	return m.settings.modelPreset
 }
 
+// Backend returns the active AI backend, or nil if none is configured.
+func (m Model) Backend() Backend {
+	return m.backend
+}
+
+// BackendType returns the selected backend type.
+func (m Model) BackendType() config.AIBackendType {
+	return m.settings.backendType
+}
+
+// SetBackend replaces the active backend, closing the previous one if set.
+func (m *Model) SetBackend(b Backend) {
+	if m.backend != nil {
+		_ = m.backend.Close()
+	}
+	m.backend = b
+}
+
+// RebuildBackend creates the appropriate backend from the current settings.
+// Called after provisioning, config load, or settings changes.
+func (m *Model) RebuildBackend() {
+	switch m.settings.backendType {
+	case config.AIBackendHTTP:
+		if m.settings.httpEndpoint == "" {
+			m.SetBackend(nil)
+			return
+		}
+		m.SetBackend(NewHTTPBackend(
+			m.settings.httpEndpoint,
+			m.settings.httpModel,
+			HTTPProtocol(m.settings.httpProtocol),
+			m.settings.httpAPIKey,
+		))
+	default: // Workers AI
+		if m.settings.workerURL == "" {
+			m.SetBackend(nil)
+			return
+		}
+		m.SetBackend(NewWorkersAIBackend(
+			m.settings.workerURL,
+			m.workerSecret,
+			m.settings.modelPreset,
+		))
+	}
+}
+
+// backendDisplayName returns a short name for the active backend,
+// used in the chat panel's empty state.
+func (m Model) backendDisplayName() string {
+	if m.backend != nil {
+		return m.backend.Name()
+	}
+	switch m.settings.backendType {
+	case config.AIBackendHTTP:
+		return "HTTP Endpoint"
+	default:
+		return ModelDisplayName(m.settings.modelPreset)
+	}
+}
+
 // Focus returns the currently focused pane.
 func (m Model) Focus() FocusPane {
 	return m.focus
@@ -133,10 +207,14 @@ func (m Model) CurrentMode() Mode {
 	return m.mode
 }
 
-// IsTextInputActive returns true when the chat input field has text or is
-// actively streaming, so number keys should be typed rather than switching tabs.
-// When the input is empty and not streaming, number keys switch tabs as normal.
+// IsTextInputActive returns true when number keys should be typed rather than
+// switching tabs. This is true when:
+// - Settings mode is active (all keys are consumed by the settings UI)
+// - Chat input has text or is streaming
 func (m Model) IsTextInputActive() bool {
+	if m.mode == ModeSettings {
+		return true
+	}
 	if m.mode != ModeChat || m.focus != FocusChat {
 		return false
 	}
@@ -271,7 +349,7 @@ func (m Model) viewChatMode() string {
 	}
 
 	leftContent := m.context.view(leftWidth, contentHeight, m.focus == FocusContext)
-	rightContent := m.chat.view(rightWidth, contentHeight, m.focus == FocusChat, m.IsProvisioned(), m.settings.modelPreset)
+	rightContent := m.chat.view(rightWidth, contentHeight, m.focus == FocusChat, m.IsProvisioned(), m.backendDisplayName())
 
 	// Vertical separator — exactly contentHeight lines
 	sepStyle := lipgloss.NewStyle().Foreground(theme.ColorDarkGray)
@@ -312,6 +390,13 @@ func (m Model) HelpEntries() []HelpEntry {
 	default:
 		entries := []HelpEntry{
 			{"tab", "switch pane"},
+		}
+		if m.chat.streaming {
+			entries = append(entries,
+				HelpEntry{"esc", "stop"},
+				HelpEntry{"pgup/dn", "scroll"},
+			)
+			return entries
 		}
 		if m.focus == FocusContext {
 			entries = append(entries,

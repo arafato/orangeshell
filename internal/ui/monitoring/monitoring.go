@@ -33,6 +33,9 @@ type Model struct {
 	// Dimensions
 	width  int
 	height int
+
+	// Export state (set by app layer, rendered in view)
+	exportActive bool
 }
 
 // New creates an empty monitoring model.
@@ -82,6 +85,16 @@ func (m Model) Focus() FocusPane {
 // SetFocusLeft switches keyboard focus to the left (worker tree) pane.
 func (m *Model) SetFocusLeft() {
 	m.focusPane = FocusLeft
+}
+
+// SetExportActive sets whether the log exporter is running (for view rendering).
+func (m *Model) SetExportActive(active bool) {
+	m.exportActive = active
+}
+
+// ExportActive returns whether the log exporter is running.
+func (m Model) ExportActive() bool {
+	return m.exportActive
 }
 
 // --- Grid API (called by app layer to route tail data) ---

@@ -256,6 +256,15 @@ type Model struct {
 	showHelpPopup bool
 	helpPopup     helppopup.Model
 
+	// Log exporter for monitoring tab
+	logExporter *monitoring.LogExporter
+
+	// AI stream cancellation — set when streaming starts, called on ESC.
+	// aiStreamGen is incremented each time a new stream starts; stale messages
+	// from cancelled streams carry an old generation and are silently dropped.
+	aiStreamCancel context.CancelFunc
+	aiStreamGen    uint64
+
 	// Toast notification
 	toastMsg    string
 	toastExpiry time.Time
@@ -301,6 +310,7 @@ func NewModel(cfg *config.Config, scanDir string) Model {
 		devRunners:           make(map[string]*devRunner),
 		cmdRunners:           make(map[string]*cmdRunner),
 		restrictedToastShown: make(map[string]bool),
+		logExporter:          monitoring.NewLogExporter(),
 	}
 
 	return m
@@ -735,12 +745,12 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "q":
-			// AI tab: only quit from settings or context pane (not chat — q is a typeable char)
+			// AI tab: only quit from context pane (not chat or settings text inputs — q is typeable)
 			if m.activeTab == tabbar.TabAI {
-				if m.aiTab.CurrentMode() == uiai.ModeSettings || m.aiTab.Focus() == uiai.FocusContext {
+				if m.aiTab.Focus() == uiai.FocusContext && m.aiTab.CurrentMode() != uiai.ModeSettings {
 					return m, tea.Quit
 				}
-				break // fall through to AI tab Update to type 'q' in chat
+				break // fall through to AI tab Update to type 'q' in chat/settings
 			}
 			// Monitoring tab: quit only when idle (no active tail).
 			if m.activeTab == tabbar.TabMonitoring {
@@ -821,6 +831,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.actionsPopup = m.buildWranglerActionsPopup()
 				}
+				return m, nil
+			}
+			if m.activeTab == tabbar.TabMonitoring {
+				m.showActions = true
+				m.actionsPopup = m.buildMonitoringActionsPopup()
 				return m, nil
 			}
 			if m.viewState == ViewServiceDetail && m.detail.InDetailView() {

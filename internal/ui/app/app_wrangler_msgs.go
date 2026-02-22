@@ -169,6 +169,7 @@ func (m *Model) handleWranglerMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return *m, nil, true
 		}
 		m.monitoring.ParallelTailAppendLines(msg.ScriptName, msg.Lines)
+		m.logExporter.WriteLines(msg.ScriptName, msg.Lines)
 		// Find the session to continue polling
 		for _, s := range m.parallelTailSessions {
 			if s.ScriptName == msg.ScriptName {

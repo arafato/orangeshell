@@ -81,6 +81,10 @@ func (m Model) viewWorkerTree(width, height int) string {
 	// Title
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorWhite)
 	title := " " + titleStyle.Render("Workers")
+	if m.exportActive {
+		exportBadge := lipgloss.NewStyle().Foreground(theme.ColorGreen).Bold(true).Render(" [export]")
+		title += exportBadge
+	}
 
 	var lines []string
 	lines = append(lines, title)

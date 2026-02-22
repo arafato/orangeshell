@@ -28,6 +28,23 @@ const (
 	// AIProviderAnthropic AIProvider = "anthropic" // future
 )
 
+// AIBackendType identifies which backend implementation to use for AI chat.
+type AIBackendType string
+
+const (
+	AIBackendWorkersAI AIBackendType = "workers_ai" // Default: deployed Workers AI proxy
+	AIBackendHTTP      AIBackendType = "http"       // OpenAI-compatible or OpenCode serve endpoint
+	// AIBackendLocal  AIBackendType = "local"       // Future: stdin/stdout local agent
+)
+
+// AIHTTPProtocol identifies the wire protocol for the HTTP backend.
+type AIHTTPProtocol string
+
+const (
+	AIHTTPProtocolOpenAI   AIHTTPProtocol = "openai"   // OpenAI-compatible /v1/chat/completions
+	AIHTTPProtocolOpenCode AIHTTPProtocol = "opencode" // OpenCode serve session API
+)
+
 // AIModelPreset identifies a Workers AI model tier.
 type AIModelPreset string
 
@@ -61,6 +78,14 @@ type Config struct {
 	AIModelPreset  AIModelPreset `toml:"ai_model_preset,omitempty"`
 	AIWorkerURL    string        `toml:"ai_worker_url,omitempty"`
 	AIWorkerSecret string        `toml:"ai_worker_secret,omitempty"`
+
+	// AI backend abstraction — selects which Backend implementation to use.
+	// Default is "workers_ai" for backward compatibility.
+	AIBackendType  AIBackendType  `toml:"ai_backend_type,omitempty"`
+	AIHTTPEndpoint string         `toml:"ai_http_endpoint,omitempty"` // e.g. "http://localhost:4096"
+	AIHTTPProtocol AIHTTPProtocol `toml:"ai_http_protocol,omitempty"` // "openai" or "opencode"
+	AIHTTPModel    string         `toml:"ai_http_model,omitempty"`    // model ID for HTTP backend
+	AIHTTPAPIKey   string         `toml:"ai_http_api_key,omitempty"`  // optional API key for HTTP backend
 
 	// Tracks which fields were set from environment variables (never serialized).
 	// Save() uses these to strip env-sourced values so they don't leak to disk.

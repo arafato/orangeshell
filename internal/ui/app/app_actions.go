@@ -344,6 +344,32 @@ func (m Model) appendRestrictedAction(items []actions.Item) []actions.Item {
 	return items
 }
 
+// buildMonitoringActionsPopup creates the action popup for the Monitoring tab.
+func (m Model) buildMonitoringActionsPopup() actions.Model {
+	title := "Monitoring"
+	var items []actions.Item
+
+	// Log export section
+	if m.logExporter.IsActive() {
+		items = append(items, actions.Item{
+			Label:       "Stop Log Export",
+			Description: "Stop writing tail logs to files",
+			Section:     "Export",
+			Action:      "log_export_stop",
+		})
+	} else {
+		items = append(items, actions.Item{
+			Label:       "Start Log Export",
+			Description: "Write all tail logs to ~/.orangeshell/logs/",
+			Section:     "Export",
+			Action:      "log_export_start",
+		})
+	}
+
+	items = m.appendRestrictedAction(items)
+	return actions.New(title, items)
+}
+
 // --- Action popup helpers ---
 
 // updateActions forwards messages to the action popup when it's active.
@@ -437,6 +463,23 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	// Navigation to a bound resource
 	if item.NavService != "" && item.NavResource != "" {
 		return m.navigateTo(item.NavService, item.NavResource)
+	}
+
+	// Log export actions
+	if item.Action == "log_export_start" {
+		if err := m.logExporter.Start(); err != nil {
+			m.setToast(fmt.Sprintf("Export error: %v", err))
+		} else {
+			m.monitoring.SetExportActive(true)
+			m.setToast("Log export started — writing to ~/.orangeshell/logs/")
+		}
+		return nil
+	}
+	if item.Action == "log_export_stop" {
+		m.logExporter.Stop()
+		m.monitoring.SetExportActive(false)
+		m.setToast("Log export stopped")
+		return nil
 	}
 
 	// Help: show restricted mode instructions

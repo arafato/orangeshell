@@ -97,11 +97,13 @@ func (m *Model) handleMonitoringMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		ds := m.findDevSession(msg.ScriptName)
 		if ds == nil || ds.Port == "" {
 			// No port yet — dev server hasn't announced it
-			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
+			warnLines := []svc.TailLine{{
 				Timestamp: time.Now(),
 				Level:     "warn",
 				Text:      "[orangeshell] Cannot trigger cron: dev server port not detected yet",
-			}})
+			}}
+			m.monitoring.GridAppendLines(msg.ScriptName, warnLines)
+			m.logExporter.WriteLines(msg.ScriptName, warnLines)
 			return *m, nil, true
 		}
 		// Fire the cron trigger request in the background
@@ -113,17 +115,21 @@ func (m *Model) handleMonitoringMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 
 	case devCronTriggerDoneMsg:
 		if msg.Err != nil {
-			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
+			errLines := []svc.TailLine{{
 				Timestamp: time.Now(),
 				Level:     "error",
 				Text:      fmt.Sprintf("[orangeshell] Cron trigger failed: %v", msg.Err),
-			}})
+			}}
+			m.monitoring.GridAppendLines(msg.ScriptName, errLines)
+			m.logExporter.WriteLines(msg.ScriptName, errLines)
 		} else {
-			m.monitoring.GridAppendLines(msg.ScriptName, []svc.TailLine{{
+			okLines := []svc.TailLine{{
 				Timestamp: time.Now(),
 				Level:     "system",
 				Text:      "[orangeshell] Cron trigger fired (scheduled handler invoked)",
-			}})
+			}}
+			m.monitoring.GridAppendLines(msg.ScriptName, okLines)
+			m.logExporter.WriteLines(msg.ScriptName, okLines)
 		}
 		return *m, nil, true
 	}

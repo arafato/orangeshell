@@ -226,6 +226,7 @@ func (m *Model) handleDevOutput(key string, line wcfg.OutputLine) {
 	}
 	tailLine := parseDevOutputLine(line)
 	m.monitoring.GridAppendLines(ds.ScriptName, []svc.TailLine{tailLine})
+	m.logExporter.WriteLines(ds.ScriptName, []svc.TailLine{tailLine})
 
 	// Check for port announcement
 	if port := extractDevPort(line.Text); port != "" && dr.port == "" {
@@ -263,6 +264,7 @@ func (m *Model) handleDevDone(key string, result wcfg.RunResult) tea.Cmd {
 			if ds != nil {
 				tailLine := parseDevOutputLine(line)
 				m.monitoring.GridAppendLines(ds.ScriptName, []svc.TailLine{tailLine})
+				m.logExporter.WriteLines(ds.ScriptName, []svc.TailLine{tailLine})
 			}
 		}
 	}

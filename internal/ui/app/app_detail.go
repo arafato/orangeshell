@@ -348,6 +348,9 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return *m, nil, true
 		}
 		m.monitoring.AppendTailLines(msg.Lines)
+		if m.monitoring.ScriptName() != "" {
+			m.logExporter.WriteLines(m.monitoring.ScriptName(), msg.Lines)
+		}
 		// Continue polling for more lines
 		return *m, m.waitForTailLines(), true
 

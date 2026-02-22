@@ -10,7 +10,6 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/oarafat/orangeshell/internal/config"
 	"github.com/oarafat/orangeshell/internal/ui/theme"
 )
 
@@ -206,7 +205,7 @@ func (c chatModel) conversationMessages() []ChatMessage {
 
 // --- View ---
 
-func (c chatModel) view(w, h int, focused bool, provisioned bool, preset config.AIModelPreset) string {
+func (c chatModel) view(w, h int, focused bool, provisioned bool, backendName string) string {
 	var borderStyle lipgloss.Style
 	if focused {
 		borderStyle = theme.ActiveBorderStyle.
@@ -222,7 +221,7 @@ func (c chatModel) view(w, h int, focused bool, provisioned bool, preset config.
 	innerH := h - 4
 
 	if !provisioned {
-		return borderStyle.Render(c.viewNotProvisioned(innerW, innerH))
+		return borderStyle.Render(c.viewNotProvisioned(innerW, innerH, backendName))
 	}
 
 	// Split inner area: messages area + input line
@@ -234,7 +233,7 @@ func (c chatModel) view(w, h int, focused bool, provisioned bool, preset config.
 	}
 
 	// Render messages
-	messagesView := c.renderMessages(innerW, messagesHeight, preset)
+	messagesView := c.renderMessages(innerW, messagesHeight, backendName)
 
 	// Separator
 	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).
@@ -248,10 +247,10 @@ func (c chatModel) view(w, h int, focused bool, provisioned bool, preset config.
 	)
 }
 
-func (c chatModel) viewNotProvisioned(w, h int) string {
+func (c chatModel) viewNotProvisioned(w, h int, backendName string) string {
 	title := theme.TitleStyle.Render("AI Log Analysis")
-	hint := theme.DimStyle.Render("Workers AI")
-	setupLine := theme.DimStyle.Render("Press 's' to open settings and deploy the AI Worker.")
+	hint := theme.DimStyle.Render(backendName)
+	setupLine := theme.DimStyle.Render("Press ctrl+s to open settings and configure an AI backend.")
 
 	msg := lipgloss.JoinVertical(lipgloss.Center,
 		title, "", hint, "", setupLine,
@@ -259,12 +258,12 @@ func (c chatModel) viewNotProvisioned(w, h int) string {
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, msg)
 }
 
-func (c chatModel) renderMessages(w, h int, preset config.AIModelPreset) string {
+func (c chatModel) renderMessages(w, h int, backendName string) string {
 	if len(c.messages) == 0 && c.streamBuf == "" {
 		// Empty state
 		welcome := lipgloss.JoinVertical(lipgloss.Center,
 			theme.TitleStyle.Render("AI Log Analysis"),
-			theme.DimStyle.Render(ModelDisplayName(preset)),
+			theme.DimStyle.Render(backendName),
 			"",
 			theme.DimStyle.Render("Select context sources on the left, then"),
 			theme.DimStyle.Render("type a message below to start analyzing logs."),
@@ -374,7 +373,7 @@ func (c chatModel) renderInput(w int, focused bool) string {
 		Render("> ")
 
 	if c.streaming {
-		return prompt + theme.DimStyle.Render("(streaming response...)")
+		return prompt + theme.DimStyle.Render("streaming response... (esc to stop)")
 	}
 
 	inputStyle := lipgloss.NewStyle().Foreground(theme.ColorWhite)

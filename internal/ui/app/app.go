@@ -262,6 +262,10 @@ type Model struct {
 	// program holds the *tea.Program reference for background goroutine → UI
 	// communication (e.g., AI provisioning progress callbacks).
 	program *tea.Program
+
+	// restrictedToastShown tracks which account IDs have already shown the
+	// "restricted mode" toast, so it's only shown once per account per session.
+	restrictedToastShown map[string]bool
 }
 
 // NewModel creates the root model. If config is already set up, skips to dashboard.
@@ -274,23 +278,24 @@ func NewModel(cfg *config.Config, scanDir string) Model {
 	}
 
 	m := Model{
-		setup:      setup.New(cfg),
-		header:     header.New(cfg.AuthMethod),
-		detail:     detail.New(),
-		search:     search.New(),
-		wrangler:   uiwrangler.New(),
-		monitoring: monitoring.New(),
-		configView: uiconfig.New(),
-		aiTab:      uiai.New(),
-		phase:      phase,
-		viewState:  ViewWrangler, // wrangler is the home screen
-		activeTab:  tabbar.TabOperations,
-		hoverTab:   -1, // no tab hovered
-		cfg:        cfg,
-		registry:   svc.NewRegistry(),
-		scanDir:    scanDir,
-		devRunners: make(map[string]*devRunner),
-		cmdRunners: make(map[string]*cmdRunner),
+		setup:                setup.New(cfg),
+		header:               header.New(cfg.AuthMethod),
+		detail:               detail.New(),
+		search:               search.New(),
+		wrangler:             uiwrangler.New(),
+		monitoring:           monitoring.New(),
+		configView:           uiconfig.New(),
+		aiTab:                uiai.New(),
+		phase:                phase,
+		viewState:            ViewWrangler, // wrangler is the home screen
+		activeTab:            tabbar.TabOperations,
+		hoverTab:             -1, // no tab hovered
+		cfg:                  cfg,
+		registry:             svc.NewRegistry(),
+		scanDir:              scanDir,
+		devRunners:           make(map[string]*devRunner),
+		cmdRunners:           make(map[string]*cmdRunner),
+		restrictedToastShown: make(map[string]bool),
 	}
 
 	return m
@@ -322,9 +327,9 @@ func (m Model) Init() tea.Cmd {
 func (m *Model) getBuildsClient() *api.BuildsClient {
 	accountID := m.registry.ActiveAccountID()
 
-	// 1. Prefer dedicated fallback token from config
-	if m.cfg.APITokenFallback != "" {
-		return api.NewBuildsClient(accountID, "", "", m.cfg.APITokenFallback)
+	// 1. Prefer dedicated per-account fallback token from config
+	if ft := m.cfg.FallbackTokenFor(accountID); ft != "" {
+		return api.NewBuildsClient(accountID, "", "", ft)
 	}
 
 	// 2. Use primary credentials based on auth method.
@@ -445,6 +450,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewState = ViewWrangler
 
 		var cmds []tea.Cmd
+
+		// Show restricted-mode toast once per account
+		if m.cfg.AuthMethod == config.AuthMethodOAuth && !m.cfg.HasFallbackAuth() {
+			if !m.restrictedToastShown[m.cfg.AccountID] {
+				m.restrictedToastShown[m.cfg.AccountID] = true
+				m.setToast("Restricted mode — some features need a fallback token")
+				cmds = append(cmds, toastTick())
+			}
+		}
 
 		// Auto-provision a scoped fallback token if OAuth + env vars available
 		if m.needsFallbackTokenProvisioning() {

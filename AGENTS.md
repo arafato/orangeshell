@@ -274,7 +274,7 @@ type Config struct {
     Email, APIKey, APIToken string
     OAuthAccessToken, OAuthRefreshToken string
     OAuthExpiresAt time.Time
-    APITokenFallback string      // Scoped token for restricted APIs (Access, Builds)
+    FallbackTokens map[string]string // Per-account scoped tokens for restricted APIs (Access, Builds)
     AIProvider     AIProvider    // "workers_ai"
     AIModelPreset  AIModelPreset // "fast" | "balanced" | "deep"
     AIWorkerURL    string
@@ -732,6 +732,12 @@ go build -o orangeshell .
 78. **Child process env var inheritance is dangerous**: `os.Environ()` passes ALL parent process env vars to child processes (wrangler CLI, npm, etc.). When the parent has `CLOUDFLARE_API_KEY` / `CLOUDFLARE_EMAIL` set, wrangler uses those instead of its own OAuth session, causing auth failures for non-matching accounts. Fix: add a `FilterEnv []string` field to command structs and strip the listed env var names from `os.Environ()` before passing to the child process. For OAuth auth, always filter `CLOUDFLARE_API_KEY` and `CLOUDFLARE_EMAIL`. The helper `wranglerFilterEnv()` centralizes this check.
 
 79. **Env var isolation must be applied at every exec boundary**: There are 4 distinct exec boundaries in orangeshell: (1) `Runner.Start()` for streaming wrangler commands, (2) `CreateResource()` for synchronous wrangler commands, (3) AI provisioning functions (`WranglerDeploy`, `WranglerSecretPut`, `WranglerDelete`), and (4) local emulator functions (`ExecuteLocalD1Query`, `ListLocalKVKeys`, etc.). Categories 1-3 need env var filtering. Category 4 uses `--local` (no API calls) and is safe without filtering. Missing any exec boundary causes silent auth failures that only manifest on account switch.
+
+### Per-Account Fallback Tokens
+
+80. **Single fallback token breaks multi-account**: The original `api_token_fallback` was a single string scoped to one account. When switching accounts, the token lacked permissions for the new account, causing 403 on Access/Builds APIs. Fix: replace with `FallbackTokens map[string]string` (`[fallback_tokens]` TOML table) mapping `accountID → token`. Auto-provisioning now runs per-account, and each token is stored separately.
+
+81. **Per-session toast deduplication via map**: The `restrictedToastShown map[string]bool` on the root model tracks which account IDs have shown the "restricted mode" toast during the current session. Without this, switching between two restricted accounts would show the toast on every switch, which is annoying. The map is session-scoped (not persisted) — restarting the app shows the toast once more for each restricted account.
 
 ## General Design Considerations
 ### Design-Patterns

@@ -153,6 +153,10 @@ type Model struct {
 	buildLogLoading bool
 	buildLogErr     error
 	buildLogScroll  int // scroll offset within the build log
+
+	// Builds API restriction flag — set when BuildsAuthFailedMsg is received (401/403).
+	// Renders an inline hint in the version history view.
+	buildsRestricted bool
 }
 
 // SetYOffset sets the absolute Y coordinate of the detail content start.

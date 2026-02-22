@@ -216,8 +216,8 @@ func (m *Model) registerServices(accountID string) {
 		// OAuth can't access the Access API — use fallback credentials.
 		// Do NOT use API Key from env vars here — it may be scoped to a
 		// different account and would cause 403 errors on account switch.
-		if m.cfg.APITokenFallback != "" {
-			workersSvc.SetAccessAuth("", "", m.cfg.APITokenFallback)
+		if ft := m.cfg.FallbackTokenFor(accountID); ft != "" {
+			workersSvc.SetAccessAuth("", "", ft)
 		}
 		// else: no access credentials → Access badges silently disabled
 	}
@@ -280,10 +280,15 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.registerServices(accountID)
 
 	// Update restricted badge — provisioning may be needed for the new account
-	if m.cfg.AuthMethod == config.AuthMethodOAuth && !m.cfg.HasFallbackAuth() {
-		m.header.SetRestricted(true)
-	} else {
-		m.header.SetRestricted(false)
+	restricted := m.cfg.AuthMethod == config.AuthMethodOAuth && !m.cfg.HasFallbackAuthFor(accountID)
+	m.header.SetRestricted(restricted)
+
+	// Show restricted-mode toast once per account
+	var toastCmd tea.Cmd
+	if restricted && !m.restrictedToastShown[accountID] {
+		m.restrictedToastShown[accountID] = true
+		m.setToast("Restricted mode — some features need a fallback token")
+		toastCmd = toastTick()
 	}
 
 	// Update search items with whatever is cached for this account
@@ -329,12 +334,18 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 		if provisionCmd != nil {
 			cmds = append(cmds, provisionCmd)
 		}
+		if toastCmd != nil {
+			cmds = append(cmds, toastCmd)
+		}
 		return tea.Batch(cmds...)
 	}
 
 	cmds := []tea.Cmd{deployCmd}
 	if provisionCmd != nil {
 		cmds = append(cmds, provisionCmd)
+	}
+	if toastCmd != nil {
+		cmds = append(cmds, toastCmd)
 	}
 	return tea.Batch(cmds...)
 }
@@ -571,8 +582,8 @@ func (m *Model) handleFallbackTokenMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, nil, true
 	}
 
-	// Save the provisioned token to config
-	m.cfg.APITokenFallback = ftMsg.token
+	// Save the provisioned token to config (per-account)
+	m.cfg.SetFallbackToken(ftMsg.accountID, ftMsg.token)
 	_ = m.cfg.Save() // best-effort persist
 
 	// Re-wire WorkersService access auth with the new token
@@ -597,11 +608,12 @@ func (m *Model) handleFallbackTokenMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 // needsFallbackTokenProvisioning returns true when the app should attempt
 // to auto-provision a scoped API token. Conditions:
 //   - Auth method is OAuth (only OAuth lacks the needed scopes)
-//   - No APITokenFallback already exists in config
+//   - No fallback token exists for the active account
 //   - Global API Key + Email are available (from env vars)
 func (m Model) needsFallbackTokenProvisioning() bool {
+	activeAccountID := m.registry.ActiveAccountID()
 	return m.cfg.AuthMethod == config.AuthMethodOAuth &&
-		m.cfg.APITokenFallback == "" &&
+		m.cfg.FallbackTokenFor(activeAccountID) == "" &&
 		m.cfg.APIKey != "" && m.cfg.Email != ""
 }
 

@@ -777,9 +777,9 @@ func (m Model) newResourceListClient() *api.ResourceListClient {
 	case "apitoken":
 		return api.NewResourceListClientWithCreds(accountID, "", "", m.cfg.APIToken)
 	case "oauth":
-		// 1. Try dedicated fallback token from config
-		if m.cfg.APITokenFallback != "" {
-			return api.NewResourceListClientWithCreds(accountID, "", "", m.cfg.APITokenFallback)
+		// 1. Try dedicated per-account fallback token from config
+		if ft := m.cfg.FallbackTokenFor(accountID); ft != "" {
+			return api.NewResourceListClientWithCreds(accountID, "", "", ft)
 		}
 		// 2. Last resort: OAuth token (may 403 for some restricted endpoints)
 		token := m.cfg.OAuthAccessToken

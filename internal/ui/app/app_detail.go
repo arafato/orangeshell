@@ -192,8 +192,9 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, nil, true
 
 	case detail.BuildsAuthFailedMsg:
-		// Builds API returned 401/403 — silently ignore.
-		// The user sees a "(restricted)" badge in the header if fallback auth is not configured.
+		// Builds API returned 401/403 — mark builds as restricted so the version
+		// history view shows an inline hint. The header also shows a "(restricted)" badge.
+		m.detail.SetBuildsRestricted()
 		return *m, nil, true
 
 	case detail.FetchBuildLogMsg:

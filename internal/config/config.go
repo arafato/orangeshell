@@ -52,10 +52,9 @@ type Config struct {
 	OAuthExpiresAt    time.Time `toml:"oauth_expires_at,omitempty"`
 	OAuthScopes       []string  `toml:"oauth_scopes,omitempty"`
 
-	// General-purpose fallback API token for Cloudflare APIs that OAuth scopes don't cover
-	// (e.g. Access Applications, Workers Builds). Replaces the old builds_api_token field.
-	// Users can create a scoped token via the Cloudflare API and store it here.
-	APITokenFallback string `toml:"api_token_fallback,omitempty"`
+	// Per-account fallback API tokens for Cloudflare APIs that OAuth scopes don't
+	// cover (e.g. Access Applications, Workers Builds). Maps accountID → token.
+	FallbackTokens map[string]string `toml:"fallback_tokens,omitempty"`
 
 	// AI settings
 	AIProvider     AIProvider    `toml:"ai_provider,omitempty"`
@@ -230,18 +229,33 @@ func (c *Config) restoreTransientFields(saved map[string]string) {
 	}
 }
 
+// FallbackTokenFor returns the per-account fallback API token for the given accountID,
+// or "" if none is configured.
+func (c *Config) FallbackTokenFor(accountID string) string {
+	if c.FallbackTokens == nil {
+		return ""
+	}
+	return c.FallbackTokens[accountID]
+}
+
+// SetFallbackToken stores a fallback API token for the given accountID.
+func (c *Config) SetFallbackToken(accountID, token string) {
+	if c.FallbackTokens == nil {
+		c.FallbackTokens = make(map[string]string)
+	}
+	c.FallbackTokens[accountID] = token
+}
+
+// HasFallbackAuthFor returns true if a fallback token exists for the given accountID.
+func (c *Config) HasFallbackAuthFor(accountID string) bool {
+	return c.FallbackTokenFor(accountID) != ""
+}
+
 // HasFallbackAuth returns true if fallback credentials are available for APIs
 // that the primary OAuth token cannot access (e.g. Access Applications, Workers Builds).
-// This checks for: Global API Key from env vars, a dedicated api_token in config,
-// or an API Token from env vars.
+// Checks the per-account fallback token for the current AccountID.
 func (c *Config) HasFallbackAuth() bool {
-	if c.APIKey != "" && c.Email != "" {
-		return true
-	}
-	if c.APITokenFallback != "" {
-		return true
-	}
-	return false
+	return c.HasFallbackAuthFor(c.AccountID)
 }
 
 // IsConfigured returns true if enough auth info exists to attempt authentication.

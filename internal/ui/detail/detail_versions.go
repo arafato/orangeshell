@@ -48,6 +48,13 @@ func (m *Model) StartVersionHistoryLoad(scriptName string) {
 	m.versionHistoryErr = nil
 	m.versionHistoryCursor = 0
 	m.versionHistoryScroll = 0
+	m.buildsRestricted = false // clear restriction flag on new load
+}
+
+// SetBuildsRestricted marks that the Builds API returned 401/403 for the
+// current version history. Renders an inline hint below the heading.
+func (m *Model) SetBuildsRestricted() {
+	m.buildsRestricted = true
 }
 
 // IsWorkersDetail returns true if we're viewing a Workers resource detail.
@@ -126,6 +133,11 @@ func (m Model) renderVersionHistory(width int) []string {
 
 	heading := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorOrange).Render(" Version & Deployment History")
 	lines = append(lines, heading)
+
+	if m.buildsRestricted {
+		hint := theme.DimStyle.Render(" (restricted) Build info unavailable — add a fallback token for this account")
+		lines = append(lines, hint)
+	}
 
 	if m.versionHistoryLoading {
 		lines = append(lines, fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading version history...")))

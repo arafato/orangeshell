@@ -768,23 +768,20 @@ func (m Model) newResourceListClient() *api.ResourceListClient {
 		return nil
 	}
 
-	// 1. Prefer Global API Key from env vars — broadest permissions
-	if m.cfg.APIKey != "" && m.cfg.Email != "" {
-		return api.NewResourceListClientWithCreds(accountID, m.cfg.Email, m.cfg.APIKey, "")
-	}
-
-	// 2. Use primary credentials
+	// Use the primary auth method's credentials. Do NOT use API Key from env
+	// vars as a shortcut — the API Key may be scoped to a different account
+	// and would cause auth failures on account switch.
 	switch m.cfg.AuthMethod {
 	case "apikey":
 		return api.NewResourceListClientWithCreds(accountID, m.cfg.Email, m.cfg.APIKey, "")
 	case "apitoken":
 		return api.NewResourceListClientWithCreds(accountID, "", "", m.cfg.APIToken)
 	case "oauth":
-		// 3. Try dedicated fallback token from config
+		// 1. Try dedicated fallback token from config
 		if m.cfg.APITokenFallback != "" {
 			return api.NewResourceListClientWithCreds(accountID, "", "", m.cfg.APITokenFallback)
 		}
-		// 4. Last resort: OAuth token (may 403 for some restricted endpoints)
+		// 2. Last resort: OAuth token (may 403 for some restricted endpoints)
 		token := m.cfg.OAuthAccessToken
 		if token == "" {
 			return nil

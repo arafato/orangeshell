@@ -17,10 +17,11 @@ import (
 
 // ProvisionConfig holds the inputs needed for AI Worker provisioning.
 type ProvisionConfig struct {
-	AccountID string // Cloudflare account ID
-	APIToken  string // Cloudflare API token (for wrangler deploy)
-	APIKey    string // Cloudflare API key (alternative auth)
-	Email     string // Cloudflare email (for API key auth)
+	AccountID string   // Cloudflare account ID
+	APIToken  string   // Cloudflare API token (for wrangler deploy)
+	APIKey    string   // Cloudflare API key (alternative auth)
+	Email     string   // Cloudflare email (for API key auth)
+	FilterEnv []string // env var names to strip from os.Environ() before passing to child processes
 }
 
 // ProvisionResult holds the outputs of a successful provisioning.
@@ -189,7 +190,7 @@ func WranglerDeploy(ctx context.Context, dir string, cfg ProvisionConfig) (strin
 
 	cmd := exec.CommandContext(ctx, "npx", args...)
 	cmd.Dir = dir
-	env := append(os.Environ(), "CI=true", fmt.Sprintf("CLOUDFLARE_ACCOUNT_ID=%s", cfg.AccountID))
+	env := append(baseEnv(cfg), "CI=true", fmt.Sprintf("CLOUDFLARE_ACCOUNT_ID=%s", cfg.AccountID))
 	if cfg.APIToken != "" {
 		env = append(env, fmt.Sprintf("CLOUDFLARE_API_TOKEN=%s", cfg.APIToken))
 	} else if cfg.APIKey != "" && cfg.Email != "" {
@@ -222,7 +223,7 @@ func WranglerSecretPut(ctx context.Context, dir string, cfg ProvisionConfig, nam
 	cmd := exec.CommandContext(ctx, "npx", args...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(value)
-	env := append(os.Environ(), "CI=true", fmt.Sprintf("CLOUDFLARE_ACCOUNT_ID=%s", cfg.AccountID))
+	env := append(baseEnv(cfg), "CI=true", fmt.Sprintf("CLOUDFLARE_ACCOUNT_ID=%s", cfg.AccountID))
 	if cfg.APIToken != "" {
 		env = append(env, fmt.Sprintf("CLOUDFLARE_API_TOKEN=%s", cfg.APIToken))
 	} else if cfg.APIKey != "" && cfg.Email != "" {
@@ -243,7 +244,7 @@ func WranglerDelete(ctx context.Context, cfg ProvisionConfig) error {
 	args := []string{"wrangler", "delete", "--name", workerNamePrefix, "--force"}
 
 	cmd := exec.CommandContext(ctx, "npx", args...)
-	env := append(os.Environ(), "CI=true", fmt.Sprintf("CLOUDFLARE_ACCOUNT_ID=%s", cfg.AccountID))
+	env := append(baseEnv(cfg), "CI=true", fmt.Sprintf("CLOUDFLARE_ACCOUNT_ID=%s", cfg.AccountID))
 	if cfg.APIToken != "" {
 		env = append(env, fmt.Sprintf("CLOUDFLARE_API_TOKEN=%s", cfg.APIToken))
 	} else if cfg.APIKey != "" && cfg.Email != "" {
@@ -366,4 +367,24 @@ func CheckWorkerExists(ctx context.Context, cfg ProvisionConfig) (bool, string, 
 		return true, "", nil
 	}
 	return false, "", nil
+}
+
+// baseEnv returns os.Environ() with any FilterEnv names removed.
+func baseEnv(cfg ProvisionConfig) []string {
+	env := os.Environ()
+	if len(cfg.FilterEnv) == 0 {
+		return env
+	}
+	strip := make(map[string]bool, len(cfg.FilterEnv))
+	for _, n := range cfg.FilterEnv {
+		strip[n] = true
+	}
+	result := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strip[key] {
+			result = append(result, entry)
+		}
+	}
+	return result
 }

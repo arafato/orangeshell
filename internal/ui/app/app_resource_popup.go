@@ -53,12 +53,14 @@ func (m *Model) handleResourcePopupMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 // using the ExtraArgs from the resource popup.
 func (m Model) createResourcePopupCmd(msg resourcepopup.CreateResourceMsg) tea.Cmd {
 	accountID := m.registry.ActiveAccountID()
+	filterEnv := m.wranglerFilterEnv()
 	return func() tea.Msg {
 		result := wcfg.CreateResource(context.Background(), wcfg.CreateResourceCmd{
 			ResourceType: msg.ResourceType,
 			Name:         msg.Name,
 			AccountID:    accountID,
 			ExtraArgs:    msg.ExtraArgs,
+			FilterEnv:    filterEnv,
 		})
 		return resourcepopup.CreateResourceDoneMsg{
 			ResourceType: msg.ResourceType,

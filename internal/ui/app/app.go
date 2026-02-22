@@ -322,23 +322,21 @@ func (m Model) Init() tea.Cmd {
 func (m *Model) getBuildsClient() *api.BuildsClient {
 	accountID := m.registry.ActiveAccountID()
 
-	// 1. Prefer dedicated fallback token from config (api_token)
+	// 1. Prefer dedicated fallback token from config
 	if m.cfg.APITokenFallback != "" {
 		return api.NewBuildsClient(accountID, "", "", m.cfg.APITokenFallback)
 	}
 
-	// 2. Use primary credentials
+	// 2. Use primary credentials based on auth method.
+	// Do NOT use API Key from env vars for OAuth — it may be scoped to a
+	// different account and would cause 403 errors on account switch.
 	switch m.cfg.AuthMethod {
 	case config.AuthMethodAPIKey:
 		return api.NewBuildsClient(accountID, m.cfg.Email, m.cfg.APIKey, "")
 	case config.AuthMethodAPIToken:
 		return api.NewBuildsClient(accountID, "", "", m.cfg.APIToken)
 	case config.AuthMethodOAuth:
-		// OAuth tokens can't access Builds API — try env var fallback
-		if m.cfg.APIKey != "" && m.cfg.Email != "" {
-			return api.NewBuildsClient(accountID, m.cfg.Email, m.cfg.APIKey, "")
-		}
-		// Last resort: OAuth token (will likely 403)
+		// OAuth token (will 403 for Builds API — silent degradation)
 		return api.NewBuildsClient(accountID, "", "", m.cfg.OAuthAccessToken)
 	}
 

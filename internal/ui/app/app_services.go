@@ -213,15 +213,11 @@ func (m *Model) registerServices(accountID string) {
 		// API Token might have Access scope — try it (silent fallback on 403)
 		workersSvc.SetAccessAuth("", "", m.cfg.APIToken)
 	case config.AuthMethodOAuth:
-		// OAuth can't access the Access API — use fallback credentials
+		// OAuth can't access the Access API — use fallback credentials.
+		// Do NOT use API Key from env vars here — it may be scoped to a
+		// different account and would cause 403 errors on account switch.
 		if m.cfg.APITokenFallback != "" {
-			// Dedicated fallback token from config (api_token) — takes priority
 			workersSvc.SetAccessAuth("", "", m.cfg.APITokenFallback)
-		} else if m.cfg.APIKey != "" && m.cfg.Email != "" {
-			// Global API Key from env vars (CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL)
-			// Note: auto-provisioning will create a scoped token and save it to config
-			// so this path is only used until the provisioned token is ready.
-			workersSvc.SetAccessAuth(m.cfg.Email, m.cfg.APIKey, "")
 		}
 		// else: no access credentials → Access badges silently disabled
 	}

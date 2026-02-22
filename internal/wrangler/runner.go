@@ -19,6 +19,7 @@ type Command struct {
 	ExtraArgs  []string // additional positional/flag args appended after --env (e.g. version specs, "-y")
 	AccountID  string   // if set, passed as CLOUDFLARE_ACCOUNT_ID env var to the process
 	APIToken   string   // if set, passed as CLOUDFLARE_API_TOKEN env var (avoids OAuth token refresh races in parallel deploys)
+	FilterEnv  []string // env var names to strip from os.Environ() before passing to the child process
 }
 
 // OutputLine is a single line of output from a wrangler command.
@@ -106,7 +107,11 @@ func (r *Runner) Start(ctx context.Context, wcmd Command) error {
 	// Set CI=true so wrangler skips all interactive prompts (we have no stdin pipe).
 	// Also pass account ID via environment variable so wrangler doesn't prompt
 	// for account selection.
-	r.cmd.Env = append(os.Environ(), "CI=true")
+	env := os.Environ()
+	if len(wcmd.FilterEnv) > 0 {
+		env = filterEnvVars(env, wcmd.FilterEnv)
+	}
+	r.cmd.Env = append(env, "CI=true")
 	if wcmd.AccountID != "" {
 		r.cmd.Env = append(r.cmd.Env, "CLOUDFLARE_ACCOUNT_ID="+wcmd.AccountID)
 	}
@@ -296,4 +301,22 @@ func CommandDescription(action string) string {
 // IsDevAction returns true if the action string is a dev server command.
 func IsDevAction(action string) bool {
 	return action == "dev" || action == "dev --remote"
+}
+
+// filterEnvVars removes entries matching any of the given names from an
+// environment variable slice (as returned by os.Environ()). Each entry
+// has the form "KEY=VALUE"; we match on the KEY part (case-sensitive).
+func filterEnvVars(env []string, names []string) []string {
+	strip := make(map[string]bool, len(names))
+	for _, n := range names {
+		strip[n] = true
+	}
+	result := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strip[key] {
+			result = append(result, entry)
+		}
+	}
+	return result
 }

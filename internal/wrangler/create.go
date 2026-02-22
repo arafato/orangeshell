@@ -142,6 +142,8 @@ type CreateResourceCmd struct {
 	// ExtraArgs holds type-specific CLI flags (e.g., "--dimensions=768", "--metric=cosine").
 	// Keys are flag names (without --), values are flag values.
 	ExtraArgs map[string]string
+	// FilterEnv lists env var names to strip from os.Environ() before passing to the child process.
+	FilterEnv []string
 }
 
 // CreateResourceResult holds the output of a resource creation command.
@@ -160,8 +162,12 @@ func CreateResource(ctx context.Context, cmd CreateResourceCmd) CreateResourceRe
 	defer cancel()
 
 	c := exec.CommandContext(execCtx, "npx", args...)
+	env := os.Environ()
+	if len(cmd.FilterEnv) > 0 {
+		env = filterEnvVars(env, cmd.FilterEnv)
+	}
 	if cmd.AccountID != "" {
-		c.Env = append(os.Environ(), "CLOUDFLARE_ACCOUNT_ID="+cmd.AccountID)
+		c.Env = append(env, "CLOUDFLARE_ACCOUNT_ID="+cmd.AccountID)
 	}
 
 	out, err := c.CombinedOutput()

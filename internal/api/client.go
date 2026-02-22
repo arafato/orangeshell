@@ -25,14 +25,34 @@ type Client struct {
 }
 
 // NewClient creates a Cloudflare API client from the given authenticator and config.
+//
+// IMPORTANT: The cloudflare-go v6 SDK's NewClient() calls DefaultClientOptions()
+// which reads CLOUDFLARE_API_KEY, CLOUDFLARE_EMAIL, CLOUDFLARE_API_TOKEN from
+// environment variables and prepends them as default request options. When the app
+// uses a different auth method (e.g. OAuth), both auth mechanisms end up as HTTP
+// headers on every request. The Cloudflare API may prefer API Key auth over Bearer
+// token, causing failures when the API Key is scoped to a different account.
+// Fix: after setting the intended auth, explicitly delete conflicting auth headers.
 func NewClient(a auth.Authenticator, cfg *config.Config) (*Client, error) {
 	var opts []option.RequestOption
 
 	switch a.Method() {
 	case config.AuthMethodAPIKey:
-		opts = append(opts, option.WithAPIKey(a.GetAPIKey()), option.WithAPIEmail(a.GetEmail()))
+		opts = append(opts,
+			option.WithAPIKey(a.GetAPIKey()),
+			option.WithAPIEmail(a.GetEmail()),
+			// Strip any env-var-sourced Bearer token header
+			option.WithHeaderDel("authorization"),
+		)
 	case config.AuthMethodAPIToken, config.AuthMethodOAuth:
-		opts = append(opts, option.WithAPIToken(a.GetToken()))
+		opts = append(opts,
+			option.WithAPIToken(a.GetToken()),
+			// Strip any env-var-sourced API Key / Email headers so only
+			// the Bearer token is sent. The API Key may be scoped to a
+			// different account and would cause auth failures.
+			option.WithHeaderDel("X-Auth-Key"),
+			option.WithHeaderDel("X-Auth-Email"),
+		)
 	default:
 		return nil, fmt.Errorf("unsupported auth method: %s", a.Method())
 	}

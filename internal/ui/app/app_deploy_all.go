@@ -70,6 +70,7 @@ func (m *Model) startDeployAll(envName string) tea.Cmd {
 // deployProjectCmd spawns a single wrangler deploy for one project in a goroutine.
 // Output is captured into a buffer; only the final result is sent back as a message.
 func (m Model) deployProjectCmd(idx int, runner *wcfg.Runner, configPath, envName, accountID, apiToken string) tea.Cmd {
+	filterEnv := m.wranglerFilterEnv()
 	return func() tea.Msg {
 		cmd := wcfg.Command{
 			Action:     "deploy",
@@ -77,6 +78,7 @@ func (m Model) deployProjectCmd(idx int, runner *wcfg.Runner, configPath, envNam
 			EnvName:    envName,
 			AccountID:  accountID,
 			APIToken:   apiToken,
+			FilterEnv:  filterEnv,
 		}
 
 		ctx := context.Background()

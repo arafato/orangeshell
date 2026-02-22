@@ -43,6 +43,8 @@ func (m Model) aiProvisionCfg() uiai.ProvisionConfig {
 		pcfg.Email = m.cfg.Email
 	case config.AuthMethodOAuth:
 		pcfg.APIToken = m.cfg.OAuthAccessToken
+		// Strip API Key env vars — they may be scoped to a different account
+		pcfg.FilterEnv = []string{"CLOUDFLARE_API_KEY", "CLOUDFLARE_EMAIL"}
 	}
 	return pcfg
 }

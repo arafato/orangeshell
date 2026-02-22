@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/oarafat/orangeshell/internal/api"
+	"github.com/oarafat/orangeshell/internal/config"
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
@@ -81,6 +82,7 @@ func (m *Model) startDevServer(action, projectName, envName, configPath, scriptN
 		EnvName:    envName,
 		ExtraArgs:  []string{"--show-interactive-dev-session=false"},
 		AccountID:  m.registry.ActiveAccountID(),
+		FilterEnv:  m.wranglerFilterEnv(),
 	}
 
 	return tea.Batch(
@@ -150,6 +152,7 @@ func (m *Model) startWranglerCmdWithArgs(action, projectName, envName, configPat
 		EnvName:    envName,
 		ExtraArgs:  extraArgs,
 		AccountID:  m.registry.ActiveAccountID(),
+		FilterEnv:  m.wranglerFilterEnv(),
 	}
 
 	return tea.Batch(
@@ -376,6 +379,7 @@ func (m *Model) fetchWranglerVersions(envName string) tea.Cmd {
 		EnvName:    envName,
 		ExtraArgs:  []string{"--json"},
 		AccountID:  m.registry.ActiveAccountID(),
+		FilterEnv:  m.wranglerFilterEnv(),
 	}
 
 	runner := wcfg.NewRunner()
@@ -441,6 +445,7 @@ func (m *Model) fetchVersionHistory(scriptName string) tea.Cmd {
 	}
 
 	accountID := m.registry.ActiveAccountID()
+	filterEnv := m.wranglerFilterEnv()
 
 	versionRunner := wcfg.NewRunner()
 	deployRunner := wcfg.NewRunner()
@@ -455,11 +460,13 @@ func (m *Model) fetchVersionHistory(scriptName string) tea.Cmd {
 			Action:    "versions list",
 			ExtraArgs: []string{"--name", scriptName, "--json"},
 			AccountID: accountID,
+			FilterEnv: filterEnv,
 		}
 		deployCmd := wcfg.Command{
 			Action:    "deployments list",
 			ExtraArgs: []string{"--name", scriptName, "--json"},
 			AccountID: accountID,
+			FilterEnv: filterEnv,
 		}
 
 		if err := versionRunner.Start(ctx, versionCmd); err != nil {
@@ -612,4 +619,17 @@ func (m *Model) fetchBuildLog(buildUUID string, entry wcfg.VersionHistoryEntry) 
 			Entry:     entry,
 		}
 	}
+}
+
+// wranglerFilterEnv returns the list of environment variable names that should
+// be stripped from the child process environment before running wrangler CLI
+// commands. When using OAuth auth, CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL must
+// be removed because:
+// 1. Wrangler has its own OAuth session and will use the API Key if present.
+// 2. The API Key may be scoped to a different account, causing auth failures.
+func (m Model) wranglerFilterEnv() []string {
+	if m.cfg.AuthMethod == config.AuthMethodOAuth {
+		return []string{"CLOUDFLARE_API_KEY", "CLOUDFLARE_EMAIL"}
+	}
+	return nil
 }

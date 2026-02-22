@@ -6,11 +6,14 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
+	"github.com/oarafat/orangeshell/internal/ui/helppopup"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/removeprojectpopup"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
+	"github.com/oarafat/orangeshell/internal/ui/theme"
 	uiwrangler "github.com/oarafat/orangeshell/internal/ui/wrangler"
 	wcfg "github.com/oarafat/orangeshell/internal/wrangler"
 )
@@ -101,6 +104,7 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 		Section:     "Configuration",
 		Action:      "wrangler_load_config",
 	})
+	items = m.appendRestrictedAction(items)
 	return actions.New(title, items)
 }
 
@@ -320,8 +324,24 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 		Section:     "Configuration",
 		Action:      "wrangler_load_config",
 	})
+	items = m.appendRestrictedAction(items)
 
 	return actions.New(title, items)
+}
+
+// appendRestrictedAction conditionally adds a "Fix Restricted Mode" action
+// to the items slice if the current account is in restricted mode (OAuth without
+// a per-account fallback token).
+func (m Model) appendRestrictedAction(items []actions.Item) []actions.Item {
+	if m.header.IsRestricted() {
+		items = append(items, actions.Item{
+			Label:       "Fix Restricted Mode",
+			Description: "How to create a fallback token",
+			Section:     "Help",
+			Action:      "show_restricted_help",
+		})
+	}
+	return items
 }
 
 // --- Action popup helpers ---
@@ -347,6 +367,7 @@ func (m Model) buildActionsPopup() actions.Model {
 	case "KV", "R2", "D1":
 		items = m.buildBoundWorkersActions()
 	}
+	items = m.appendRestrictedAction(items)
 
 	return actions.New(title, items)
 }
@@ -416,6 +437,13 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	// Navigation to a bound resource
 	if item.NavService != "" && item.NavResource != "" {
 		return m.navigateTo(item.NavService, item.NavResource)
+	}
+
+	// Help: show restricted mode instructions
+	if item.Action == "show_restricted_help" {
+		m.showHelpPopup = true
+		m.helpPopup = m.buildRestrictedModeHelp()
+		return nil
 	}
 
 	// Wrangler load config action
@@ -676,4 +704,69 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 	}
 
 	return nil
+}
+
+// buildRestrictedModeHelp creates a help popup explaining how to create a
+// fallback API token for the current account using curl.
+func (m Model) buildRestrictedModeHelp() helppopup.Model {
+	accountID := m.registry.ActiveAccountID()
+
+	dim := theme.DimStyle.Render
+	bold := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorWhite).Render
+	orange := lipgloss.NewStyle().Foreground(theme.ColorOrange).Render
+	code := lipgloss.NewStyle().Foreground(theme.ColorBlue).Render
+
+	lines := []string{
+		dim("  Some Cloudflare APIs (Access Applications, Workers Builds)"),
+		dim("  require permission scopes that OAuth tokens cannot provide."),
+		dim("  A scoped API token fixes this."),
+		"",
+		bold("  Option 1: Auto-provision (recommended)"),
+		"",
+		dim("  Set these environment variables and restart orangeshell:"),
+		"",
+		code("    export CLOUDFLARE_API_KEY=<your-global-api-key>"),
+		code("    export CLOUDFLARE_EMAIL=<your-cloudflare-email>"),
+		"",
+		dim("  orangeshell will auto-create a scoped token and save it."),
+		dim("  The env vars are only needed once per account."),
+		"",
+		bold("  Option 2: Manual creation via curl"),
+		"",
+		dim("  Run this command (replace <API_KEY> and <EMAIL>):"),
+		"",
+		code("    curl -X POST \\"),
+		code("      https://api.cloudflare.com/client/v4/user/tokens \\"),
+		code("      -H \"X-Auth-Key: <API_KEY>\" \\"),
+		code("      -H \"X-Auth-Email: <EMAIL>\" \\"),
+		code("      -H \"Content-Type: application/json\" \\"),
+		code("      -d '{"),
+		code("        \"name\": \"orangeshell\","),
+		code("        \"policies\": [{"),
+		code("          \"effect\": \"allow\","),
+		code("          \"resources\": {"),
+		code(fmt.Sprintf("            \"com.cloudflare.api.account.%s\": \"*\"", accountID)),
+		code("          },"),
+		code("          \"permission_groups\": ["),
+		code("            {\"id\": \"7ea222f6d5064cfa89ea366d7c1fee89\"},"),
+		code("            {\"id\": \"ad99c5ae555e45c4bef5bdf2678388ba\"}"),
+		code("          ]"),
+		code("        }]"),
+		code("      }'"),
+		"",
+		dim("  Permission groups:"),
+		dim("    7ea222f6...  = Access: Apps and Policies Read"),
+		dim("    ad99c5ae...  = Workers CI Read"),
+		"",
+		bold("  Then add the token to your config:"),
+		"",
+		dim("  Edit " + orange("~/.orangeshell/config.toml") + dim(" and add:")),
+		"",
+		code("    [fallback_tokens]"),
+		code(fmt.Sprintf("    \"%s\" = \"<token-value>\"", accountID)),
+		"",
+		dim("  Restart orangeshell. The (restricted) badge will disappear."),
+	}
+
+	return helppopup.New("Fix Restricted Mode", lines)
 }

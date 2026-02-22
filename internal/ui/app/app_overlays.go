@@ -5,6 +5,7 @@ import (
 
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
+	"github.com/oarafat/orangeshell/internal/ui/helppopup"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
 	"github.com/oarafat/orangeshell/internal/ui/search"
 	"github.com/oarafat/orangeshell/internal/ui/tabbar"
@@ -33,6 +34,12 @@ func (m *Model) handleOverlayMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 
 	case actions.CloseMsg:
 		m.showActions = false
+		return *m, nil, true
+
+	// --- Help popup messages ---
+
+	case helppopup.CloseMsg:
+		m.showHelpPopup = false
 		return *m, nil, true
 
 	// --- Launcher messages ---

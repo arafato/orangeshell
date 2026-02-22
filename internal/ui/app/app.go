@@ -23,6 +23,7 @@ import (
 	"github.com/oarafat/orangeshell/internal/ui/detail"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/header"
+	"github.com/oarafat/orangeshell/internal/ui/helppopup"
 	"github.com/oarafat/orangeshell/internal/ui/launcher"
 	"github.com/oarafat/orangeshell/internal/ui/monitoring"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
@@ -250,6 +251,10 @@ type Model struct {
 	showDeployAllPopup bool
 	deployAllPopup     deployallpopup.Model
 	deployAllRunners   []*wcfg.Runner // one per project, kept for cancellation
+
+	// Help popup overlay (e.g. fallback token instructions)
+	showHelpPopup bool
+	helpPopup     helppopup.Model
 
 	// Toast notification
 	toastMsg    string
@@ -617,6 +622,13 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If remove project popup is active, route everything there
 	if m.showRemoveProjectPopup {
 		return m.updateRemoveProjectPopup(msg)
+	}
+
+	// If help popup is active, route everything there
+	if m.showHelpPopup {
+		var cmd tea.Cmd
+		m.helpPopup, cmd = m.helpPopup.Update(msg)
+		return m, cmd
 	}
 
 	// If action popup is active, route everything there

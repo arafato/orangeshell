@@ -113,6 +113,11 @@ func (m *Model) SetRestricted(r bool) {
 	m.restricted = r
 }
 
+// IsRestricted returns true if the restricted-mode indicator is active.
+func (m Model) IsRestricted() bool {
+	return m.restricted
+}
+
 // SetHoverIdx sets which account tab the mouse is hovering over (-1 for none).
 func (m *Model) SetHoverIdx(idx int) {
 	m.hoverIdx = idx

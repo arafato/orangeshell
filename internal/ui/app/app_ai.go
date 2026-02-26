@@ -1,9 +1,13 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -309,6 +313,135 @@ type aiStreamContinueMsg struct {
 	gen   uint64 // stream generation — stale messages are dropped
 }
 
+// aiPermissionResponseDoneMsg signals that an HTTP POST to the OpenCode
+// permissions API completed. Carries the permission ID for logging/debugging.
+type aiPermissionResponseDoneMsg struct {
+	PermissionID string
+	Err          error
+}
+
+// processStreamChunk inspects a raw chunk from the backend channel.
+// If it's a permission event, it routes it to the AI tab and returns true
+// (the chunk should NOT be delivered as text). Otherwise returns false.
+func (m *Model) processStreamChunk(chunk string) (handled bool, cmd tea.Cmd) {
+	// Permission request: "permission:{json}"
+	// Handles both legacy "permission.updated" and new "permission.asked" events.
+	// Legacy has: id, sessionID, type, message, metadata
+	// New has: id, sessionID, permission, patterns, metadata, always, tool
+	if strings.HasPrefix(chunk, "permission:") {
+		jsonStr := chunk[len("permission:"):]
+		var props map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &props); err != nil {
+			return false, nil // malformed — pass through as text
+		}
+		permID, _ := props["id"].(string)
+		sessionID, _ := props["sessionID"].(string)
+		if permID == "" || sessionID == "" {
+			return false, nil
+		}
+		// Extract human-readable title — "message" field in both legacy and new systems.
+		title, _ := props["message"].(string)
+		// Extract permission type — legacy uses "type", new uses "permission".
+		permType, _ := props["type"].(string)
+		if permType == "" {
+			permType, _ = props["permission"].(string)
+		}
+		// If no message, try to build one from patterns (new system)
+		if title == "" {
+			if patterns, ok := props["patterns"].([]interface{}); ok && len(patterns) > 0 {
+				if first, ok := patterns[0].(string); ok {
+					title = first
+				}
+			}
+		}
+		if title == "" {
+			title = permType // last resort: use the type name
+		}
+		m.aiTab, cmd = m.aiTab.Update(uiai.AIChatPermissionMsg{
+			ID:        permID,
+			SessionID: sessionID,
+			Title:     title,
+			Type:      permType,
+		})
+		return true, cmd
+	}
+
+	// Permission resolved: "permission_resolved:{permID}"
+	// The backend normalizes both legacy "permissionID" and new "requestID"
+	// into a single ID string.
+	if strings.HasPrefix(chunk, "permission_resolved:") {
+		permID := chunk[len("permission_resolved:"):]
+		m.aiTab, cmd = m.aiTab.Update(uiai.AIChatPermissionResolvedMsg{
+			PermissionID: permID,
+		})
+		return true, cmd
+	}
+
+	// Status update: "status:{status}" (e.g., "status:busy" during tool execution)
+	if strings.HasPrefix(chunk, "status:") {
+		status := chunk[len("status:"):]
+		m.aiTab, cmd = m.aiTab.Update(uiai.AIChatStatusMsg{Status: status})
+		return true, cmd
+	}
+
+	return false, nil
+}
+
+// sendPermissionResponse sends an HTTP POST to the OpenCode permissions API.
+// Tries the new PermissionNext endpoint first (POST /permission/:id/reply),
+// then falls back to the documented session-scoped endpoint
+// (POST /session/:id/permissions/:permissionID).
+func sendPermissionResponse(baseURL, sessionID, permissionID, response, apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		// Try the new PermissionNext route first.
+		url := fmt.Sprintf("%s/permission/%s/reply", baseURL, permissionID)
+		body := map[string]interface{}{
+			"reply": response,
+		}
+		msg := tryPermissionPost(url, body, permissionID, apiKey)
+		if msg.Err == nil {
+			return msg
+		}
+		// Fall back to the session-scoped route (documented API).
+		url = fmt.Sprintf("%s/session/%s/permissions/%s", baseURL, sessionID, permissionID)
+		body = map[string]interface{}{
+			"response": response,
+		}
+		return tryPermissionPost(url, body, permissionID, apiKey)
+	}
+}
+
+// tryPermissionPost performs a single HTTP POST for permission response.
+func tryPermissionPost(url string, body map[string]interface{}, permissionID, apiKey string) aiPermissionResponseDoneMsg {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return aiPermissionResponseDoneMsg{PermissionID: permissionID, Err: err}
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return aiPermissionResponseDoneMsg{PermissionID: permissionID, Err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return aiPermissionResponseDoneMsg{PermissionID: permissionID, Err: err}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return aiPermissionResponseDoneMsg{
+			PermissionID: permissionID,
+			Err:          fmt.Errorf("permissions API returned %d", resp.StatusCode),
+		}
+	}
+	return aiPermissionResponseDoneMsg{PermissionID: permissionID}
+}
+
 // handleAIMsg handles all AI-related messages.
 // Returns (model, cmd, handled).
 func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
@@ -316,21 +449,36 @@ func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	case tea.KeyMsg:
 		// ESC while streaming on the AI tab → cancel the active stream
 		if msg.String() == "esc" && m.activeTab == tabbar.TabAI && m.aiTab.IsStreaming() {
+			var cmds []tea.Cmd
+
+			// If a permission prompt is pending, reject it before aborting
+			// so the OpenCode agent isn't left waiting for a response.
+			if permID, sessID := m.aiTab.PendingPermissionInfo(); permID != "" {
+				if b := m.aiTab.Backend(); b != nil {
+					if hb, ok := b.(*uiai.HTTPBackend); ok {
+						cmds = append(cmds, sendPermissionResponse(
+							hb.BaseURL, sessID, permID, "reject", hb.APIKey))
+					}
+				}
+			}
+
 			if m.aiStreamCancel != nil {
 				m.aiStreamCancel()
 				m.aiStreamCancel = nil
 			}
-			// Close the backend to clear cached session state (e.g., OpenCode
-			// session ID). Without this, the next prompt's SSE listener would
-			// see stale session.idle events from the cancelled prompt and
-			// terminate prematurely. For stateless backends (Workers AI,
-			// OpenAI-compatible) Close() is a no-op.
+			// Abort the server-side agent prompt without clearing the session.
+			// The sawBusy flag in readOpenCodeEvents protects against stale
+			// idle events, so we can safely reuse the session for multi-turn
+			// context. For stateless backends (Workers AI, OpenAI) this is a
+			// no-op. Only HTTPBackend (OpenCode) has Abort().
 			if b := m.aiTab.Backend(); b != nil {
-				_ = b.Close()
+				if hb, ok := b.(*uiai.HTTPBackend); ok {
+					hb.Abort()
+				}
 			}
 			// Tell the chat model the stream was cancelled (not an error)
 			m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamDoneMsg{})
-			return *m, nil, true
+			return *m, tea.Batch(cmds...), true
 		}
 		return *m, nil, false
 
@@ -396,13 +544,18 @@ func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if !m.aiTab.IsProvisioned() {
 			return *m, nil, true
 		}
-		return *m, m.startAIChatStream(msg.UserMessage), true
+		// Batch spinner init alongside the stream start so the spinner ticks immediately.
+		return *m, tea.Batch(m.startAIChatStream(msg.UserMessage), m.aiTab.SpinnerInit()), true
 
 	case aiStreamBatchMsg:
 		// First chunk arrived — deliver it and start reading more.
 		// Drop stale messages from a cancelled/previous stream.
 		if msg.gen != m.aiStreamGen || !m.aiTab.IsStreaming() {
 			return *m, nil, true
+		}
+		// Check if this is a permission event rather than text content.
+		if handled, permCmd := m.processStreamChunk(msg.firstChunk); handled {
+			return *m, tea.Batch(permCmd, readNextAIChunk(msg.ch, msg.gen)), true
 		}
 		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.firstChunk})
 		return *m, readNextAIChunk(msg.ch, msg.gen), true
@@ -412,6 +565,10 @@ func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		// Drop stale messages from a cancelled/previous stream.
 		if msg.gen != m.aiStreamGen || !m.aiTab.IsStreaming() {
 			return *m, nil, true
+		}
+		// Check if this is a permission event rather than text content.
+		if handled, permCmd := m.processStreamChunk(msg.chunk); handled {
+			return *m, tea.Batch(permCmd, readNextAIChunk(msg.ch, msg.gen)), true
 		}
 		m.aiTab, _ = m.aiTab.Update(uiai.AIChatStreamChunkMsg{Text: msg.chunk})
 		return *m, readNextAIChunk(msg.ch, msg.gen), true
@@ -428,6 +585,33 @@ func (m *Model) handleAIMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 
 	case uiai.AIChatNewConversationMsg:
 		m.aiTab.NewConversation()
+		// Clear the backend session so the next prompt starts fresh.
+		// For OpenCode this aborts + clears the session ID, creating a
+		// new multi-turn context. For stateless backends it's a no-op.
+		if b := m.aiTab.Backend(); b != nil {
+			_ = b.Close()
+		}
+		return *m, nil, true
+
+	case uiai.AIPermissionResponseMsg:
+		// User responded to a permission prompt (y/a/n). POST to OpenCode API.
+		backend := m.aiTab.Backend()
+		if backend == nil {
+			return *m, nil, true
+		}
+		httpBackend, ok := backend.(*uiai.HTTPBackend)
+		if !ok {
+			return *m, nil, true
+		}
+		baseURL := httpBackend.BaseURL
+		apiKey := httpBackend.APIKey
+		return *m, sendPermissionResponse(baseURL, msg.SessionID, msg.PermissionID, msg.Response, apiKey), true
+
+	case aiPermissionResponseDoneMsg:
+		// Permission response sent (or failed). Log errors but don't disrupt the UI.
+		if msg.Err != nil {
+			m.setToast(fmt.Sprintf("Permission response failed: %v", msg.Err))
+		}
 		return *m, nil, true
 	}
 

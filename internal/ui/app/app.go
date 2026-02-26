@@ -547,6 +547,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+		if m.aiTab.NeedsSpinner() {
+			cmds = append(cmds, m.aiTab.UpdateSpinner(msg))
+		}
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
 		}

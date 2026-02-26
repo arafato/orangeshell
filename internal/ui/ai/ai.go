@@ -6,6 +6,7 @@ package ai
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -226,6 +227,39 @@ func (m Model) IsStreaming() bool {
 	return m.chat.streaming
 }
 
+// NeedsSpinner returns true when the chat spinner needs tick messages.
+func (m Model) NeedsSpinner() bool {
+	return m.chat.streaming
+}
+
+// SpinnerInit returns the command to start the spinner animation.
+// Must be batched with the command that starts streaming.
+func (m Model) SpinnerInit() tea.Cmd {
+	return m.chat.spin.Tick
+}
+
+// UpdateSpinner forwards a spinner tick to the chat model's spinner.
+func (m *Model) UpdateSpinner(msg spinner.TickMsg) tea.Cmd {
+	var cmd tea.Cmd
+	m.chat.spin, cmd = m.chat.spin.Update(msg)
+	return cmd
+}
+
+// HasPendingPermission returns true when the chat has an unanswered permission prompt.
+func (m Model) HasPendingPermission() bool {
+	return m.chat.pendingPermission != nil
+}
+
+// PendingPermissionInfo returns the permission ID and session ID of the pending
+// permission prompt, or empty strings if none is pending. Used by the app layer
+// to send a reject response on ESC cancellation.
+func (m Model) PendingPermissionInfo() (permissionID, sessionID string) {
+	if m.chat.pendingPermission == nil {
+		return "", ""
+	}
+	return m.chat.pendingPermission.ID, m.chat.pendingPermission.SessionID
+}
+
 // SetContextSources updates the available context sources (from monitoring grid panes).
 func (m *Model) SetContextSources(sources []ContextSource) {
 	m.context.SetSources(sources)
@@ -255,9 +289,21 @@ func (m Model) ConversationMessages() []ChatMessage {
 
 // Update handles messages for the AI tab.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	// Always route streaming messages to the chat model, regardless of mode
+	// Always route streaming/permission/spinner messages to the chat model, regardless of mode
 	switch msg.(type) {
-	case AIChatStreamChunkMsg, AIChatStreamDoneMsg:
+	case AIChatStreamChunkMsg:
+		var cmd tea.Cmd
+		m.chat, cmd = m.chat.update(msg, true)
+		return m, cmd
+	case AIChatStreamDoneMsg:
+		var cmd tea.Cmd
+		m.chat, cmd = m.chat.update(msg, true)
+		return m, cmd
+	case AIChatPermissionMsg, AIChatPermissionResolvedMsg, AIChatStatusMsg:
+		var cmd tea.Cmd
+		m.chat, cmd = m.chat.update(msg, true)
+		return m, cmd
+	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.chat, cmd = m.chat.update(msg, true)
 		return m, cmd
@@ -392,10 +438,19 @@ func (m Model) HelpEntries() []HelpEntry {
 			{"tab", "switch pane"},
 		}
 		if m.chat.streaming {
-			entries = append(entries,
-				HelpEntry{"esc", "stop"},
-				HelpEntry{"pgup/dn", "scroll"},
-			)
+			if m.chat.pendingPermission != nil {
+				entries = append(entries,
+					HelpEntry{"y", "allow"},
+					HelpEntry{"a", "always"},
+					HelpEntry{"n", "reject"},
+					HelpEntry{"esc", "stop"},
+				)
+			} else {
+				entries = append(entries,
+					HelpEntry{"esc", "stop"},
+					HelpEntry{"pgup/dn", "scroll"},
+				)
+			}
 			return entries
 		}
 		if m.focus == FocusContext {

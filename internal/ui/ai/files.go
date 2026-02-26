@@ -171,7 +171,7 @@ func ReadProjectFiles(summary *ProjectFileSummary) []FileContextData {
 			continue
 		}
 		result = append(result, FileContextData{
-			Path:     f.RelPath,
+			Path:     f.Path,
 			Language: f.Language,
 			Content:  string(content),
 		})
@@ -181,7 +181,7 @@ func ReadProjectFiles(summary *ProjectFileSummary) []FileContextData {
 
 // FileContextData holds the content of a single source file for prompt inclusion.
 type FileContextData struct {
-	Path     string // relative path within the project
+	Path     string // absolute file path
 	Language string // programming language for code fence
 	Content  string // file content
 }

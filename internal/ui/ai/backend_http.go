@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tmaxmax/go-sse"
 )
@@ -79,12 +80,102 @@ func (b *HTTPBackend) Name() string {
 	}
 }
 
-// Close implements Backend. Clears the cached OpenCode session ID.
+// Close implements Backend. For OpenCode, aborts the active session (fire-and-forget)
+// before clearing the cached session ID so the next prompt creates a fresh session.
 func (b *HTTPBackend) Close() error {
 	b.mu.Lock()
+	sid := b.sessionID
 	b.sessionID = ""
 	b.mu.Unlock()
+
+	// Fire-and-forget abort for OpenCode sessions.
+	if b.Protocol == ProtocolOpenCode && sid != "" {
+		go b.abortSession(sid)
+	}
 	return nil
+}
+
+// Abort stops the current OpenCode prompt but preserves the session ID for
+// multi-turn context. Used by the ESC handler — the session can be reused
+// for subsequent messages. For a full reset (new conversation, backend switch)
+// use Close() instead.
+func (b *HTTPBackend) Abort() {
+	b.mu.Lock()
+	sid := b.sessionID
+	b.mu.Unlock()
+	if b.Protocol == ProtocolOpenCode && sid != "" {
+		go b.abortSession(sid)
+	}
+}
+
+// abortSession sends POST /session/:id/abort to gracefully stop the OpenCode agent.
+// Best-effort: errors are silently ignored (the session may already be idle).
+func (b *HTTPBackend) abortSession(sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	url := b.BaseURL + "/session/" + sessionID + "/abort"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return
+	}
+	if b.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.APIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}
+
+// ---------------------------------------------------------------------------
+// SSE dead connection detection
+// ---------------------------------------------------------------------------
+
+// sseWatchdogTimeout is how long the SSE event stream can be silent before
+// the watchdog cancels the context, treating the connection as dead.
+// 5 minutes accommodates long tool executions (Edit, Bash) while still
+// detecting truly dead TCP connections in a reasonable time.
+const sseWatchdogTimeout = 5 * time.Minute
+
+// startSSEWatchdog starts a goroutine that cancels the returned context if
+// no event is received within the timeout. Call the returned resetFunc after
+// each SSE event to keep the connection alive. The watchdog exits when the
+// parent context is cancelled or the timeout fires.
+func startSSEWatchdog(parent context.Context, timeout time.Duration) (ctx context.Context, cancel context.CancelFunc, resetFunc func()) {
+	ctx, cancel = context.WithCancel(parent)
+	resetCh := make(chan struct{}, 1) // buffered to avoid blocking the event loop
+
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-resetCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(timeout)
+			case <-timer.C:
+				cancel() // dead connection — cancel the context
+				return
+			}
+		}
+	}()
+
+	resetFunc = func() {
+		select {
+		case resetCh <- struct{}{}:
+		default: // non-blocking; a reset is already pending
+		}
+	}
+	return
 }
 
 // ---------------------------------------------------------------------------
@@ -344,8 +435,13 @@ func (b *HTTPBackend) streamOpenCode(ctx context.Context, messages []ChatMessage
 		}
 
 		// 5. Read SSE events and extract text content from assistant messages
-		//    belonging to our session.
-		b.readOpenCodeEvents(ctx, eventResp.Body, sessionID, ch)
+		//    belonging to our session. Start a watchdog that cancels the
+		//    context if no SSE event arrives within the timeout — this
+		//    detects dead TCP connections during long tool executions
+		//    without goroutine leaks or data races.
+		watchCtx, watchCancel, watchReset := startSSEWatchdog(ctx, sseWatchdogTimeout)
+		defer watchCancel()
+		b.readOpenCodeEvents(watchCtx, eventResp.Body, sessionID, ch, watchReset)
 	}()
 
 	return ch
@@ -391,10 +487,32 @@ func (b *HTTPBackend) ensureSession(ctx context.Context) (string, error) {
 	return session.ID, nil
 }
 
+// SessionID returns the cached OpenCode session ID (empty if no session exists).
+// Used by the app layer to POST permission responses to the correct session.
+func (b *HTTPBackend) SessionID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sessionID
+}
+
 // readOpenCodeEvents reads SSE events from the /event stream and extracts
 // text content from message.part.delta events that belong to the given session.
 // Completion is signalled by session.idle or session.status with type "idle".
-func (b *HTTPBackend) readOpenCodeEvents(ctx context.Context, body io.Reader, sessionID string, ch chan<- string) {
+//
+// Permission events ("permission.updated") are forwarded through the channel
+// as specially-prefixed strings: "permission:{json}" where json contains the
+// permission ID, title, type, and metadata. The app layer detects this prefix
+// and routes it to the chat UI for user confirmation (y/a/n).
+//
+// Permission resolution events ("permission.replied") are forwarded as
+// "permission_resolved:{id}" so the chat UI can clear the prompt.
+func (b *HTTPBackend) readOpenCodeEvents(ctx context.Context, body io.Reader, sessionID string, ch chan<- string, watchdogReset func()) {
+	// sawBusy tracks whether we've seen activity from the current prompt
+	// (session.status: busy or message.part.delta). Stale idle/error events
+	// from a previous aborted prompt are skipped until we confirm the new
+	// prompt is active. This allows session reuse across ESC cancellations.
+	sawBusy := false
+
 	for ev, err := range sse.Read(body, nil) {
 		if err != nil {
 			if ctx.Err() != nil {
@@ -423,7 +541,13 @@ func (b *HTTPBackend) readOpenCodeEvents(ctx context.Context, body io.Reader, se
 			continue
 		}
 
-		// Filter by session ID — all events we care about have it at properties.sessionID
+		// Any successfully parsed event means the connection is alive.
+		watchdogReset()
+
+		// Filter by session ID. The events we process (message.part.delta,
+		// session.idle, session.status, permission.*) all have sessionID at
+		// properties.sessionID. Other events (session.updated, message.updated,
+		// message.part.updated) nest it deeper — we don't process those.
 		evtSessionID, _ := props["sessionID"].(string)
 		if evtSessionID != sessionID {
 			continue
@@ -431,8 +555,8 @@ func (b *HTTPBackend) readOpenCodeEvents(ctx context.Context, body io.Reader, se
 
 		switch eventType {
 		case "message.part.delta":
+			sawBusy = true
 			// Streaming text chunk. Only process text field deltas.
-			// Wire format: {"type":"message.part.delta","properties":{"sessionID":"...","field":"text","delta":"Hello"}}
 			field, _ := props["field"].(string)
 			if field != "text" {
 				continue
@@ -442,22 +566,53 @@ func (b *HTTPBackend) readOpenCodeEvents(ctx context.Context, body io.Reader, se
 				ch <- delta
 			}
 
+		case "permission.updated", "permission.asked":
+			sawBusy = true
+			// Permission request from OpenCode agent.
+			// "permission.updated" is the legacy event type.
+			// "permission.asked" is the new PermissionNext event type.
+			// Both carry the permission data directly in properties.
+			permJSON, err := json.Marshal(props)
+			if err == nil {
+				ch <- "permission:" + string(permJSON)
+			}
+
+		case "permission.replied":
+			// Permission was answered (by us or another client).
+			// Legacy uses "permissionID", new system uses "requestID".
+			permID, _ := props["permissionID"].(string)
+			if permID == "" {
+				permID, _ = props["requestID"].(string)
+			}
+			if permID != "" {
+				ch <- "permission_resolved:" + permID
+			}
+
 		case "session.idle":
-			// Session finished processing — stream is complete.
+			if !sawBusy {
+				continue // stale idle from a previous aborted prompt
+			}
 			return
 
 		case "session.status":
-			// Status change. Check if the session became idle or errored.
-			// Wire format: {"type":"session.status","properties":{"sessionID":"...","status":{"type":"idle"}}}
 			statusObj, _ := props["status"].(map[string]interface{})
 			if statusObj == nil {
 				continue
 			}
 			statusType, _ := statusObj["type"].(string)
 			switch statusType {
+			case "busy":
+				sawBusy = true
+				ch <- "status:busy"
 			case "idle":
+				if !sawBusy {
+					continue // stale idle from a previous aborted prompt
+				}
 				return
 			case "error":
+				if !sawBusy {
+					continue // stale error from a previous aborted prompt
+				}
 				errMsg, _ := statusObj["error"].(string)
 				if errMsg != "" {
 					ch <- fmt.Sprintf("\n\n[error: %s]", errMsg)

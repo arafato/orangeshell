@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -22,6 +23,14 @@ type chatMsg struct {
 	timestamp time.Time
 }
 
+// permissionPrompt holds an active OpenCode permission request awaiting user confirmation.
+type permissionPrompt struct {
+	ID        string // permission ID for the API response
+	SessionID string // session ID for the API response
+	Title     string // human-readable description (e.g. "Edit file src/main.ts")
+	Type      string // permission type (e.g. "edit", "bash")
+}
+
 // chatModel holds the chat conversation state.
 type chatModel struct {
 	messages    []chatMsg // conversation history
@@ -30,10 +39,23 @@ type chatModel struct {
 	scrollY     int       // scroll offset for message history
 	streaming   bool      // true while receiving a streaming response
 	streamBuf   string    // accumulated streaming response text
+
+	// Permission prompt — non-nil when OpenCode is waiting for user confirmation.
+	pendingPermission *permissionPrompt
+
+	// Status text shown next to the spinner (e.g., "agent working..." during
+	// OpenCode tool execution). Cleared when text arrives or stream ends.
+	statusText string
+
+	// Animated spinner shown during streaming.
+	spin spinner.Model
 }
 
 func newChatModel() chatModel {
-	return chatModel{}
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(theme.ColorOrange)
+	return chatModel{spin: s}
 }
 
 // --- Messages emitted to the app layer ---
@@ -57,18 +79,53 @@ type AIChatStreamDoneMsg struct {
 // AIChatNewConversationMsg signals the user wants to start a new conversation.
 type AIChatNewConversationMsg struct{}
 
+// AIChatPermissionMsg delivers an OpenCode permission request to the chat model.
+// The chat renders a yellow prompt and waits for the user to press y/a/n.
+type AIChatPermissionMsg struct {
+	ID        string // permission ID
+	SessionID string // session ID
+	Title     string // human-readable title
+	Type      string // permission type (e.g. "edit", "bash")
+}
+
+// AIChatPermissionResolvedMsg clears a pending permission prompt (answered by us or another client).
+type AIChatPermissionResolvedMsg struct {
+	PermissionID string
+}
+
+// AIPermissionResponseMsg is emitted by the chat model when the user responds to a
+// permission prompt. The app layer sends the HTTP POST to the OpenCode API.
+type AIPermissionResponseMsg struct {
+	PermissionID string // permission ID
+	SessionID    string // session ID
+	Response     string // "once", "always", or "reject"
+}
+
+// AIChatStatusMsg delivers a status update from the OpenCode agent (e.g., "busy"
+// during tool execution). Shown next to the spinner in the chat separator.
+type AIChatStatusMsg struct {
+	Status string // e.g. "busy"
+}
+
 // --- Update ---
 
 func (c chatModel) update(msg tea.Msg, focused bool) (chatModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case AIChatStreamChunkMsg:
 		c.streamBuf += msg.Text
+		c.statusText = "" // text arriving — agent is no longer executing tools
 		// Auto-scroll to bottom during streaming
 		c.scrollToBottom()
 		return c, nil
 
+	case AIChatStatusMsg:
+		c.statusText = msg.Status
+		return c, nil
+
 	case AIChatStreamDoneMsg:
 		c.streaming = false
+		c.statusText = ""
+		c.pendingPermission = nil // clear any stale permission prompt
 		if msg.Err != nil {
 			c.messages = append(c.messages, chatMsg{
 				role:      RoleAssistant,
@@ -87,9 +144,68 @@ func (c chatModel) update(msg tea.Msg, focused bool) (chatModel, tea.Cmd) {
 		c.scrollY = 999999
 		return c, nil
 
+	case AIChatPermissionMsg:
+		c.pendingPermission = &permissionPrompt{
+			ID:        msg.ID,
+			SessionID: msg.SessionID,
+			Title:     msg.Title,
+			Type:      msg.Type,
+		}
+		c.scrollToBottom()
+		return c, nil
+
+	case AIChatPermissionResolvedMsg:
+		if c.pendingPermission != nil && c.pendingPermission.ID == msg.PermissionID {
+			c.pendingPermission = nil
+		}
+		return c, nil
+
+	case spinner.TickMsg:
+		if c.streaming {
+			var cmd tea.Cmd
+			c.spin, cmd = c.spin.Update(msg)
+			return c, cmd
+		}
+		return c, nil
+
 	case tea.KeyMsg:
 		if !focused {
 			return c, nil
+		}
+
+		// Permission prompt intercepts y/a/n keys before normal input handling
+		if c.pendingPermission != nil && c.streaming {
+			perm := c.pendingPermission
+			switch msg.String() {
+			case "y":
+				c.pendingPermission = nil
+				return c, func() tea.Msg {
+					return AIPermissionResponseMsg{
+						PermissionID: perm.ID,
+						SessionID:    perm.SessionID,
+						Response:     "once",
+					}
+				}
+			case "a":
+				c.pendingPermission = nil
+				return c, func() tea.Msg {
+					return AIPermissionResponseMsg{
+						PermissionID: perm.ID,
+						SessionID:    perm.SessionID,
+						Response:     "always",
+					}
+				}
+			case "n":
+				c.pendingPermission = nil
+				return c, func() tea.Msg {
+					return AIPermissionResponseMsg{
+						PermissionID: perm.ID,
+						SessionID:    perm.SessionID,
+						Response:     "reject",
+					}
+				}
+			}
+			// Fall through — esc and pgup/pgdown still work
 		}
 
 		switch msg.String() {
@@ -110,6 +226,7 @@ func (c chatModel) update(msg tea.Msg, focused bool) (chatModel, tea.Cmd) {
 			c.inputCursor = 0
 			c.streaming = true
 			c.streamBuf = ""
+			c.pendingPermission = nil
 			c.scrollToBottom()
 			return c, func() tea.Msg { return AIChatSendMsg{UserMessage: text} }
 
@@ -192,6 +309,7 @@ func (c *chatModel) newConversation() {
 	c.scrollY = 0
 	c.streaming = false
 	c.streamBuf = ""
+	c.pendingPermission = nil
 }
 
 // conversationMessages returns the messages formatted for the AI API.
@@ -224,10 +342,15 @@ func (c chatModel) view(w, h int, focused bool, provisioned bool, backendName st
 		return borderStyle.Render(c.viewNotProvisioned(innerW, innerH, backendName))
 	}
 
-	// Split inner area: messages area + input line
+	// Split inner area: messages area + separator + [permission prompt] + input line.
+	// When a permission prompt is active, the input area expands by 1 line.
 	inputHeight := 1 // single-line input
+	permissionHeight := 0
+	if c.pendingPermission != nil {
+		permissionHeight = 1
+	}
 	separatorHeight := 1
-	messagesHeight := innerH - inputHeight - separatorHeight
+	messagesHeight := innerH - inputHeight - permissionHeight - separatorHeight
 	if messagesHeight < 3 {
 		messagesHeight = 3
 	}
@@ -235,15 +358,27 @@ func (c chatModel) view(w, h int, focused bool, provisioned bool, backendName st
 	// Render messages
 	messagesView := c.renderMessages(innerW, messagesHeight, backendName)
 
-	// Separator
-	sep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).
-		Render(strings.Repeat("─", innerW))
+	// Separator — with spinner in the lower-right when streaming
+	sep := c.renderSeparator(innerW)
+
+	// Permission prompt (yellow banner, only when pending)
+	permView := ""
+	if c.pendingPermission != nil {
+		permView = c.renderPermissionPrompt(innerW)
+	}
 
 	// Input line
 	inputView := c.renderInput(innerW, focused)
 
+	// Compose vertically: messages + separator + [permission] + input
+	parts := []string{messagesView, sep}
+	if permView != "" {
+		parts = append(parts, permView)
+	}
+	parts = append(parts, inputView)
+
 	return borderStyle.Render(
-		lipgloss.JoinVertical(lipgloss.Left, messagesView, sep, inputView),
+		lipgloss.JoinVertical(lipgloss.Left, parts...),
 	)
 }
 
@@ -286,8 +421,6 @@ func (c chatModel) renderMessages(w, h int, backendName string) string {
 			lines = append(lines, line)
 		}
 		lines = append(lines, theme.DimStyle.Render("▍")) // streaming cursor
-	} else if c.streaming {
-		lines = append(lines, theme.DimStyle.Render("Thinking..."))
 	}
 
 	// Apply scroll
@@ -373,7 +506,20 @@ func (c chatModel) renderInput(w int, focused bool) string {
 		Render("> ")
 
 	if c.streaming {
-		return prompt + theme.DimStyle.Render("streaming response... (esc to stop)")
+		if c.pendingPermission != nil {
+			return prompt + lipgloss.NewStyle().Foreground(theme.ColorYellow).Render("awaiting confirmation... (esc to stop)")
+		}
+		spinnerStr := c.spin.View()
+		var statusLabel string
+		if c.statusText == "busy" {
+			statusLabel = "agent working..."
+		} else if c.streamBuf == "" {
+			statusLabel = "thinking..."
+		} else {
+			statusLabel = "streaming..."
+		}
+		escHint := theme.DimStyle.Render(" (esc to stop)")
+		return prompt + spinnerStr + " " + theme.DimStyle.Render(statusLabel) + escHint
 	}
 
 	inputStyle := lipgloss.NewStyle().Foreground(theme.ColorWhite)
@@ -424,6 +570,41 @@ func (c chatModel) renderInput(w int, focused bool) string {
 	}
 
 	return prompt + inputStyle.Render(display)
+}
+
+// renderSeparator renders the horizontal separator line between messages and the input area.
+func (c chatModel) renderSeparator(w int) string {
+	sepStyle := lipgloss.NewStyle().Foreground(theme.ColorDarkGray)
+	return sepStyle.Render(strings.Repeat("─", w))
+}
+
+// renderPermissionPrompt renders the yellow permission confirmation banner.
+// Shown below the separator when OpenCode is waiting for user confirmation.
+func (c chatModel) renderPermissionPrompt(w int) string {
+	if c.pendingPermission == nil {
+		return ""
+	}
+
+	yellowStyle := lipgloss.NewStyle().Foreground(theme.ColorYellow)
+	dimStyle := lipgloss.NewStyle().Foreground(theme.ColorGray)
+
+	// Truncate title if it exceeds available width
+	title := c.pendingPermission.Title
+	hintStr := "  [y] allow  [a] always  [n] reject"
+	maxTitleWidth := w - lipgloss.Width(hintStr) - 4 // 4 for prefix + margin
+	if maxTitleWidth < 10 {
+		maxTitleWidth = 10
+	}
+	titleRunes := []rune(title)
+	if len(titleRunes) > maxTitleWidth {
+		title = string(titleRunes[:maxTitleWidth-1]) + "\u2026" // ellipsis
+	}
+
+	prefix := yellowStyle.Bold(true).Render("\u26A0 ") // warning sign
+	titleView := yellowStyle.Render(title)
+	hintView := dimStyle.Render(hintStr)
+
+	return prefix + titleView + hintView
 }
 
 // --- Markdown rendering ---

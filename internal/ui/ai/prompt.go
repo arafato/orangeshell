@@ -71,7 +71,8 @@ func BuildSystemPrompt(sources []ContextSourceData, files []FileContextData) str
 	if hasFiles {
 		fileChars := 0
 		sb.WriteString("\n## Source Files\n")
-		sb.WriteString("The following source files are from the Worker project(s).\n\n")
+		sb.WriteString("The following source files are from the Worker project(s).\n")
+		sb.WriteString("When modifying these files, prefer the Write tool (overwrite entire file) over the Edit tool, as Edit may fail due to content matching issues.\n\n")
 
 		for _, f := range files {
 			// Check file budget

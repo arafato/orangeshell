@@ -58,7 +58,8 @@ orangeshell/
     │   └── oauth.go                 #   OAuth PKCE flow with token refresh
     ├── api/
     │   ├── client.go                # Cloudflare SDK v6 client wrapper
-    │   ├── builds.go                # Workers Builds API (raw HTTP, not SDK)
+    │   ├── analytics.go             # GraphQL Analytics API client
+    │   ├── builds.go                # Workers Builds API (read + write, raw HTTP)
     │   ├── resources.go             # Lightweight resource list (Vectorize, Hyperdrive, mTLS)
     │   └── token.go                 # Scoped API token auto-provisioning
     ├── service/
@@ -71,6 +72,7 @@ orangeshell/
     ├── wrangler/
     │   ├── config.go                # WranglerConfig parser (TOML/JSON/JSONC)
     │   ├── finder.go                # Project discovery (recursive walk)
+    │   ├── git.go                   # Local git repo detection (file-based, no exec)
     │   ├── runner.go                # CLI command runner (npx wrangler)
     │   ├── writer.go                # Config file writer (TOML + JSON mutations)
     │   ├── workflows.go             # Workflow class scanner (source file regex)
@@ -94,6 +96,7 @@ orangeshell/
         │   ├── app_ai.go            # AI tab orchestration + handleAIMsg
         │   ├── app_detail.go        # Detail/resource message handler
         │   ├── app_monitoring_msgs.go # Monitoring message handler
+        │   ├── app_cicd.go          # CI/CD wizard message handler
         │   ├── app_overlays.go      # Search/actions/launcher
         │   └── app_resource_popup.go # Resource creation popup
         ├── tabbar/tabbar.go         # Tab bar (stateless rendering)
@@ -317,6 +320,7 @@ These are active pitfalls — things that will bite you if you don't know about 
 25. **Mouse wheel uses `msg.Button` not `msg.Type`**: In Bubble Tea v1.3.10, `MouseEventType` is deprecated. Use `msg.Button == tea.MouseButtonWheelUp` (not `tea.MouseWheelUp`, which is a `MouseEventType`).
 
 26. **Mouse escape sequence fragments leak as KeyMsg**: Rapid mouse wheel events can produce partially-parsed CSI sequences (`\x1b[<65;30;10M`). The `\x1b` is consumed as escape, remaining bytes (`[`, `<`, digits) arrive as `tea.KeyMsg`. Fix: track `lastMouseTime` and suppress character insertion within 100ms of any `tea.MouseMsg`.
+27. **Analytics auth credential priority**: Fallback token is tried first (may or may not have analytics scope). On GraphQL auth error → re-provision with CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL env vars → new token includes Account Analytics Read scope → saves to config → retries. If env vars not set → shows descriptive error message with instructions.
 
 ---
 
@@ -339,15 +343,17 @@ These are active pitfalls — things that will bite you if you don't know about 
 
 ## 10. Planned Features
 
-### Workers Analytics Dashboard (IN PROGRESS)
-- **Location**: Monitoring tab → right pane (Option D: replaces grid when viewing analytics)
-- **Navigation**: Press `a` on a worker in the left pane → right pane switches to analytics. `esc` → back to grid.
-- **Data source**: Cloudflare GraphQL Analytics API (`workersInvocationsAdaptive` dataset)
-- **Fields**: sum{requests, errors, subrequests}, quantiles{cpuTimeP50/P99}, dimensions{datetime, scriptName, status}
-- **Time ranges**: 1h, 6h, 24h, 7d, 30d (keyboard-switchable with `[`/`]`)
-- **Auto-refresh**: Optional 30s polling via tea.Tick
-- **Mockup**: `https://excalidraw.cfdata.org/drawing/c8adf9af-19af-4241-a3e8-278dfacf020d`
-- **Files**: `internal/api/analytics.go`, `internal/ui/monitoring/analytics.go`, `internal/ui/monitoring/analytics_view.go`
+### Workers Builds CI/CD Wizard (IN PROGRESS)
+- **Location**: Operations tab → ctrl+p → "Setup CI/CD..." action
+- **Purpose**: Connect a Worker project to a GitHub/GitLab repo for automated deployments
+- **Prerequisite**: Project must be in a git repo with a GitHub/GitLab remote
+- **GitHub/GitLab installation**: Treated as a prerequisite (one-time dashboard setup). Wizard detects if missing and redirects.
+- **Wizard flow**: Detect git → Check installation (via config_autofill) → Configure (branch, build/deploy cmd, root dir, watch paths) → Review → Apply (create connection + trigger)
+- **Watch paths**: Include/exclude patterns per https://developers.cloudflare.com/workers/ci-cd/builds/build-watch-paths/
+- **API endpoints**: `PUT /builds/repos/connections`, `POST /builds/triggers`, `GET /builds/repos/.../config_autofill`, `GET /builds/workers/.../triggers`
+- **Auth**: Requires `Workers CI Write` scope (auto-provisioned in fallback token)
+- **Files**: `internal/wrangler/git.go`, `internal/ui/cicdpopup/cicdpopup.go`, `internal/ui/app/app_cicd.go`
+- **Status**: Core implementation done. Needs testing with real Cloudflare account + Git repos.
 
 ### Queue Message Inspector (PLANNED)
 - Resources tab → Queues detail. Pull/peek messages without acknowledging.

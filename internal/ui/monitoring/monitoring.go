@@ -6,6 +6,8 @@ import (
 	"math"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/oarafat/orangeshell/internal/api"
 	svc "github.com/oarafat/orangeshell/internal/service"
 )
 
@@ -22,6 +24,10 @@ type Model struct {
 	gridPanes   []TailPane
 	gridCursor  int // which pane is focused (index into gridPanes)
 	gridScrollY int // vertical scroll offset for grid rows
+
+	// Analytics view (replaces grid when active)
+	showAnalytics bool
+	analyticsView AnalyticsModel
 
 	// Focus
 	focusPane FocusPane
@@ -47,6 +53,9 @@ func New() Model {
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	if m.showAnalytics {
+		m.analyticsView.SetSize(m.analyticsRightWidth(), h)
+	}
 }
 
 // --- Worker tree API ---
@@ -95,6 +104,63 @@ func (m *Model) SetExportActive(active bool) {
 // ExportActive returns whether the log exporter is running.
 func (m Model) ExportActive() bool {
 	return m.exportActive
+}
+
+// ShowAnalytics returns whether the analytics view is active.
+func (m Model) ShowAnalytics() bool {
+	return m.showAnalytics
+}
+
+// AnalyticsScript returns the script name being analyzed (empty if analytics is not shown).
+func (m Model) AnalyticsScript() string {
+	if m.showAnalytics {
+		return m.analyticsView.ScriptName()
+	}
+	return ""
+}
+
+// OpenAnalytics switches the right pane to the analytics view for the given script.
+func (m *Model) OpenAnalytics(scriptName string) {
+	m.showAnalytics = true
+	m.analyticsView = NewAnalytics(scriptName)
+	m.analyticsView.SetSize(m.analyticsRightWidth(), m.height)
+	m.analyticsView.SetLoading()
+}
+
+// CloseAnalytics switches back to the grid view.
+func (m *Model) CloseAnalytics() {
+	m.showAnalytics = false
+}
+
+// SetAnalyticsMetrics stores fetched analytics data.
+func (m *Model) SetAnalyticsMetrics(metrics *api.WorkerMetrics) {
+	m.analyticsView.SetMetrics(metrics)
+}
+
+// SetAnalyticsError records a fetch error in the analytics view.
+func (m *Model) SetAnalyticsError(err error) {
+	m.analyticsView.SetError(err)
+}
+
+// AnalyticsTimeRangeLabel returns the current time range label of the analytics view.
+func (m Model) AnalyticsTimeRangeLabel() string {
+	if m.showAnalytics {
+		return m.analyticsView.TimeRangeLabel()
+	}
+	return ""
+}
+
+// analyticsRightWidth computes the right pane width for analytics.
+func (m Model) analyticsRightWidth() int {
+	leftWidth := m.width * leftPaneRatio / 100
+	if leftWidth < 12 {
+		leftWidth = 12
+	}
+	rightWidth := m.width - leftWidth - 1
+	if rightWidth < 10 {
+		rightWidth = 10
+	}
+	return rightWidth
 }
 
 // --- Grid API (called by app layer to route tail data) ---
@@ -438,8 +504,22 @@ func (m *Model) Clear() {
 
 // Update handles key events for the monitoring tab.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	// Route auto-refresh ticks to analytics model
+	if _, ok := msg.(autoRefreshTickMsg); ok && m.showAnalytics {
+		var cmd tea.Cmd
+		m.analyticsView, cmd = m.analyticsView.Update(msg)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// If analytics view is active, route all keys there
+		if m.showAnalytics {
+			var cmd tea.Cmd
+			m.analyticsView, cmd = m.analyticsView.Update(msg)
+			return m, cmd
+		}
+
 		// Tab switches focus between panes
 		if msg.String() == "tab" {
 			if m.focusPane == FocusLeft {
@@ -478,6 +558,18 @@ func (m Model) updateLeftPane(msg tea.KeyMsg) (Model, tea.Cmd) {
 				}
 				return m, func() tea.Msg {
 					return TailAddMsg{ScriptName: entry.ScriptName}
+				}
+			}
+		}
+	case "a":
+		// Open analytics view for focused worker
+		if m.treeCursor >= 0 && m.treeCursor < len(m.workerTree) {
+			entry := m.workerTree[m.treeCursor]
+			if !entry.IsHeader && entry.ScriptName != "" && !entry.IsDev {
+				// Strip "dev:" prefix if present (shouldn't be for non-dev, but just in case)
+				scriptName := entry.ScriptName
+				return m, func() tea.Msg {
+					return AnalyticsRequestMsg{ScriptName: scriptName, TimeRangeIndex: 2} // default 24h
 				}
 			}
 		}

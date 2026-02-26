@@ -1,6 +1,9 @@
 package monitoring
 
-import svc "github.com/oarafat/orangeshell/internal/service"
+import (
+	"github.com/oarafat/orangeshell/internal/api"
+	svc "github.com/oarafat/orangeshell/internal/service"
+)
 
 // --- Constants ---
 
@@ -119,3 +122,21 @@ type GridPaneInfo struct {
 	LineCount  int
 	Lines      []svc.TailLine // copy of the log lines
 }
+
+// --- Analytics messages ---
+
+// AnalyticsRequestMsg requests the app to fetch analytics for a worker.
+type AnalyticsRequestMsg struct {
+	ScriptName     string
+	TimeRangeIndex int // index into api.TimeRanges
+}
+
+// AnalyticsDataMsg carries the analytics response back to the monitoring model.
+type AnalyticsDataMsg struct {
+	ScriptName string
+	Data       *api.WorkerMetrics
+	Err        error
+}
+
+// AnalyticsCloseMsg signals that the analytics view should be closed.
+type AnalyticsCloseMsg struct{}

@@ -433,11 +433,23 @@ func (m Model) renderMonitoringHelp() []helpEntry {
 		}
 	}
 
+	// Analytics view active — show analytics-specific help
+	if m.monitoring.ShowAnalytics() {
+		return []helpEntry{
+			{",/.", "time range"},
+			{"r", "refresh"},
+			{"R", "auto-refresh"},
+			{"j/k", "scroll"},
+			{"esc", "back to grid"},
+		}
+	}
+
 	switch m.monitoring.Focus() {
 	case monitoring.FocusLeft:
 		entries := []helpEntry{
 			{"j/k", "navigate"},
 			{"space", "toggle"},
+			{"a", "analytics"},
 		}
 		if m.monitoring.CursorOnDev() {
 			entries = append(entries, helpEntry{"c", "cron trigger"})

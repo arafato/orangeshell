@@ -53,7 +53,14 @@ func (m Model) viewDualPane() string {
 	}
 
 	leftView := m.viewWorkerTree(leftWidth, contentHeight)
-	rightView := m.viewTailGrid(rightWidth, contentHeight)
+
+	// Right pane: analytics view or tail grid
+	var rightView string
+	if m.showAnalytics {
+		rightView = m.analyticsView.View(rightWidth, contentHeight)
+	} else {
+		rightView = m.viewTailGrid(rightWidth, contentHeight)
+	}
 
 	// Vertical separator
 	sepStyle := lipgloss.NewStyle().Foreground(theme.ColorDarkGray)

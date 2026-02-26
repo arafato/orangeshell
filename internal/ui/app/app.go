@@ -878,6 +878,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			// Esc on the Monitoring tab — dual-pane navigation
 			if m.activeTab == tabbar.TabMonitoring {
+				// Analytics view open → close it, return to grid
+				if m.monitoring.ShowAnalytics() {
+					m.monitoring.CloseAnalytics()
+					return m, nil
+				}
 				if m.monitoring.Focus() == monitoring.FocusRight {
 					// Right pane focused → switch to left pane
 					m.monitoring.SetFocusLeft()

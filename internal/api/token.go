@@ -16,6 +16,8 @@ const (
 	permAccessAppsRead = "7ea222f6d5064cfa89ea366d7c1fee89"
 	// "Workers CI Read" — account-scoped
 	permWorkersCIRead = "ad99c5ae555e45c4bef5bdf2678388ba"
+	// "Account Analytics Read" — account-scoped (required for GraphQL Analytics API)
+	permAccountAnalyticsRead = "b89a480218d04ceb98b4fe57ca29dc1f"
 )
 
 // tokenCreateRequest is the request body for POST /user/tokens.
@@ -53,8 +55,9 @@ type tokenResult struct {
 	Value string `json:"value"` // The actual API token value (only returned on creation)
 }
 
-// CreateScopedToken creates an API token with Access Apps Read and Workers CI Read
-// permissions, scoped to the given account. Uses Global API Key (email + key) auth.
+// CreateScopedToken creates an API token with Access Apps Read, Workers CI Read,
+// and Account Analytics Read permissions, scoped to the given account.
+// Uses Global API Key (email + key) auth.
 // Returns the token value on success, or an error.
 func CreateScopedToken(ctx context.Context, authEmail, authKey, accountID string) (string, error) {
 	body := tokenCreateRequest{
@@ -68,6 +71,7 @@ func CreateScopedToken(ctx context.Context, authEmail, authKey, accountID string
 				PermissionGroups: []tokenPermGroup{
 					{ID: permAccessAppsRead},
 					{ID: permWorkersCIRead},
+					{ID: permAccountAnalyticsRead},
 				},
 			},
 		},

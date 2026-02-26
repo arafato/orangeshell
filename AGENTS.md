@@ -227,6 +227,7 @@ ColorYellow = "#EDD400"   ColorRed = "#EF2929"       ColorBlue = "#729FCF"
 | `ctrl+s` | AI tab | AI settings |
 | `esc` | AI (streaming) | Stop/cancel response |
 | `y`/`a`/`n` | AI (permission) | Allow once/always/reject |
+| `space` | Monitoring (left) | Toggle worker in/out of grid |
 | `t` | Monitoring | Start tail |
 | `enter` | Resources | View detail |
 | `d` | Resources list | Delete resource |
@@ -311,6 +312,8 @@ These are active pitfalls — things that will bite you if you don't know about 
 23. **OpenCode auto-approves by default**: Unless `opencode.json` has explicit permission config (e.g., `"permission": {"*": "ask"}`), tool calls are auto-approved and `permission.asked` events are never published. Clear the SQLite `permission` table to reset "always" approvals.
 
 24. **Source files use absolute paths in system prompt**: Relative paths cause OpenCode's Edit tool to fail. `ReadProjectFiles()` uses `f.Path` (absolute) not `f.RelPath`.
+
+25. **Mouse wheel uses `msg.Button` not `msg.Type`**: In Bubble Tea v1.3.10, `MouseEventType` is deprecated. Use `msg.Button == tea.MouseButtonWheelUp` (not `tea.MouseWheelUp`, which is a `MouseEventType`).
 
 ---
 

@@ -250,6 +250,7 @@ go build -o orangeshell . && ./orangeshell [optional-directory]
 ### UX Mockups
 - All tabs: `https://excalidraw.cfdata.org/drawing/3905fbe8-6fd5-45ea-8b3c-d22fc59f1682`
 - AI Tab + Dev Mode: `https://excalidraw.cfdata.org/drawing/a9afa57a-bde8-45a6-bedf-d3bac64ec9cb`
+- Workers Analytics Dashboard: `https://excalidraw.cfdata.org/drawing/c8adf9af-19af-4241-a3e8-278dfacf020d`
 
 ---
 
@@ -315,6 +316,8 @@ These are active pitfalls — things that will bite you if you don't know about 
 
 25. **Mouse wheel uses `msg.Button` not `msg.Type`**: In Bubble Tea v1.3.10, `MouseEventType` is deprecated. Use `msg.Button == tea.MouseButtonWheelUp` (not `tea.MouseWheelUp`, which is a `MouseEventType`).
 
+26. **Mouse escape sequence fragments leak as KeyMsg**: Rapid mouse wheel events can produce partially-parsed CSI sequences (`\x1b[<65;30;10M`). The `\x1b` is consumed as escape, remaining bytes (`[`, `<`, digits) arrive as `tea.KeyMsg`. Fix: track `lastMouseTime` and suppress character insertion within 100ms of any `tea.MouseMsg`.
+
 ---
 
 ## 9. Design Principles (Bubble Tea)
@@ -331,3 +334,32 @@ These are active pitfalls — things that will bite you if you don't know about 
 - **Unique zone IDs**: Combine component name with item ID/index.
 - **Use lipgloss for layout**: Never manually calculate spaces/tabs.
 - **Value receivers for Update()**: Pointer receivers only for explicit mutator methods.
+
+---
+
+## 10. Planned Features
+
+### Workers Analytics Dashboard (IN PROGRESS)
+- **Location**: Monitoring tab → right pane (Option D: replaces grid when viewing analytics)
+- **Navigation**: Press `a` on a worker in the left pane → right pane switches to analytics. `esc` → back to grid.
+- **Data source**: Cloudflare GraphQL Analytics API (`workersInvocationsAdaptive` dataset)
+- **Fields**: sum{requests, errors, subrequests}, quantiles{cpuTimeP50/P99}, dimensions{datetime, scriptName, status}
+- **Time ranges**: 1h, 6h, 24h, 7d, 30d (keyboard-switchable with `[`/`]`)
+- **Auto-refresh**: Optional 30s polling via tea.Tick
+- **Mockup**: `https://excalidraw.cfdata.org/drawing/c8adf9af-19af-4241-a3e8-278dfacf020d`
+- **Files**: `internal/api/analytics.go`, `internal/ui/monitoring/analytics.go`, `internal/ui/monitoring/analytics_view.go`
+
+### Queue Message Inspector (PLANNED)
+- Resources tab → Queues detail. Pull/peek messages without acknowledging.
+- View JSON payloads formatted. DLQ inspection and retry.
+- Uses Cloudflare Queues API pull/ack endpoints.
+
+### Logpush Configuration (PLANNED)
+- Create/manage Logpush jobs to R2 or other destinations.
+- Persistent log storage beyond the 200-line tail ring buffer.
+- New service in `internal/service/logpush.go`.
+
+### Cross-Worker Request Tracing (PLANNED)
+- Enable/configure Workers Trace Events (see https://developers.cloudflare.com/workers/observability/traces/).
+- Possibly visualize trace waterfall in TUI (Monitoring tab).
+- API: trace configuration endpoints for enabling/disabling per-worker tracing.

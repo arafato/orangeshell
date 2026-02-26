@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -49,13 +48,26 @@ type chatModel struct {
 
 	// Animated spinner shown during streaming.
 	spin spinner.Model
+
+	// lastMouseTime tracks when the last tea.MouseMsg was received.
+	// Used to suppress stray typed characters (e.g. "[" from partially-parsed
+	// CSI escape sequences) that arrive immediately after mouse wheel events.
+	lastMouseTime time.Time
+
+	// viewMaxScroll tracks the maximum scroll offset computed during the last View() pass.
+	// Shared via pointer so that value-receiver View() methods can write it and
+	// value-receiver Update() methods can read it for immediate clamping.
+	// This prevents scrollY from drifting past the real max, which causes
+	// delayed scroll response at boundaries and stray escape-sequence characters.
+	viewMaxScroll *int
 }
 
 func newChatModel() chatModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(theme.ColorOrange)
-	return chatModel{spin: s}
+	maxScroll := 0
+	return chatModel{spin: s, viewMaxScroll: &maxScroll}
 }
 
 // --- Messages emitted to the app layer ---
@@ -168,6 +180,25 @@ func (c chatModel) update(msg tea.Msg, focused bool) (chatModel, tea.Cmd) {
 		}
 		return c, nil
 
+	case tea.MouseMsg:
+		c.lastMouseTime = time.Now()
+		if !focused {
+			return c, nil
+		}
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			c.clampScroll()
+			c.scrollY -= 3
+			if c.scrollY < 0 {
+				c.scrollY = 0
+			}
+		case tea.MouseButtonWheelDown:
+			c.clampScroll()
+			c.scrollY += 3
+			c.clampScroll()
+		}
+		return c, nil
+
 	case tea.KeyMsg:
 		if !focused {
 			return c, nil
@@ -267,26 +298,42 @@ func (c chatModel) update(msg tea.Msg, focused bool) (chatModel, tea.Cmd) {
 
 		// Scroll message history
 		case "pgup":
-			// Clamp from the scroll-to-bottom sentinel before applying delta.
-			// Without this, subtracting 10 from 999999 still renders at the bottom.
-			if maxEst := len(c.messages) * 30; c.scrollY > maxEst {
-				c.scrollY = maxEst
-			}
+			c.clampScroll()
 			c.scrollY -= 10
 			if c.scrollY < 0 {
 				c.scrollY = 0
 			}
 		case "pgdown":
+			c.clampScroll()
 			c.scrollY += 10
+			c.clampScroll()
 
 		default:
-			// Insert typed character (supports multi-byte Unicode)
-			if utf8.RuneCountInString(msg.String()) == 1 {
+			// Handle paste (bracketed paste delivers all chars in Runes)
+			if msg.Paste {
 				runes := []rune(c.input)
-				r := []rune(msg.String())
+				newRunes := make([]rune, 0, len(runes)+len(msg.Runes))
+				newRunes = append(newRunes, runes[:c.inputCursor]...)
+				newRunes = append(newRunes, msg.Runes...)
+				newRunes = append(newRunes, runes[c.inputCursor:]...)
+				c.input = string(newRunes)
+				c.inputCursor += len(msg.Runes)
+				return c, nil
+			}
+			// Suppress stray characters from partially-parsed mouse escape sequences.
+			// When the terminal sends SGR mouse events (e.g. \x1b[<65;30;10M) in rapid
+			// bursts, some bytes may arrive as tea.KeyMsg instead of tea.MouseMsg.
+			// These fragments (typically "[", "<", digits, "M", "m") appear within
+			// ~10ms of a real mouse event. Drop them to prevent input corruption.
+			if !c.lastMouseTime.IsZero() && time.Since(c.lastMouseTime) < 100*time.Millisecond {
+				return c, nil
+			}
+			// Insert typed character (supports multi-byte Unicode)
+			if len(msg.Runes) == 1 {
+				runes := []rune(c.input)
 				newRunes := make([]rune, 0, len(runes)+1)
 				newRunes = append(newRunes, runes[:c.inputCursor]...)
-				newRunes = append(newRunes, r...)
+				newRunes = append(newRunes, msg.Runes...)
 				newRunes = append(newRunes, runes[c.inputCursor:]...)
 				c.input = string(newRunes)
 				c.inputCursor++
@@ -301,6 +348,21 @@ func (c *chatModel) scrollToBottom() {
 	c.scrollY = 999999
 }
 
+// clampScroll constrains scrollY to [0, viewMaxScroll] using the max scroll
+// value computed during the previous View() pass. This prevents scrollY from
+// drifting far past the real boundary, which would cause delayed response
+// when scrolling back in the opposite direction.
+func (c *chatModel) clampScroll() {
+	if c.viewMaxScroll != nil && *c.viewMaxScroll >= 0 {
+		if c.scrollY > *c.viewMaxScroll {
+			c.scrollY = *c.viewMaxScroll
+		}
+	}
+	if c.scrollY < 0 {
+		c.scrollY = 0
+	}
+}
+
 // newConversation clears the chat history.
 func (c *chatModel) newConversation() {
 	c.messages = nil
@@ -310,6 +372,9 @@ func (c *chatModel) newConversation() {
 	c.streaming = false
 	c.streamBuf = ""
 	c.pendingPermission = nil
+	if c.viewMaxScroll != nil {
+		*c.viewMaxScroll = 0
+	}
 }
 
 // conversationMessages returns the messages formatted for the AI API.
@@ -429,9 +494,13 @@ func (c chatModel) renderMessages(w, h int, backendName string) string {
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
-	if c.scrollY > maxScroll {
-		// c.scrollY can't be modified here (value receiver), but we clamp for display
+
+	// Store maxScroll for the next Update() cycle so scrollY can be clamped
+	// immediately, preventing drift and delayed boundary response.
+	if c.viewMaxScroll != nil {
+		*c.viewMaxScroll = maxScroll
 	}
+
 	scrollY := c.scrollY
 	if scrollY > maxScroll {
 		scrollY = maxScroll

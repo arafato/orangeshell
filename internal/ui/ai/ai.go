@@ -64,7 +64,7 @@ type Model struct {
 // New creates a new AI tab model.
 func New() Model {
 	return Model{
-		focus:    FocusChat,
+		focus:    FocusContext,
 		mode:     ModeChat,
 		settings: newSettingsModel(),
 		chat:     newChatModel(),

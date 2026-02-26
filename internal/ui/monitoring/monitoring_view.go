@@ -304,7 +304,7 @@ func (m Model) viewTailGrid(width, height int) string {
 func (m Model) viewGridEmpty(width, height int) string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorWhite)
 	title := " " + titleStyle.Render("Live Tail")
-	hint := " " + theme.DimStyle.Render("Select a worker and press a to start tailing.")
+	hint := " " + theme.DimStyle.Render("Select a worker and press space to start tailing.")
 
 	lines := []string{title, "", hint}
 	for len(lines) < height {

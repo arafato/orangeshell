@@ -466,23 +466,18 @@ func (m Model) updateLeftPane(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.moveCursorDown()
 	case "k", "up":
 		m.moveCursorUp()
-	case "a":
-		// Add focused worker to the grid and start tailing
+	case " ":
+		// Toggle focused worker in/out of the grid
 		if m.treeCursor >= 0 && m.treeCursor < len(m.workerTree) {
 			entry := m.workerTree[m.treeCursor]
-			if !entry.IsHeader && entry.ScriptName != "" && !m.IsInGrid(entry.ScriptName) {
+			if !entry.IsHeader && entry.ScriptName != "" {
+				if m.IsInGrid(entry.ScriptName) {
+					return m, func() tea.Msg {
+						return TailRemoveMsg{ScriptName: entry.ScriptName}
+					}
+				}
 				return m, func() tea.Msg {
 					return TailAddMsg{ScriptName: entry.ScriptName}
-				}
-			}
-		}
-	case "d":
-		// Remove focused worker from the grid and stop tailing
-		if m.treeCursor >= 0 && m.treeCursor < len(m.workerTree) {
-			entry := m.workerTree[m.treeCursor]
-			if !entry.IsHeader && entry.ScriptName != "" && m.IsInGrid(entry.ScriptName) {
-				return m, func() tea.Msg {
-					return TailRemoveMsg{ScriptName: entry.ScriptName}
 				}
 			}
 		}

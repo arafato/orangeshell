@@ -23,7 +23,7 @@ func (m *Model) handleMonitoringMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, nil, true
 
 	case monitoring.TailAddMsg:
-		// User pressed 'a' on a worker in the tree — add to grid and start tail
+		// User pressed space on a worker in the tree — add to grid and start tail
 		if m.isDevWorker(msg.ScriptName) {
 			// Dev worker: output is already being piped. Just ensure it's in the grid.
 			if ds := m.findDevSession(msg.ScriptName); ds != nil {
@@ -40,10 +40,10 @@ func (m *Model) handleMonitoringMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return *m, m.startGridTailCmd(accountID, msg.ScriptName), true
 
 	case monitoring.TailRemoveMsg:
-		// User pressed 'd' on a worker in the tree — stop tail and remove from grid
+		// User pressed space on a worker in the tree — stop tail and remove from grid
 		if m.isDevWorker(msg.ScriptName) {
 			// Dev worker: remove from grid but don't stop the dev process.
-			// Output continues flowing to CmdPane. User can re-add via 'a'.
+			// Output continues flowing to CmdPane. User can re-add via space.
 			m.monitoring.RemoveFromGrid(msg.ScriptName)
 			return *m, nil, true
 		}

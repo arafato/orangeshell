@@ -437,8 +437,7 @@ func (m Model) renderMonitoringHelp() []helpEntry {
 	case monitoring.FocusLeft:
 		entries := []helpEntry{
 			{"j/k", "navigate"},
-			{"a", "add"},
-			{"d", "remove"},
+			{"space", "toggle"},
 		}
 		if m.monitoring.CursorOnDev() {
 			entries = append(entries, helpEntry{"c", "cron trigger"})

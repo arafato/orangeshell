@@ -721,6 +721,14 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail, cmd = m.detail.Update(msg)
 			return m, cmd
 		}
+
+		// Forward mouse events to the AI tab (for scroll wheel on chat panel)
+		if m.activeTab == tabbar.TabAI {
+			var cmd tea.Cmd
+			m.aiTab, cmd = m.aiTab.Update(msg)
+			return m, cmd
+		}
+
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -755,13 +763,9 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				break // fall through to AI tab Update to type 'q' in chat/settings
 			}
-			// Monitoring tab: quit only when idle (no active tail).
+			// Monitoring tab: always allow quit via q.
 			if m.activeTab == tabbar.TabMonitoring {
-				if !m.monitoring.IsActive() {
-					return m, tea.Quit
-				}
-				// If tail is active, q is not quit — fall through.
-				break
+				return m, tea.Quit
 			}
 			// Configuration tab: the config model's own Update handles q → tea.Quit.
 			if m.activeTab == tabbar.TabConfiguration {

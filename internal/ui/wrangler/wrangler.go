@@ -2,6 +2,7 @@ package wrangler
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -47,6 +48,9 @@ type Model struct {
 	// nil when the focused project/env has no running or recently completed command.
 	activeCmdPane *CmdPane
 	spinner       spinner.Model
+
+	// Git info for single-project mode (detected lazily)
+	gitInfo *wcfg.GitInfo
 
 	// Version picker overlay
 	showVersionPicker bool
@@ -170,6 +174,30 @@ func (m Model) SelectedProjectRelPath() string {
 	}
 	if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
 		return m.projects[m.projectCursor].box.RelPath
+	}
+	return ""
+}
+
+// SelectedProjectGitInfo returns the git info for the currently selected
+// project on the monorepo project list. Returns nil if not applicable.
+func (m Model) SelectedProjectGitInfo() *wcfg.GitInfo {
+	if !m.IsOnProjectList() {
+		return nil
+	}
+	if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
+		return m.projects[m.projectCursor].gitInfo
+	}
+	return nil
+}
+
+// SelectedProjectDir returns the absolute path to the directory of the currently
+// selected project on the monorepo project list. Returns "" if not applicable.
+func (m Model) SelectedProjectDir() string {
+	if !m.IsOnProjectList() {
+		return ""
+	}
+	if m.projectCursor >= 0 && m.projectCursor < len(m.projects) {
+		return filepath.Dir(m.projects[m.projectCursor].configPath)
 	}
 	return ""
 }
@@ -359,6 +387,20 @@ func (m Model) FocusedProjectName() string {
 		return m.config.Name
 	}
 	return ""
+}
+
+// GitInfo returns the local git info for the currently active project.
+// In monorepo mode, returns the drilled-in project's git info.
+// In single-project mode, detects lazily from the config path.
+func (m *Model) GitInfo() *wcfg.GitInfo {
+	if m.IsMonorepo() && m.activeProject >= 0 && m.activeProject < len(m.projects) {
+		return m.projects[m.activeProject].gitInfo
+	}
+	// Single-project mode: detect lazily if not yet populated
+	if m.gitInfo == nil && m.configPath != "" {
+		m.gitInfo = wcfg.DetectGit(filepath.Dir(m.configPath))
+	}
+	return m.gitInfo
 }
 
 // EnvBoxCount returns the number of env boxes in the current view.

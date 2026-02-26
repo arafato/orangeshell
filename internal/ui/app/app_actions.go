@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
+	"github.com/oarafat/orangeshell/internal/ui/cicdpopup"
 	"github.com/oarafat/orangeshell/internal/ui/envpopup"
 	"github.com/oarafat/orangeshell/internal/ui/helppopup"
 	"github.com/oarafat/orangeshell/internal/ui/projectpopup"
@@ -52,6 +53,16 @@ func (m Model) buildMonorepoActionsPopup() actions.Model {
 			Description: "Deploy all projects for an environment",
 			Section:     "Commands",
 			Action:      "deploy_all",
+		})
+	}
+
+	// CI/CD section (when a project with config is selected)
+	if m.wrangler.SelectedProjectConfig() != nil {
+		items = append(items, actions.Item{
+			Label:       "Setup CI/CD...",
+			Description: "Connect a Git repository for automated deployments",
+			Section:     "CI/CD",
+			Action:      "setup_cicd_monorepo",
 		})
 	}
 
@@ -286,6 +297,16 @@ func (m Model) buildWranglerActionsPopup() actions.Model {
 		}
 	}
 
+	// CI/CD section (project-level — git detected at project directory)
+	if m.wrangler.HasConfig() {
+		items = append(items, actions.Item{
+			Label:       "Setup CI/CD...",
+			Description: "Connect a Git repository for automated deployments",
+			Section:     "CI/CD",
+			Action:      "setup_cicd",
+		})
+	}
+
 	// Configuration section actions (only when config is loaded)
 	if m.wrangler.HasConfig() {
 		items = append(items, actions.Item{
@@ -517,6 +538,35 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		m.showProjectPopup = true
 		m.projectPopup = projectpopup.New(m.wrangler.ProjectDirNames(), m.wrangler.RootDir())
 		return nil
+	}
+
+	// Setup CI/CD action (from monorepo project list — git detected at repo root)
+	if item.Action == "setup_cicd_monorepo" {
+		gitInfo := wcfg.DetectGit(m.wrangler.RootDir())
+		scriptName := ""
+		if cfg := m.wrangler.SelectedProjectConfig(); cfg != nil {
+			scriptName = cfg.Name
+		}
+		projectDir := m.wrangler.SelectedProjectDir()
+		m.cicdPopup = cicdpopup.New(gitInfo, scriptName, "", projectDir)
+		m.showCICDPopup = true
+		return m.cicdPopup.Init()
+	}
+
+	// Setup CI/CD action (from drilled-in project view — git detected at project level)
+	if item.Action == "setup_cicd" {
+		gitInfo := m.wrangler.GitInfo()
+		scriptName := ""
+		if cfg := m.wrangler.Config(); cfg != nil {
+			scriptName = cfg.Name
+		}
+		projectDir := ""
+		if m.wrangler.HasConfig() {
+			projectDir = filepath.Dir(m.wrangler.ConfigPath())
+		}
+		m.cicdPopup = cicdpopup.New(gitInfo, scriptName, "", projectDir)
+		m.showCICDPopup = true
+		return m.cicdPopup.Init()
 	}
 
 	// Remove project action

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,8 +34,12 @@ func NewBuildsClient(accountID, authEmail, authKey, authToken string) *BuildsCli
 }
 
 func (b *BuildsClient) doRequest(ctx context.Context, method, path string) ([]byte, error) {
+	return b.doRequestWithBody(ctx, method, path, nil)
+}
+
+func (b *BuildsClient) doRequestWithBody(ctx context.Context, method, path string, reqBody io.Reader) ([]byte, error) {
 	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/%s", b.accountID, path)
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
 		return nil, err
 	}
@@ -44,6 +49,10 @@ func (b *BuildsClient) doRequest(ctx context.Context, method, path string) ([]by
 	} else {
 		req.Header.Set("X-Auth-Email", b.authEmail)
 		req.Header.Set("X-Auth-Key", b.authKey)
+	}
+
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := b.http.Do(req)
@@ -61,7 +70,8 @@ func (b *BuildsClient) doRequest(ctx context.Context, method, path string) ([]by
 		return nil, &AuthError{StatusCode: resp.StatusCode, Body: truncateBody(body, 200)}
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	// Accept any 2xx status code (write endpoints may return 201)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("builds API returned %d: %s", resp.StatusCode, truncateBody(body, 200))
 	}
 
@@ -283,4 +293,253 @@ func (b *BuildsClient) VerifyAuth(ctx context.Context) error {
 		return nil
 	}
 	return nil
+}
+
+// --- CI/CD types ---
+
+// RepoConnection represents a Git repository connection for Workers Builds.
+type RepoConnection struct {
+	UUID                string `json:"repo_connection_uuid"`
+	ProviderType        string `json:"provider_type"`         // "github" or "gitlab"
+	ProviderAccountID   string `json:"provider_account_id"`   // GitHub/GitLab org or user ID
+	ProviderAccountName string `json:"provider_account_name"` // display name
+	RepoID              string `json:"repo_id"`               // repository identifier
+	RepoName            string `json:"repo_name"`             // repository display name
+}
+
+// Trigger represents a CI/CD trigger linking a worker to a repo connection.
+type Trigger struct {
+	UUID           string          `json:"trigger_uuid"`
+	Name           string          `json:"trigger_name"`
+	ScriptID       string          `json:"external_script_id"`
+	BranchIncludes []string        `json:"branch_includes"`
+	BranchExcludes []string        `json:"branch_excludes"`
+	PathIncludes   []string        `json:"path_includes"`
+	PathExcludes   []string        `json:"path_excludes"`
+	BuildCommand   string          `json:"build_command"`
+	DeployCommand  string          `json:"deploy_command"`
+	RootDirectory  string          `json:"root_directory"`
+	BuildCaching   bool            `json:"build_caching_enabled"`
+	BuildTokenUUID string          `json:"build_token_uuid,omitempty"`
+	BuildTokenName string          `json:"build_token_name,omitempty"`
+	RepoConnection *RepoConnection `json:"repo_connection,omitempty"`
+	CreatedOn      string          `json:"created_on,omitempty"`
+	ModifiedOn     string          `json:"modified_on,omitempty"`
+}
+
+// ConfigAutofill holds auto-detected configuration from a repository.
+type ConfigAutofill struct {
+	ConfigFile        string            `json:"config_file"`
+	DefaultWorkerName string            `json:"default_worker_name"`
+	EnvWorkerNames    map[string]string `json:"env_worker_names"`
+	PackageManager    string            `json:"package_manager"`
+	Scripts           map[string]string `json:"scripts"`
+}
+
+// BuildToken represents a registered build authentication token.
+type BuildToken struct {
+	UUID              string `json:"build_token_uuid"`
+	Name              string `json:"build_token_name"`
+	CloudflareTokenID string `json:"cloudflare_token_id"`
+	OwnerType         string `json:"owner_type"` // "user" or "account"
+}
+
+// --- CI/CD response types ---
+
+type repoConnectionResponse struct {
+	Success bool           `json:"success"`
+	Result  RepoConnection `json:"result"`
+	Errors  []cfError      `json:"errors"`
+}
+
+type triggerResponse struct {
+	Success bool      `json:"success"`
+	Result  Trigger   `json:"result"`
+	Errors  []cfError `json:"errors"`
+}
+
+type triggersListResponse struct {
+	Success bool      `json:"success"`
+	Result  []Trigger `json:"result"`
+	Errors  []cfError `json:"errors"`
+}
+
+type configAutofillResponse struct {
+	Success bool           `json:"success"`
+	Result  ConfigAutofill `json:"result"`
+	Errors  []cfError      `json:"errors"`
+}
+
+type buildTokenResponse struct {
+	Success bool       `json:"success"`
+	Result  BuildToken `json:"result"`
+	Errors  []cfError  `json:"errors"`
+}
+
+// --- CI/CD request types ---
+
+// RepoConnectionRequest is the request body for PUT /builds/repos/connections.
+type RepoConnectionRequest struct {
+	ProviderAccountID   string `json:"provider_account_id"`
+	ProviderAccountName string `json:"provider_account_name"`
+	ProviderType        string `json:"provider_type"`
+	RepoID              string `json:"repo_id"`
+	RepoName            string `json:"repo_name"`
+}
+
+// TriggerCreateRequest is the request body for POST /builds/triggers.
+type TriggerCreateRequest struct {
+	TriggerName    string   `json:"trigger_name"`
+	ScriptID       string   `json:"external_script_id"`
+	RepoConnUUID   string   `json:"repo_connection_uuid"`
+	BranchIncludes []string `json:"branch_includes,omitempty"`
+	BranchExcludes []string `json:"branch_excludes,omitempty"`
+	PathIncludes   []string `json:"path_includes,omitempty"`
+	PathExcludes   []string `json:"path_excludes,omitempty"`
+	BuildCommand   string   `json:"build_command,omitempty"`
+	DeployCommand  string   `json:"deploy_command,omitempty"`
+	RootDirectory  string   `json:"root_directory,omitempty"`
+	BuildCaching   bool     `json:"build_caching_enabled"`
+	BuildTokenUUID string   `json:"build_token_uuid,omitempty"`
+}
+
+type buildTokenRequest struct {
+	Name              string `json:"build_token_name"`
+	Secret            string `json:"build_token_secret"`
+	CloudflareTokenID string `json:"cloudflare_token_id"`
+}
+
+// --- CI/CD public methods ---
+
+// GetWorkerTriggers lists all CI/CD triggers for a worker script.
+// endpoint: GET /accounts/{account_id}/builds/workers/{script_name}/triggers
+func (b *BuildsClient) GetWorkerTriggers(ctx context.Context, scriptName string) ([]Trigger, error) {
+	path := fmt.Sprintf("builds/workers/%s/triggers", scriptName)
+
+	body, err := b.doRequest(ctx, http.MethodGet, path)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp triggersListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing triggers list: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return resp.Result, nil
+}
+
+// GetConfigAutofill fetches auto-detected build configuration for a repository.
+// This also serves as a check for whether the GitHub/GitLab installation exists —
+// if it fails with a non-auth error, the installation may not be set up.
+// endpoint: GET /accounts/{account_id}/builds/repos/{provider}/{account_id}/{repo_id}/config_autofill
+func (b *BuildsClient) GetConfigAutofill(ctx context.Context, provider, providerAccountID, repoID, branch, rootDir string) (*ConfigAutofill, error) {
+	path := fmt.Sprintf("builds/repos/%s/%s/%s/config_autofill", provider, providerAccountID, repoID)
+
+	// Add optional query parameters
+	var params []string
+	if branch != "" {
+		params = append(params, "branch="+branch)
+	}
+	if rootDir != "" {
+		params = append(params, "root_directory="+rootDir)
+	}
+	if len(params) > 0 {
+		path += "?" + strings.Join(params, "&")
+	}
+
+	body, err := b.doRequest(ctx, http.MethodGet, path)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp configAutofillResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing config autofill: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return &resp.Result, nil
+}
+
+// PutRepoConnection creates or updates a repository connection (upsert).
+// endpoint: PUT /accounts/{account_id}/builds/repos/connections
+func (b *BuildsClient) PutRepoConnection(ctx context.Context, req RepoConnectionRequest) (*RepoConnection, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling repo connection: %w", err)
+	}
+
+	body, err := b.doRequestWithBody(ctx, http.MethodPut, "builds/repos/connections", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+
+	var resp repoConnectionResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing repo connection response: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return &resp.Result, nil
+}
+
+// CreateTrigger creates a new CI/CD trigger linking a worker to a repo connection.
+// endpoint: POST /accounts/{account_id}/builds/triggers
+func (b *BuildsClient) CreateTrigger(ctx context.Context, req TriggerCreateRequest) (*Trigger, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling trigger: %w", err)
+	}
+
+	body, err := b.doRequestWithBody(ctx, http.MethodPost, "builds/triggers", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+
+	var resp triggerResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing trigger response: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return &resp.Result, nil
+}
+
+// CreateBuildToken registers a build authentication token for Workers Builds.
+// endpoint: POST /accounts/{account_id}/builds/tokens
+func (b *BuildsClient) CreateBuildToken(ctx context.Context, name, secret, cfTokenID string) (*BuildToken, error) {
+	req := buildTokenRequest{
+		Name:              name,
+		Secret:            secret,
+		CloudflareTokenID: cfTokenID,
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling build token: %w", err)
+	}
+
+	body, err := b.doRequestWithBody(ctx, http.MethodPost, "builds/tokens", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+
+	var resp buildTokenResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing build token response: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return &resp.Result, nil
 }

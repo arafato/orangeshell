@@ -158,6 +158,7 @@ type projectEntry struct {
 	box        ProjectBox
 	config     *wcfg.WranglerConfig
 	configPath string
+	gitInfo    *wcfg.GitInfo // local git repo info (from project discovery)
 }
 
 // DevBadge holds dev server status information for display in project/env boxes.

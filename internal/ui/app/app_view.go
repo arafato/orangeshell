@@ -48,6 +48,7 @@ func (m Model) viewDashboard() string {
 		{m.showProjectPopup, func() string { return m.projectPopup.View(w, h) }},
 		{m.showRemoveProjectPopup, func() string { return m.removeProjectPopup.View(w, h) }},
 		{m.showHelpPopup, func() string { return m.helpPopup.View(w, h) }},
+		{m.showCICDPopup, func() string { return m.cicdPopup.View(w, h) }},
 		{m.showActions, func() string { return m.actionsPopup.View(w, h) }},
 	}
 

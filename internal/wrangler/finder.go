@@ -49,8 +49,9 @@ func FindConfigUp(dir string) string {
 
 // ProjectInfo holds discovery results for a single wrangler project.
 type ProjectInfo struct {
-	ConfigPath string // absolute path to wrangler config file
-	Dir        string // absolute path to the project directory
+	ConfigPath string   // absolute path to wrangler config file
+	Dir        string   // absolute path to the project directory
+	Git        *GitInfo // local git repo info (nil if not in a git repo)
 }
 
 // skipDirs are directory names that should never contain wrangler projects.
@@ -100,6 +101,7 @@ func discoverWalk(dir, root string, depth int, projects *[]ProjectInfo) {
 		*projects = append(*projects, ProjectInfo{
 			ConfigPath: configPath,
 			Dir:        dir,
+			Git:        DetectGit(dir),
 		})
 		// Don't recurse into a project directory — a project is a leaf
 		return

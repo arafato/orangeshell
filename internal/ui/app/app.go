@@ -17,6 +17,7 @@ import (
 	svc "github.com/oarafat/orangeshell/internal/service"
 	"github.com/oarafat/orangeshell/internal/ui/actions"
 	uiai "github.com/oarafat/orangeshell/internal/ui/ai"
+	"github.com/oarafat/orangeshell/internal/ui/cicdpopup"
 	uiconfig "github.com/oarafat/orangeshell/internal/ui/config"
 	"github.com/oarafat/orangeshell/internal/ui/deletepopup"
 	"github.com/oarafat/orangeshell/internal/ui/deployallpopup"
@@ -256,6 +257,10 @@ type Model struct {
 	showHelpPopup bool
 	helpPopup     helppopup.Model
 
+	// CI/CD setup wizard popup overlay
+	showCICDPopup bool
+	cicdPopup     cicdpopup.Model
+
 	// Log exporter for monitoring tab
 	logExporter *monitoring.LogExporter
 
@@ -410,6 +415,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(*Model).handleTriggersMsg,
 		(*Model).handleConfigViewMsg,
 		(*Model).handleDeployAllMsg,
+		(*Model).handleCICDMsg,
 		(*Model).handleFallbackTokenMsg,
 		(*Model).handleDetailMsg,
 		(*Model).handleWranglerMsg,
@@ -547,6 +553,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.deployAllPopup, cmd = m.deployAllPopup.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+		if m.showCICDPopup && m.cicdPopup.IsWorking() {
+			var cmd tea.Cmd
+			m.cicdPopup, cmd = m.cicdPopup.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 		if m.aiTab.NeedsSpinner() {
 			cmds = append(cmds, m.aiTab.UpdateSpinner(msg))
 		}
@@ -635,6 +646,13 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If remove project popup is active, route everything there
 	if m.showRemoveProjectPopup {
 		return m.updateRemoveProjectPopup(msg)
+	}
+
+	// If CI/CD popup is active, route everything there
+	if m.showCICDPopup {
+		var cmd tea.Cmd
+		m.cicdPopup, cmd = m.cicdPopup.Update(msg)
+		return m, cmd
 	}
 
 	// If help popup is active, route everything there

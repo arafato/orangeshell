@@ -51,6 +51,7 @@ func (m *Model) SetProjects(projects []wcfg.ProjectInfo, rootName, rootDir strin
 			box:        box,
 			config:     cfg,
 			configPath: p.ConfigPath,
+			gitInfo:    p.Git,
 		}
 	}
 

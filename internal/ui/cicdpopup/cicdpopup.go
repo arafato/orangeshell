@@ -503,7 +503,9 @@ func (m Model) viewNoGit(w int) string {
 			"  1. Initialize a git repository:  " + theme.ValueStyle.Render("git init") + "\n" +
 			"  2. Add a remote:                 " + theme.ValueStyle.Render("git remote add origin <url>") + "\n" +
 			"  3. Push your code:               " + theme.ValueStyle.Render("git push -u origin main") + "\n" +
-			"  4. Run this wizard again")
+			"  4. Connect your GitHub/GitLab account to Cloudflare\n" +
+			"     via the web dashboard (one-time setup)\n" +
+			"  5. Run this wizard again")
 
 	help := theme.DimStyle.Render("esc close")
 

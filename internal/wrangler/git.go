@@ -2,10 +2,16 @@ package wrangler
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // GitInfo holds local git repository metadata detected from the filesystem.
@@ -19,6 +25,8 @@ type GitInfo struct {
 	ProviderType string // "github", "gitlab", or "" (unknown)
 	Owner        string // repository owner (org or user)
 	RepoName     string // repository name (without .git suffix)
+	OwnerID      string // numeric provider account/user ID (resolved via API)
+	RepoID       string // numeric provider repository ID (resolved via API)
 }
 
 // DetectGit walks up from dir looking for a .git/ directory and extracts
@@ -179,4 +187,111 @@ func detectProvider(host string) string {
 	default:
 		return ""
 	}
+}
+
+// ResolveGitIDs queries the GitHub or GitLab API to resolve the Owner and
+// RepoName strings to their numeric IDs (OwnerID, RepoID). The Cloudflare
+// Builds API requires numeric IDs, not string names.
+// This is a no-op if the provider is unsupported or the IDs are already set.
+func (g *GitInfo) ResolveGitIDs(ctx context.Context) error {
+	if g.OwnerID != "" && g.RepoID != "" {
+		return nil // already resolved
+	}
+	switch g.ProviderType {
+	case "github":
+		return g.resolveGitHubIDs(ctx)
+	case "gitlab":
+		return g.resolveGitLabIDs(ctx)
+	default:
+		return fmt.Errorf("unsupported provider: %s", g.ProviderType)
+	}
+}
+
+// resolveGitHubIDs fetches numeric user/org ID and repo ID from the GitHub API.
+// These are public endpoints that don't require authentication.
+func (g *GitInfo) resolveGitHubIDs(ctx context.Context) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// Resolve repo (includes owner info)
+	path := fmt.Sprintf("https://api.github.com/repos/%s/%s", g.Owner, g.RepoName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("GitHub API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading GitHub response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GitHub API returned %d for %s/%s", resp.StatusCode, g.Owner, g.RepoName)
+	}
+
+	var repo struct {
+		ID    int64 `json:"id"`
+		Owner struct {
+			ID int64 `json:"id"`
+		} `json:"owner"`
+	}
+	if err := json.Unmarshal(body, &repo); err != nil {
+		return fmt.Errorf("parsing GitHub response: %w", err)
+	}
+
+	g.OwnerID = fmt.Sprintf("%d", repo.Owner.ID)
+	g.RepoID = fmt.Sprintf("%d", repo.ID)
+	return nil
+}
+
+// resolveGitLabIDs fetches the numeric project ID from the GitLab API.
+// For GitLab, the project ID serves as both the repo identifier.
+// The namespace (owner) ID is extracted from the project metadata.
+func (g *GitInfo) resolveGitLabIDs(ctx context.Context) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// GitLab uses URL-encoded "owner/repo" as the project identifier
+	projectPath := fmt.Sprintf("%s/%s", g.Owner, g.RepoName)
+	encodedPath := strings.ReplaceAll(projectPath, "/", "%2F")
+
+	path := fmt.Sprintf("https://gitlab.com/api/v4/projects/%s", encodedPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("GitLab API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading GitLab response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GitLab API returned %d for %s", resp.StatusCode, projectPath)
+	}
+
+	var project struct {
+		ID        int64 `json:"id"`
+		Namespace struct {
+			ID int64 `json:"id"`
+		} `json:"namespace"`
+	}
+	if err := json.Unmarshal(body, &project); err != nil {
+		return fmt.Errorf("parsing GitLab response: %w", err)
+	}
+
+	g.OwnerID = fmt.Sprintf("%d", project.Namespace.ID)
+	g.RepoID = fmt.Sprintf("%d", project.ID)
+	return nil
 }

@@ -549,6 +549,7 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 		}
 		projectDir := m.wrangler.SelectedProjectDir()
 		m.cicdPopup = cicdpopup.New(gitInfo, scriptName, "", projectDir)
+		m.setCICDFallbackTokenInfo()
 		m.showCICDPopup = true
 		return m.cicdPopup.Init()
 	}
@@ -565,6 +566,7 @@ func (m *Model) handleActionSelect(item actions.Item) tea.Cmd {
 			projectDir = filepath.Dir(m.wrangler.ConfigPath())
 		}
 		m.cicdPopup = cicdpopup.New(gitInfo, scriptName, "", projectDir)
+		m.setCICDFallbackTokenInfo()
 		m.showCICDPopup = true
 		return m.cicdPopup.Init()
 	}

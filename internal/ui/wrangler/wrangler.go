@@ -466,6 +466,31 @@ func (m *Model) UpdateAccessBadges(badgeFn func(workerName string) bool) {
 	}
 }
 
+// UpdateCICDBadges updates the CI/CD badge data on all project boxes in the monorepo list.
+// The badgeFn function is called for each project/env pair to get the CI/CD status.
+func (m *Model) UpdateCICDBadges(badgeFn func(workerName string) bool) {
+	for i := range m.projects {
+		entry := &m.projects[i]
+		if entry.config == nil {
+			continue
+		}
+		if entry.box.CICDBadges == nil {
+			entry.box.CICDBadges = make(map[string]bool)
+		}
+		// Clear old badges
+		for k := range entry.box.CICDBadges {
+			delete(entry.box.CICDBadges, k)
+		}
+		// Set new badges
+		for _, envName := range entry.config.EnvNames() {
+			workerName := entry.config.ResolvedEnvName(envName)
+			if workerName != "" && badgeFn(workerName) {
+				entry.box.CICDBadges[envName] = true
+			}
+		}
+	}
+}
+
 // SetEnvDeployment updates deployment/subdomain data on the matching EnvBox.
 func (m *Model) SetEnvDeployment(envName string, dep *DeploymentDisplay, subdomain string) {
 	for i := range m.envBoxes {

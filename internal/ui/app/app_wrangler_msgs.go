@@ -27,8 +27,9 @@ func (m *Model) handleWranglerMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.refreshMonitoringWorkerTree()
 		// Refresh AI file sources so the context panel picks up new projects
 		m.refreshAIFileSources()
-		// Sync Access badges on newly created env boxes
+		// Sync badges on newly created env boxes
 		m.syncAccessBadges()
+		m.syncCICDBadges()
 		// Trigger deployment fetching for single-project environments
 		if msg.Err == nil && msg.Config != nil {
 			return *m, m.fetchSingleProjectDeployments(msg.Config), true
@@ -50,8 +51,9 @@ func (m *Model) handleWranglerMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.refreshMonitoringWorkerTree()
 		// Refresh AI file sources so the context panel picks up new projects
 		m.refreshAIFileSources()
-		// Sync Access badges on newly created project boxes
+		// Sync badges on newly created project boxes
 		m.syncAccessBadges()
+		m.syncCICDBadges()
 		// Trigger deployment fetching for all projects
 		return *m, m.fetchAllProjectDeployments(), true
 

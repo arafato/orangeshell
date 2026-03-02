@@ -70,9 +70,13 @@ func (b *BuildsClient) doRequestWithBody(ctx context.Context, method, path strin
 		return nil, &AuthError{StatusCode: resp.StatusCode, Body: truncateBody(body, 200)}
 	}
 
+	if resp.StatusCode == http.StatusConflict {
+		return nil, &ConflictError{Body: truncateBody(body, 500)}
+	}
+
 	// Accept any 2xx status code (write endpoints may return 201)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("builds API returned %d: %s", resp.StatusCode, truncateBody(body, 200))
+		return nil, fmt.Errorf("builds API returned %d: %s", resp.StatusCode, truncateBody(body, 500))
 	}
 
 	return body, nil
@@ -93,6 +97,22 @@ func (e *AuthError) Error() string {
 func IsAuthError(err error) bool {
 	var ae *AuthError
 	return errors.As(err, &ae)
+}
+
+// ConflictError is returned when the Builds API responds with 409,
+// indicating a resource already exists (e.g. duplicate trigger).
+type ConflictError struct {
+	Body string
+}
+
+func (e *ConflictError) Error() string {
+	return fmt.Sprintf("builds API conflict (HTTP 409): %s", e.Body)
+}
+
+// IsConflictError returns true if err (or any wrapped error) is a *ConflictError.
+func IsConflictError(err error) bool {
+	var ce *ConflictError
+	return errors.As(err, &ce)
 }
 
 func truncateBody(b []byte, maxLen int) string {
@@ -388,18 +408,20 @@ type RepoConnectionRequest struct {
 }
 
 // TriggerCreateRequest is the request body for POST /builds/triggers.
+// All fields are always serialized (no omitempty) because the Builds API
+// rejects requests with missing fields (12002: Invalid request body).
+// build_token_uuid is the only optional field (omitempty).
 type TriggerCreateRequest struct {
 	TriggerName    string   `json:"trigger_name"`
 	ScriptID       string   `json:"external_script_id"`
 	RepoConnUUID   string   `json:"repo_connection_uuid"`
-	BranchIncludes []string `json:"branch_includes,omitempty"`
-	BranchExcludes []string `json:"branch_excludes,omitempty"`
-	PathIncludes   []string `json:"path_includes,omitempty"`
-	PathExcludes   []string `json:"path_excludes,omitempty"`
-	BuildCommand   string   `json:"build_command,omitempty"`
-	DeployCommand  string   `json:"deploy_command,omitempty"`
-	RootDirectory  string   `json:"root_directory,omitempty"`
-	BuildCaching   bool     `json:"build_caching_enabled"`
+	BranchIncludes []string `json:"branch_includes"`
+	BranchExcludes []string `json:"branch_excludes"`
+	PathIncludes   []string `json:"path_includes"`
+	PathExcludes   []string `json:"path_excludes"`
+	BuildCommand   string   `json:"build_command"`
+	DeployCommand  string   `json:"deploy_command"`
+	RootDirectory  string   `json:"root_directory"`
 	BuildTokenUUID string   `json:"build_token_uuid,omitempty"`
 }
 
@@ -410,6 +432,37 @@ type buildTokenRequest struct {
 }
 
 // --- CI/CD public methods ---
+
+// GetScriptTag resolves a worker script name to its script tag (internal ID).
+// The Builds API requires the script tag as external_script_id, not the human-readable name.
+// endpoint: GET /accounts/{account_id}/workers/services/{script_name}
+func (b *BuildsClient) GetScriptTag(ctx context.Context, scriptName string) (string, error) {
+	path := fmt.Sprintf("workers/services/%s", scriptName)
+	body, err := b.doRequest(ctx, http.MethodGet, path)
+	if err != nil {
+		return "", fmt.Errorf("fetching worker service: %w", err)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Result  struct {
+			DefaultEnvironment struct {
+				ScriptTag string `json:"script_tag"`
+			} `json:"default_environment"`
+		} `json:"result"`
+		Errors []cfError `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("parsing worker service response: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return "", fmt.Errorf("workers API error: %s", resp.Errors[0].Message)
+	}
+	if resp.Result.DefaultEnvironment.ScriptTag == "" {
+		return "", fmt.Errorf("script tag not found for %s", scriptName)
+	}
+	return resp.Result.DefaultEnvironment.ScriptTag, nil
+}
 
 // GetWorkerTriggers lists all CI/CD triggers for a worker script.
 // endpoint: GET /accounts/{account_id}/builds/workers/{script_name}/triggers
@@ -467,6 +520,32 @@ func (b *BuildsClient) GetConfigAutofill(ctx context.Context, provider, provider
 	return &resp.Result, nil
 }
 
+// ListRepoConnections returns all repository connections for the account.
+// endpoint: GET /accounts/{account_id}/builds/repos/connections
+func (b *BuildsClient) ListRepoConnections(ctx context.Context) ([]RepoConnection, error) {
+	body, err := b.doRequest(ctx, http.MethodGet, "builds/repos/connections")
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Success bool             `json:"success"`
+		Result  []RepoConnection `json:"result"`
+		Errors  []struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing repo connections: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return resp.Result, nil
+}
+
 // PutRepoConnection creates or updates a repository connection (upsert).
 // endpoint: PUT /accounts/{account_id}/builds/repos/connections
 func (b *BuildsClient) PutRepoConnection(ctx context.Context, req RepoConnectionRequest) (*RepoConnection, error) {
@@ -494,6 +573,21 @@ func (b *BuildsClient) PutRepoConnection(ctx context.Context, req RepoConnection
 // CreateTrigger creates a new CI/CD trigger linking a worker to a repo connection.
 // endpoint: POST /accounts/{account_id}/builds/triggers
 func (b *BuildsClient) CreateTrigger(ctx context.Context, req TriggerCreateRequest) (*Trigger, error) {
+	// Normalize nil slices to empty slices so JSON marshals as [] not null.
+	// The Builds API rejects null arrays in the request body.
+	if req.BranchIncludes == nil {
+		req.BranchIncludes = []string{}
+	}
+	if req.BranchExcludes == nil {
+		req.BranchExcludes = []string{}
+	}
+	if req.PathIncludes == nil {
+		req.PathIncludes = []string{}
+	}
+	if req.PathExcludes == nil {
+		req.PathExcludes = []string{}
+	}
+
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling trigger: %w", err)
@@ -513,6 +607,109 @@ func (b *BuildsClient) CreateTrigger(ctx context.Context, req TriggerCreateReque
 	}
 
 	return &resp.Result, nil
+}
+
+// UpdateTrigger updates an existing CI/CD trigger via PATCH.
+// Only the fields present in the request body are updated.
+// endpoint: PATCH /accounts/{account_id}/builds/triggers/{trigger_uuid}
+func (b *BuildsClient) UpdateTrigger(ctx context.Context, triggerUUID string, req TriggerCreateRequest) (*Trigger, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling trigger update: %w", err)
+	}
+
+	path := fmt.Sprintf("builds/triggers/%s", triggerUUID)
+
+	body, err := b.doRequestWithBody(ctx, http.MethodPatch, path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+
+	var resp triggerResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing trigger update response: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return &resp.Result, nil
+}
+
+// ListBuildTokens returns all registered build tokens for the account.
+// endpoint: GET /accounts/{account_id}/builds/tokens
+func (b *BuildsClient) ListBuildTokens(ctx context.Context) ([]BuildToken, error) {
+	body, err := b.doRequest(ctx, http.MethodGet, "builds/tokens")
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Success bool         `json:"success"`
+		Result  []BuildToken `json:"result"`
+		Errors  []cfError    `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing build tokens: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return resp.Result, nil
+}
+
+// ManualBuildResult is the response from triggering a manual build.
+type ManualBuildResult struct {
+	BuildUUID string `json:"build_uuid"`
+	CreatedOn string `json:"created_on"`
+}
+
+// manualBuildRequest is the request body for CreateManualBuild.
+// The API requires at least a branch; commit_hash is optional.
+type manualBuildRequest struct {
+	Branch     string `json:"branch"`
+	CommitHash string `json:"commit_hash,omitempty"`
+}
+
+// CreateManualBuild triggers a manual build for a specific trigger.
+// This is useful for verifying the pipeline works without a git push.
+// endpoint: POST /accounts/{account_id}/builds/triggers/{trigger_uuid}/builds
+func (b *BuildsClient) CreateManualBuild(ctx context.Context, triggerUUID, branch string) (*ManualBuildResult, error) {
+	path := fmt.Sprintf("builds/triggers/%s/builds", triggerUUID)
+
+	reqBody := manualBuildRequest{Branch: branch}
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling manual build request: %w", err)
+	}
+
+	body, err := b.doRequestWithBody(ctx, http.MethodPost, path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		Success bool              `json:"success"`
+		Result  ManualBuildResult `json:"result"`
+		Errors  []cfError         `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing manual build response: %w", err)
+	}
+	if !resp.Success && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("builds API error: %s", resp.Errors[0].Message)
+	}
+
+	return &resp.Result, nil
+}
+
+// DeleteBuildToken deletes a registered build token by UUID.
+// endpoint: DELETE /accounts/{account_id}/builds/tokens/{build_token_uuid}
+func (b *BuildsClient) DeleteBuildToken(ctx context.Context, buildTokenUUID string) error {
+	path := fmt.Sprintf("builds/tokens/%s", buildTokenUUID)
+	_, err := b.doRequest(ctx, http.MethodDelete, path)
+	return err
 }
 
 // CreateBuildToken registers a build authentication token for Workers Builds.

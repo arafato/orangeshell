@@ -20,6 +20,12 @@ type accessIndexBuiltMsg struct {
 	accountID string
 }
 
+// buildsIndexBuiltMsg is sent when the background Builds index build completes.
+type buildsIndexBuiltMsg struct {
+	index     *svc.BuildsIndex
+	accountID string
+}
+
 // handleDetailMsg handles all detail/resource panel messages.
 // Returns (model, cmd, handled).
 func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
@@ -34,14 +40,17 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if msg.Err == nil && msg.Resources != nil {
 			m.registry.SetCache(msg.ServiceName, msg.Resources)
 		}
-		// When Workers list loads, build the binding index and access index in the background.
+		// When Workers list loads, build the binding index, access index, and builds
+		// index in the background.
 		// When a non-Workers service loads and no binding index exists yet,
 		// trigger a Workers fetch + index build so managed detection works.
 		var indexCmd tea.Cmd
 		var accessCmd tea.Cmd
+		var buildsCmd tea.Cmd
 		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
 			indexCmd = m.buildBindingIndexCmd()
 			accessCmd = m.buildAccessIndexCmd()
+			buildsCmd = m.buildBuildsIndexCmd()
 		} else if msg.ServiceName != "Workers" && msg.Err == nil && m.registry.GetBindingIndex() == nil {
 			// Binding index not yet available — kick off Workers fetch + build
 			if m.registry.GetCache("Workers") == nil {
@@ -62,6 +71,9 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			}
 			if accessCmd != nil {
 				bgCmds = append(bgCmds, accessCmd)
+			}
+			if buildsCmd != nil {
+				bgCmds = append(bgCmds, buildsCmd)
 			}
 			if len(bgCmds) > 0 {
 				return *m, tea.Batch(bgCmds...), true
@@ -88,6 +100,9 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		if accessCmd != nil {
 			cmds = append(cmds, accessCmd)
+		}
+		if buildsCmd != nil {
+			cmds = append(cmds, buildsCmd)
 		}
 		if len(cmds) > 0 {
 			return *m, tea.Batch(cmds...), true
@@ -169,9 +184,13 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if m.showSearch {
 			m.search.DecrementFetching()
 		}
-		// Rebuild binding and access indexes when Workers list is refreshed
+		// Rebuild binding, access, and builds indexes when Workers list is refreshed
 		if msg.ServiceName == "Workers" && msg.Err == nil && msg.Resources != nil {
-			return *m, tea.Batch(m.buildBindingIndexCmd(), m.buildAccessIndexCmd()), true
+			cmds := []tea.Cmd{m.buildBindingIndexCmd(), m.buildAccessIndexCmd()}
+			if bc := m.buildBuildsIndexCmd(); bc != nil {
+				cmds = append(cmds, bc)
+			}
+			return *m, tea.Batch(cmds...), true
 		}
 		return *m, nil, true
 
@@ -433,6 +452,17 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		// Sync Operations tab badges
 		m.syncAccessBadges()
 		return *m, nil, true
+
+	// --- Builds index built ---
+
+	case buildsIndexBuiltMsg:
+		if m.isStaleAccount(msg.accountID) {
+			return *m, nil, true
+		}
+		m.registry.SetBuildsIndex(msg.index)
+		// Sync Operations tab CI/CD badges
+		m.syncCICDBadges()
+		return *m, nil, true
 	}
 
 	return *m, nil, false
@@ -507,5 +537,28 @@ func (m *Model) syncAccessBadges() {
 	// Update project boxes (for monorepo project list)
 	m.wrangler.UpdateAccessBadges(func(workerName string) bool {
 		return idx.IsProtected(workerName)
+	})
+}
+
+// syncCICDBadges updates the CI/CD badge data on all env boxes and project boxes
+// using the current Builds index. Called after the builds index is built.
+func (m *Model) syncCICDBadges() {
+	idx := m.registry.GetBuildsIndex()
+	if idx == nil {
+		return
+	}
+
+	// Update env boxes (for drilled-in project view)
+	for i := range m.wrangler.EnvBoxCount() {
+		eb := m.wrangler.EnvBoxAt(i)
+		if eb == nil {
+			continue
+		}
+		eb.CICDConnected = idx.IsConnected(eb.WorkerName)
+	}
+
+	// Update project boxes (for monorepo project list)
+	m.wrangler.UpdateCICDBadges(func(workerName string) bool {
+		return idx.IsConnected(workerName)
 	})
 }

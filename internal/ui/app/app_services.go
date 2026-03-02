@@ -108,6 +108,54 @@ func (m Model) buildAccessIndexCmd() tea.Cmd {
 	}
 }
 
+// buildBuildsIndexCmd returns a command that checks which Workers in the current
+// project(s) have CI/CD triggers via the Workers Builds API. The result is a
+// BuildsIndex stored in the registry, used to display ⟳ badges on the Operations tab.
+func (m Model) buildBuildsIndexCmd() tea.Cmd {
+	accountID := m.registry.ActiveAccountID()
+	client := m.getBuildsClient()
+	if client == nil {
+		return nil
+	}
+
+	// Collect the unique worker script names from wrangler configs.
+	workers := m.wrangler.WorkerList()
+	if len(workers) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var scriptNames []string
+	for _, w := range workers {
+		if !seen[w.ScriptName] {
+			seen[w.ScriptName] = true
+			scriptNames = append(scriptNames, w.ScriptName)
+		}
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		idx := svc.NewBuildsIndex()
+		for _, name := range scriptNames {
+			// Resolve the script tag — the canonical identifier used by the
+			// Builds API (both dashboard and our flow create triggers with it).
+			tag, tagErr := client.GetScriptTag(ctx, name)
+			if tagErr != nil {
+				continue
+			}
+			triggers, err := client.GetWorkerTriggers(ctx, tag)
+			if err != nil {
+				continue
+			}
+			if len(triggers) > 0 {
+				idx.SetConnected(name)
+			}
+		}
+		return buildsIndexBuiltMsg{index: idx, accountID: accountID}
+	}
+}
+
 // getWorkersService retrieves the WorkersService from the registry (type-asserted).
 func (m Model) getWorkersService() *svc.WorkersService {
 	s := m.registry.Get("Workers")
@@ -584,6 +632,9 @@ func (m *Model) handleFallbackTokenMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 
 	// Save the provisioned token to config (per-account)
 	m.cfg.SetFallbackToken(ftMsg.accountID, ftMsg.token)
+	if ftMsg.tokenID != "" {
+		m.cfg.SetFallbackTokenID(ftMsg.accountID, ftMsg.tokenID)
+	}
 	_ = m.cfg.Save() // best-effort persist
 
 	// Re-wire WorkersService access auth with the new token
@@ -594,9 +645,12 @@ func (m *Model) handleFallbackTokenMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	// Update header restricted badge (no longer restricted)
 	m.header.SetRestricted(false)
 
-	// Trigger access index rebuild now that we have credentials
+	// Trigger access and builds index rebuild now that we have credentials
 	var cmds []tea.Cmd
 	if cmd := m.buildAccessIndexCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if cmd := m.buildBuildsIndexCmd(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	if len(cmds) > 0 {
@@ -606,27 +660,33 @@ func (m *Model) handleFallbackTokenMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 }
 
 // needsFallbackTokenProvisioning returns true when the app should attempt
-// to auto-provision a scoped API token. Conditions:
-//   - Auth method is OAuth (only OAuth lacks the needed scopes)
+// to auto-provision a scoped API token. The fallback token is a Bearer token
+// with specific scopes (Access Read, Workers CI Read/Write, Analytics Read).
+// It is needed for APIs that don't accept Global API Key auth (e.g. Workers
+// Builds) and for OAuth which lacks these scopes entirely.
+// Conditions:
 //   - No fallback token exists for the active account
-//   - Global API Key + Email are available (from env vars)
+//   - Global API Key + Email are available (needed to create the scoped token)
 func (m Model) needsFallbackTokenProvisioning() bool {
 	activeAccountID := m.registry.ActiveAccountID()
-	return m.cfg.AuthMethod == config.AuthMethodOAuth &&
-		m.cfg.FallbackTokenFor(activeAccountID) == "" &&
-		m.cfg.APIKey != "" && m.cfg.Email != ""
+	hasFT := m.cfg.FallbackTokenFor(activeAccountID) != ""
+	hasKey := m.cfg.APIKey != "" && m.cfg.Email != ""
+	needs := !hasFT && hasKey
+	return needs
 }
 
 // provisionFallbackTokenCmd creates a background command that auto-provisions a
-// scoped API token with Access Apps Read + Workers CI Read permissions.
+// scoped API token with Access Apps Read, Workers CI Read/Write, and Analytics
+// Read permissions.
 func (m Model) provisionFallbackTokenCmd() tea.Cmd {
 	email := m.cfg.Email
 	apiKey := m.cfg.APIKey
 	accountID := m.registry.ActiveAccountID()
 	return func() tea.Msg {
-		token, err := api.CreateScopedToken(context.Background(), email, apiKey, accountID)
+		result, err := api.CreateScopedToken(context.Background(), email, apiKey, accountID)
 		return fallbackTokenProvisionedMsg{
-			token:     token,
+			token:     result.Value,
+			tokenID:   result.ID,
 			accountID: accountID,
 			err:       err,
 		}

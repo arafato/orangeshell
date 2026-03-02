@@ -71,6 +71,7 @@ type errMsg struct {
 // a scoped API token completes. The token covers Access Apps Read + Workers CI Read.
 type fallbackTokenProvisionedMsg struct {
 	token     string // The created API token value
+	tokenID   string // The Cloudflare token ID (UUID) — needed for build token registration
 	accountID string
 	err       error
 }
@@ -342,30 +343,40 @@ func (m Model) Init() tea.Cmd {
 }
 
 // getBuildsClient creates the Workers Builds API client.
-// Prefers the dedicated fallback token, then primary credentials, then
-// env var fallback for OAuth (which can't access the Builds API).
+// The Builds API only accepts Bearer token auth — Global API Key
+// (X-Auth-Email + X-Auth-Key) is rejected with 403.
+// Prefers the dedicated fallback token (auto-provisioned Bearer token with
+// CI Read/Write scopes), then falls back to API Token or OAuth token.
 func (m *Model) getBuildsClient() *api.BuildsClient {
 	accountID := m.registry.ActiveAccountID()
 
-	// 1. Prefer dedicated per-account fallback token from config
+	// 1. Prefer dedicated per-account fallback token (always a Bearer token)
 	if ft := m.cfg.FallbackTokenFor(accountID); ft != "" {
 		return api.NewBuildsClient(accountID, "", "", ft)
 	}
 
-	// 2. Use primary credentials based on auth method.
-	// Do NOT use API Key from env vars for OAuth — it may be scoped to a
-	// different account and would cause 403 errors on account switch.
+	// 2. Fall back to primary credentials.
+	// Note: API Key auth will 403 on the Builds API — the fallback token
+	// should have been auto-provisioned to avoid this path.
 	switch m.cfg.AuthMethod {
-	case config.AuthMethodAPIKey:
-		return api.NewBuildsClient(accountID, m.cfg.Email, m.cfg.APIKey, "")
 	case config.AuthMethodAPIToken:
 		return api.NewBuildsClient(accountID, "", "", m.cfg.APIToken)
 	case config.AuthMethodOAuth:
-		// OAuth token (will 403 for Builds API — silent degradation)
 		return api.NewBuildsClient(accountID, "", "", m.cfg.OAuthAccessToken)
+	case config.AuthMethodAPIKey:
+		// API Key won't work for Builds API, but try anyway as last resort
+		return api.NewBuildsClient(accountID, m.cfg.Email, m.cfg.APIKey, "")
 	}
 
 	return api.NewBuildsClient(accountID, "", "", "")
+}
+
+// safePrefix returns the first n characters of s, or s if shorter.
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // initDashboardCmd authenticates and fetches account info.

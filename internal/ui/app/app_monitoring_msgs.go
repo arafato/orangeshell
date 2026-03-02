@@ -17,6 +17,7 @@ import (
 // re-provisioned with analytics scope. On success the analytics fetch is retried.
 type analyticsTokenProvisionedMsg struct {
 	token          string
+	tokenID        string // Cloudflare token UUID
 	accountID      string
 	err            error
 	scriptName     string // worker to retry analytics for
@@ -203,9 +204,10 @@ func (m *Model) handleAnalyticsAuthError(msg monitoring.AnalyticsDataMsg) (Model
 		return *m, tea.Batch(
 			toastTick(),
 			func() tea.Msg {
-				token, err := api.CreateScopedToken(context.Background(), email, apiKey, accountID)
+				result, err := api.CreateScopedToken(context.Background(), email, apiKey, accountID)
 				return analyticsTokenProvisionedMsg{
-					token:          token,
+					token:          result.Value,
+					tokenID:        result.ID,
 					accountID:      accountID,
 					err:            err,
 					scriptName:     scriptName,
@@ -238,6 +240,9 @@ func (m *Model) handleAnalyticsTokenProvisioned(msg analyticsTokenProvisionedMsg
 
 	// Save the new token (replaces old fallback token for this account)
 	m.cfg.SetFallbackToken(msg.accountID, msg.token)
+	if msg.tokenID != "" {
+		m.cfg.SetFallbackTokenID(msg.accountID, msg.tokenID)
+	}
 	_ = m.cfg.Save()
 
 	// Re-wire WorkersService access auth with the new token

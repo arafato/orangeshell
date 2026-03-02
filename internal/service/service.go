@@ -110,6 +110,30 @@ func (ai *AccessIndex) ProtectedWorkerIDs() map[string]bool {
 	return ids
 }
 
+// BuildsIndex tracks which Workers have CI/CD triggers connected via Workers Builds.
+// Built in the background after Workers are listed.
+type BuildsIndex struct {
+	connected map[string]bool // key: worker script name → has CI/CD trigger
+}
+
+// NewBuildsIndex creates an empty builds index.
+func NewBuildsIndex() *BuildsIndex {
+	return &BuildsIndex{connected: make(map[string]bool)}
+}
+
+// SetConnected marks a Worker as having a CI/CD trigger.
+func (bi *BuildsIndex) SetConnected(scriptName string) {
+	bi.connected[scriptName] = true
+}
+
+// IsConnected returns whether a Worker has a CI/CD trigger.
+func (bi *BuildsIndex) IsConnected(scriptName string) bool {
+	if bi == nil {
+		return false
+	}
+	return bi.connected[scriptName]
+}
+
 // BindingIndex is a reverse lookup from resources to the Workers that bind to them.
 // Key format: "ServiceName:ResourceID" (e.g. "KV:abc-123-uuid").
 type BindingIndex struct {
@@ -194,6 +218,9 @@ type Registry struct {
 
 	// Per-account access indexes: accountID → AccessIndex
 	accessIndexes map[string]*AccessIndex
+
+	// Per-account builds indexes: accountID → BuildsIndex
+	buildsIndexes map[string]*BuildsIndex
 }
 
 // NewRegistry creates an empty service registry.
@@ -204,6 +231,7 @@ func NewRegistry() *Registry {
 		deploymentCaches: make(map[string]map[string]*DeploymentCacheEntry),
 		bindingIndexes:   make(map[string]*BindingIndex),
 		accessIndexes:    make(map[string]*AccessIndex),
+		buildsIndexes:    make(map[string]*BuildsIndex),
 	}
 }
 
@@ -323,6 +351,16 @@ func (r *Registry) GetAccessIndex() *AccessIndex {
 // SetAccessIndex stores an access index for the active account.
 func (r *Registry) SetAccessIndex(idx *AccessIndex) {
 	r.accessIndexes[r.accountID] = idx
+}
+
+// GetBuildsIndex returns the builds index for the active account, or nil.
+func (r *Registry) GetBuildsIndex() *BuildsIndex {
+	return r.buildsIndexes[r.accountID]
+}
+
+// SetBuildsIndex stores a builds index for the active account.
+func (r *Registry) SetBuildsIndex(idx *BuildsIndex) {
+	r.buildsIndexes[r.accountID] = idx
 }
 
 // HasCacheForAccount returns whether any cached data exists for the given account.

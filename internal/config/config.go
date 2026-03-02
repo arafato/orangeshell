@@ -73,6 +73,11 @@ type Config struct {
 	// cover (e.g. Access Applications, Workers Builds). Maps accountID → token.
 	FallbackTokens map[string]string `toml:"fallback_tokens,omitempty"`
 
+	// Per-account Cloudflare token IDs for the fallback tokens above.
+	// Needed for registering build tokens with the Workers Builds API.
+	// Maps accountID → Cloudflare token UUID.
+	FallbackTokenIDs map[string]string `toml:"fallback_token_ids,omitempty"`
+
 	// AI settings
 	AIProvider     AIProvider    `toml:"ai_provider,omitempty"`
 	AIModelPreset  AIModelPreset `toml:"ai_model_preset,omitempty"`
@@ -274,6 +279,23 @@ func (c *Config) SetFallbackToken(accountID, token string) {
 // HasFallbackAuthFor returns true if a fallback token exists for the given accountID.
 func (c *Config) HasFallbackAuthFor(accountID string) bool {
 	return c.FallbackTokenFor(accountID) != ""
+}
+
+// FallbackTokenIDFor returns the Cloudflare token ID for the per-account fallback token,
+// or "" if none is stored. Needed for build token registration.
+func (c *Config) FallbackTokenIDFor(accountID string) string {
+	if c.FallbackTokenIDs == nil {
+		return ""
+	}
+	return c.FallbackTokenIDs[accountID]
+}
+
+// SetFallbackTokenID stores the Cloudflare token ID for a fallback token.
+func (c *Config) SetFallbackTokenID(accountID, tokenID string) {
+	if c.FallbackTokenIDs == nil {
+		c.FallbackTokenIDs = make(map[string]string)
+	}
+	c.FallbackTokenIDs[accountID] = tokenID
 }
 
 // HasFallbackAuth returns true if fallback credentials are available for APIs

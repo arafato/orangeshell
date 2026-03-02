@@ -40,6 +40,7 @@ type ProjectBox struct {
 	Index             int                           // position in the projects slice (for zone IDs)
 	DevBadges         map[string]DevBadge           // envName -> dev server badge (set by app layer)
 	AccessBadges      map[string]bool               // envName -> true if Access-protected (set by app layer)
+	CICDBadges        map[string]bool               // envName -> true if CI/CD connected (set by app layer)
 }
 
 // View renders the project box.
@@ -130,13 +131,19 @@ func (b ProjectBox) renderEnvSection(envName string) string {
 	if b.AccessBadges[envName] {
 		accessBadgeStr = " " + lipgloss.NewStyle().Foreground(theme.ColorBlue).Bold(true).Render("\xf0\x9f\x94\x92")
 	}
+	// CI/CD connected badge
+	cicdBadgeStr := ""
+	if b.CICDBadges[envName] {
+		cicdBadgeStr = " " + lipgloss.NewStyle().Foreground(theme.ColorGreen).Bold(true).Render("\u27f3")
+	}
 
 	// Worker line with nav arrow
-	workerLine := fmt.Sprintf("  %s  %s%s%s %s",
+	workerLine := fmt.Sprintf("  %s  %s%s%s%s %s",
 		theme.DimStyle.Render(fmt.Sprintf("%-9s", "Worker")),
 		theme.ValueStyle.Render(workerName),
 		devBadgeStr,
 		accessBadgeStr,
+		cicdBadgeStr,
 		theme.ActionNavArrowStyle.Render("\u2192"))
 
 	// URL line (clickable) — only shown when the worker is actually deployed

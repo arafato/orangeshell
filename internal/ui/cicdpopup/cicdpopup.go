@@ -59,12 +59,16 @@ type CheckInstallMsg struct {
 type CheckInstallDoneMsg struct {
 	Autofill *api.ConfigAutofill
 	Err      error
+	OwnerID  string // resolved numeric provider account ID
+	RepoID   string // resolved numeric provider repo ID
 }
 
 // SetupCICDMsg requests the app to create the repo connection, build token, and trigger.
 type SetupCICDMsg struct {
 	Provider          string
-	ProviderAccountID string // owner
+	ProviderAccountID string // numeric provider account ID
+	ProviderOwnerName string // display name (original owner string)
+	RepoID            string // numeric provider repo ID
 	RepoName          string
 	ScriptName        string
 	TriggerName       string
@@ -75,13 +79,20 @@ type SetupCICDMsg struct {
 	BuildCommand      string
 	DeployCommand     string
 	RootDirectory     string
-	BuildCaching      bool
+	FallbackToken     string // API token value for build token registration
+	FallbackTokenID   string // Cloudflare token UUID for build token registration
 }
 
 // SetupCICDDoneMsg delivers the result of the CI/CD setup.
 type SetupCICDDoneMsg struct {
-	Trigger *api.Trigger
-	Err     error
+	Trigger         *api.Trigger
+	Err             error
+	FallbackTokenID string // resolved token ID to persist in config (may be empty)
+
+	// Re-provisioned fallback token �� set when the old token was replaced
+	// with a new one that has broader permissions for Workers Builds.
+	NewFallbackToken   string // new token value (empty if not re-provisioned)
+	NewFallbackTokenID string // new Cloudflare token ID (empty if not re-provisioned)
 }
 
 // CloseMsg signals the popup should close without changes.
@@ -103,6 +114,10 @@ type Model struct {
 	scriptName string // worker script name
 	envName    string // wrangler environment name
 
+	// Resolved numeric IDs from GitHub/GitLab API (set by CheckInstallDoneMsg)
+	ownerID string // numeric provider account/user ID
+	repoID  string // numeric provider repo ID
+
 	// Form field values
 	fields     [fieldCount]string
 	fieldFocus field
@@ -111,11 +126,18 @@ type Model struct {
 	// Build caching toggle
 	buildCaching bool
 
+	// Fallback token credentials (set by app layer for build token registration)
+	fallbackToken   string // API token value
+	fallbackTokenID string // Cloudflare token UUID
+
 	// Auto-detected config (from config_autofill API)
 	autofill *api.ConfigAutofill
 
 	// Dashboard URL for missing installation
 	dashboardURL string
+
+	// Diagnostic: raw API error when config_autofill fails
+	apiError string
 
 	// Spinner (checking/applying steps)
 	spinner spinner.Model
@@ -225,6 +247,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleCheckInstallDone(msg CheckInstallDoneMsg) (Model, tea.Cmd) {
+	// Store resolved numeric IDs (even if autofill failed)
+	m.ownerID = msg.OwnerID
+	m.repoID = msg.RepoID
+
 	if msg.Err != nil {
 		if api.IsAuthError(msg.Err) {
 			// Auth error — the token lacks CI Read/Write scope.
@@ -235,14 +261,18 @@ func (m Model) handleCheckInstallDone(msg CheckInstallDoneMsg) (Model, tea.Cmd) 
 			m.resultMsg = fmt.Sprintf("Authentication error: %v\nYour token may lack Workers CI permissions.", msg.Err)
 			return m, nil
 		}
-		// Non-auth error — likely the GitHub/GitLab installation doesn't exist
-		m.step = stepNoInstall
-		accountID := "" // app layer will fill the dashboard URL
-		m.dashboardURL = fmt.Sprintf("https://dash.cloudflare.com/%s/workers/builds", accountID)
+		// Non-auth error (e.g. 404 "Not found") — config_autofill may fail even
+		// when the GitHub/GitLab installation exists (repo not yet connected,
+		// branch not found, etc.). Proceed to the configure form without
+		// pre-filled data. The actual installation check happens implicitly
+		// when PutRepoConnection is called during the apply step.
+		m.apiError = msg.Err.Error() // keep for diagnostics
+		m.step = stepConfigure
+		m.fieldFocus = fieldBranch
 		return m, nil
 	}
 
-	// Installation exists �� pre-fill form from autofill data
+	// Autofill succeeded — pre-fill form from autofill data
 	m.autofill = msg.Autofill
 	if msg.Autofill != nil {
 		if buildCmd, ok := msg.Autofill.Scripts["build"]; ok && buildCmd != "" {
@@ -257,9 +287,61 @@ func (m Model) handleCheckInstallDone(msg CheckInstallDoneMsg) (Model, tea.Cmd) 
 
 func (m Model) handleSetupDone(msg SetupCICDDoneMsg) (Model, tea.Cmd) {
 	if msg.Err != nil {
+		errStr := msg.Err.Error()
+		if api.IsAuthError(msg.Err) {
+			// Auth error (401/403) — the token lacks the required CI Write scope.
+			m.step = stepResult
+			m.resultIsErr = true
+			m.resultMsg = "Your API token lacks the Workers CI Write permission.\n\n" +
+				"The token needs to be re-provisioned with the correct scope.\n" +
+				"Try deleting the fallback token in ~/.orangeshell/config.toml\n" +
+				"(under [fallback_tokens]) and restarting — a new token with\n" +
+				"the correct permissions will be auto-provisioned.\n\n" +
+				"API response: " + errStr
+			return m, nil
+		}
+		// Non-auth error from repo connection.
+		if strings.Contains(errStr, "creating repo connection:") {
+			if strings.Contains(errStr, "disconnected") || strings.Contains(errStr, "8000008") {
+				// The GitHub/GitLab App installation is in a broken state.
+				// This is a known Cloudflare issue that requires reinstallation.
+				m.step = stepResult
+				m.resultIsErr = true
+				m.resultMsg = "Git integration is disconnected.\n\n" +
+					"Cloudflare's link to your GitHub/GitLab account is broken.\n" +
+					"This is a known issue that requires reinstalling the integration:\n\n" +
+					"  1. Go to github.com/settings/installations\n" +
+					"  2. Find 'Cloudflare Workers' → Configure → Uninstall\n" +
+					"  3. In the Cloudflare dashboard, go to any Worker →\n" +
+					"     Settings → Builds → Connect to Git\n" +
+					"  4. Re-authorize the Cloudflare GitHub App\n" +
+					"  5. Return here and run this wizard again"
+				return m, nil
+			}
+			// Other repo connection errors — installation may be missing.
+			m.step = stepNoInstall
+			m.apiError = errStr
+			return m, nil
+		}
 		m.step = stepResult
 		m.resultIsErr = true
-		m.resultMsg = fmt.Sprintf("CI/CD setup failed: %v", msg.Err)
+		if strings.Contains(errStr, "creating trigger:") && api.IsConflictError(msg.Err) {
+			// 409 Conflict ��� trigger already exists for this worker.
+			m.resultMsg = "A CI/CD trigger already exists for this worker.\n\n" +
+				"Each worker can only have one trigger. To change the\n" +
+				"configuration, delete the existing trigger first:\n" +
+				"  Worker → Settings → Builds → Disconnect\n\n" +
+				"Then run this wizard again."
+		} else if strings.Contains(errStr, "creating trigger:") && strings.Contains(errStr, "12002") {
+			m.resultMsg = "The Cloudflare Builds API rejected the trigger request.\n\n" +
+				"This appears to be a Cloudflare API issue (error 12002).\n" +
+				"The repo connection was created successfully, but trigger\n" +
+				"creation via the API is currently failing.\n\n" +
+				"Workaround: Complete the setup in the Cloudflare dashboard:\n" +
+				"  Worker → Settings → Builds → Connect to Git"
+		} else {
+			m.resultMsg = fmt.Sprintf("CI/CD setup failed: %v", msg.Err)
+		}
 		return m, nil
 	}
 	m.step = stepResult
@@ -378,7 +460,9 @@ func (m Model) handleReviewKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 			func() tea.Msg {
 				return SetupCICDMsg{
 					Provider:          m.gitInfo.ProviderType,
-					ProviderAccountID: m.gitInfo.Owner,
+					ProviderAccountID: m.ownerID,
+					ProviderOwnerName: m.gitInfo.Owner,
+					RepoID:            m.repoID,
 					RepoName:          m.gitInfo.RepoName,
 					ScriptName:        m.scriptName,
 					TriggerName:       fmt.Sprintf("%s deploy", m.scriptName),
@@ -389,7 +473,8 @@ func (m Model) handleReviewKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 					BuildCommand:      m.fields[fieldBuildCmd],
 					DeployCommand:     m.fields[fieldDeployCmd],
 					RootDirectory:     m.fields[fieldRootDir],
-					BuildCaching:      m.buildCaching,
+					FallbackToken:     m.fallbackToken,
+					FallbackTokenID:   m.fallbackTokenID,
 				}
 			},
 		)
@@ -440,6 +525,13 @@ func (m Model) validate() string {
 // SetDashboardURL sets the dashboard URL for the no-installation error state.
 func (m *Model) SetDashboardURL(url string) {
 	m.dashboardURL = url
+}
+
+// SetFallbackTokenInfo sets the fallback token credentials for build token registration.
+// Called by the app layer before the wizard sends SetupCICDMsg.
+func (m *Model) SetFallbackTokenInfo(token, tokenID string) {
+	m.fallbackToken = token
+	m.fallbackTokenID = tokenID
 }
 
 // --- View ---
@@ -557,7 +649,13 @@ func (m Model) viewNoInstall(w int) string {
 
 	help := theme.DimStyle.Render("esc close")
 
-	return lipgloss.JoinVertical(lipgloss.Left, title, sep, "", header, "", explanation, "", help)
+	parts := []string{title, sep, "", header, "", explanation}
+	if m.apiError != "" {
+		parts = append(parts, "", theme.DimStyle.Render("API response: "+m.apiError))
+	}
+	parts = append(parts, "", help)
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m Model) viewConfigure(w int) string {
@@ -684,18 +782,32 @@ func (m Model) viewResult(w int) string {
 func (m Model) renderField(label, value, hint string, focused bool, maxWidth int) string {
 	labelStyle := theme.SubtitleStyle
 	valueStyle := lipgloss.NewStyle().Foreground(theme.ColorWhite)
+	hintStyle := lipgloss.NewStyle().Foreground(theme.ColorYellowDim)
 	cursor := " "
 	if focused {
 		labelStyle = theme.LabelStyle
 		cursor = "▏"
 	}
 
-	renderedLabel := labelStyle.Render(fmt.Sprintf("  %-22s", label))
+	paddedLabel := fmt.Sprintf("  %-22s", label)
+	renderedLabel := labelStyle.Render(paddedLabel)
 	renderedValue := valueStyle.Render(value + cursor)
 
 	line := renderedLabel + renderedValue
 	if focused && hint != "" {
-		line += "\n" + theme.DimStyle.Render("  "+hint)
+		// Show hint inline to the right of the value, space permitting.
+		// Use raw (unstyled) lengths to calculate available space since
+		// ANSI codes corrupt width calculations.
+		usedWidth := len(paddedLabel) + len(value) + 1 // +1 for cursor
+		hintGap := 2                                   // spaces before hint
+		available := maxWidth - usedWidth - hintGap
+		if available > 10 {
+			h := hint
+			if len(h) > available {
+				h = h[:available-1] + "…"
+			}
+			line += hintStyle.Render(strings.Repeat(" ", hintGap) + h)
+		}
 	}
 	return line
 }
@@ -714,9 +826,10 @@ func (m Model) renderToggle(label, value string, focused bool) string {
 	renderedLabel := labelStyle.Render(fmt.Sprintf("  %-22s", label))
 	renderedValue := valueStyle.Render(value)
 
+	hintStyle := lipgloss.NewStyle().Foreground(theme.ColorYellowDim)
 	line := renderedLabel + renderedValue
 	if focused {
-		line += "\n" + theme.DimStyle.Render("  space/enter toggle")
+		line += hintStyle.Render("  space/enter toggle")
 	}
 	return line
 }

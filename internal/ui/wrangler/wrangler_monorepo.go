@@ -255,6 +255,10 @@ func (m Model) drillIntoProject(idx int) (Model, tea.Cmd) {
 			if entry.box.AccessBadges[name] {
 				m.envBoxes[i].AccessProtected = true
 			}
+			// Copy CI/CD badge from the project box
+			if entry.box.CICDBadges[name] {
+				m.envBoxes[i].CICDConnected = true
+			}
 		}
 	} else {
 		m.envNames = nil

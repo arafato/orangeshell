@@ -56,6 +56,9 @@ type EnvBox struct {
 
 	// Access protection status (set by app layer via syncAccessBadges)
 	AccessProtected bool // true if this Worker is protected by Cloudflare Access
+
+	// CI/CD status (set by app layer via syncCICDBadges)
+	CICDConnected bool // true if this Worker has a CI/CD trigger via Workers Builds
 }
 
 // NewEnvBox creates an EnvBox from a wrangler config, environment name, and index.
@@ -199,12 +202,18 @@ func (b EnvBox) View(width int, focused, inside bool) string {
 		if b.AccessProtected {
 			accessBadge = " " + lipgloss.NewStyle().Foreground(theme.ColorBlue).Bold(true).Render("\xf0\x9f\x94\x92")
 		}
+		// CI/CD connected badge
+		cicdBadge := ""
+		if b.CICDConnected {
+			cicdBadge = " " + lipgloss.NewStyle().Foreground(theme.ColorGreen).Bold(true).Render("\u27f3")
+		}
 		navArrow := " " + theme.ActionNavArrowStyle.Render("\u2192") // →
-		workerLine = fmt.Sprintf("%s%s %s%s%s",
+		workerLine = fmt.Sprintf("%s%s %s%s%s%s",
 			workerCursor,
 			theme.DimStyle.Render(fmt.Sprintf("%-10s", "Worker")),
 			workerStyle.Render(b.WorkerName),
 			accessBadge,
+			cicdBadge,
 			navArrow)
 	}
 

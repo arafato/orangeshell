@@ -322,6 +322,16 @@ These are active pitfalls — things that will bite you if you don't know about 
 26. **Mouse escape sequence fragments leak as KeyMsg**: Rapid mouse wheel events can produce partially-parsed CSI sequences (`\x1b[<65;30;10M`). The `\x1b` is consumed as escape, remaining bytes (`[`, `<`, digits) arrive as `tea.KeyMsg`. Fix: track `lastMouseTime` and suppress character insertion within 100ms of any `tea.MouseMsg`.
 27. **Analytics auth credential priority**: Fallback token is tried first (may or may not have analytics scope). On GraphQL auth error → re-provision with CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL env vars → new token includes Account Analytics Read scope → saves to config → retries. If env vars not set → shows descriptive error message with instructions.
 
+### Agent / Debugging
+
+28. **Always write debug output to a log file, never to the TUI**: When adding diagnostic or debug output (e.g. API error details, request/response dumps), write to a log file (e.g. `~/.orangeshell/debug.log` or Go's `log` package) instead of rendering it in the UI. TUI rendering is constrained by terminal width and popup layout — long error strings get truncated or break formatting. A log file provides full, untruncated output and survives across sessions. Use `log.SetOutput()` to a file early in `main.go` if needed.
+
+29. **`config_autofill` is not an installation check**: The `GET /builds/repos/{provider}/{owner}/{repo}/config_autofill` endpoint returns 404 even when the GitHub/GitLab App is correctly installed, if the specific repo hasn't been connected yet. Do not use its failure as proof that the installation is missing. The real installation check happens implicitly when `PUT /builds/repos/connections` is called — that endpoint returns a clear error if the App installation doesn't exist.
+
+30. **Builds API only accepts Bearer tokens**: The Workers Builds API (`/builds/...` endpoints) rejects Global API Key auth (`X-Auth-Email` + `X-Auth-Key`) with HTTP 403. Always use a scoped Bearer token. The fallback token auto-provisioning (`needsFallbackTokenProvisioning`) must trigger for **all** auth methods (not just OAuth), because even `AuthMethodAPIKey` users need a Bearer token for the Builds API.
+
+31. **Auth method inference from env vars can override saved auth**: When `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL` env vars are set and no `auth_method` is saved in config (e.g. after deleting `~/.orangeshell/`), the config loader infers `AuthMethodAPIKey` even if the user previously used OAuth. This changes credential flow throughout the app. Be aware of this when debugging auth issues after config deletion.
+
 ---
 
 ## 9. Design Principles (Bubble Tea)

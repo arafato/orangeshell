@@ -353,23 +353,6 @@ These are active pitfalls — things that will bite you if you don't know about 
 
 ## 10. Planned Features
 
-### Workers Builds CI/CD Wizard (IN PROGRESS)
-- **Location**: Operations tab → ctrl+p → "Setup CI/CD..." action
-- **Purpose**: Connect a Worker project to a GitHub/GitLab repo for automated deployments
-- **Prerequisite**: Project must be in a git repo with a GitHub/GitLab remote
-- **GitHub/GitLab installation**: Treated as a prerequisite (one-time dashboard setup). Wizard detects if missing and redirects.
-- **Wizard flow**: Detect git → Check installation (via config_autofill) → Configure (branch, build/deploy cmd, root dir, watch paths) → Review → Apply (create connection + trigger)
-- **Watch paths**: Include/exclude patterns per https://developers.cloudflare.com/workers/ci-cd/builds/build-watch-paths/
-- **API endpoints**: `PUT /builds/repos/connections`, `POST /builds/triggers`, `GET /builds/repos/.../config_autofill`, `GET /builds/workers/.../triggers`
-- **Auth**: Requires `Workers CI Write` scope (auto-provisioned in fallback token)
-- **Files**: `internal/wrangler/git.go`, `internal/ui/cicdpopup/cicdpopup.go`, `internal/ui/app/app_cicd.go`
-- **Status**: Core implementation done. Needs testing with real Cloudflare account + Git repos.
-
-### Queue Message Inspector (PLANNED)
-- Resources tab → Queues detail. Pull/peek messages without acknowledging.
-- View JSON payloads formatted. DLQ inspection and retry.
-- Uses Cloudflare Queues API pull/ack endpoints.
-
 ### Logpush Configuration (PLANNED)
 - Create/manage Logpush jobs to R2 or other destinations.
 - Persistent log storage beyond the 200-line tail ring buffer.

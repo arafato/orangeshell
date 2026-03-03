@@ -800,10 +800,12 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activeTab == tabbar.TabConfiguration {
 				break
 			}
-			// Resources tab: quit unless D1 console is interactively focused
+			// Resources tab: quit unless an interactive console is focused (D1, Queue)
 			if m.activeTab == tabbar.TabResources {
-				if m.detail.D1Active() && m.detail.Interacting() && m.detail.Focus() == detail.FocusDetail {
-					break // let it fall through to detail's Update
+				if m.detail.Interacting() && m.detail.Focus() == detail.FocusDetail {
+					if m.detail.D1Active() || (m.detail.QueueActive() && m.detail.QueueInputFocused()) {
+						break // let it fall through to detail's Update
+					}
 				}
 				return m, tea.Quit
 			}
@@ -814,8 +816,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.viewState == ViewServiceList {
 				return m, tea.Quit
 			}
-			// In detail view, only quit if D1 console is not interactively focused
-			if m.viewState == ViewServiceDetail && !(m.detail.D1Active() && m.detail.Interacting()) {
+			// In detail view, only quit if no interactive console is focused
+			if m.viewState == ViewServiceDetail {
+				if m.detail.Interacting() && (m.detail.D1Active() || (m.detail.QueueActive() && m.detail.QueueInputFocused())) {
+					break
+				}
 				return m, tea.Quit
 			}
 		case "ctrl+h":
@@ -825,6 +830,8 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.monitoring.Clear()
 			m.detail.ClearD1()
 			m.detail.ClearKV()
+			m.detail.ClearQueue()
+			m.detail.ClearQueueCache()
 			m.activeTab = tabbar.TabOperations
 			m.viewState = ViewWrangler
 			// Refresh deployment data if stale
@@ -895,13 +902,17 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "]":
-			if m.header.NextAccount() {
-				return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
+			if !m.isTextInputActive() {
+				if m.header.NextAccount() {
+					return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
+				}
 			}
 			return m, nil
 		case "[":
-			if m.header.PrevAccount() {
-				return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
+			if !m.isTextInputActive() {
+				if m.header.PrevAccount() {
+					return m, m.switchAccount(m.header.ActiveAccountID(), m.header.ActiveAccountName())
+				}
 			}
 			return m, nil
 		case "esc":
@@ -1019,6 +1030,10 @@ func (m Model) isTextInputActive() bool {
 	}
 	// Config view text inputs (env var add/edit, triggers custom, env name add)
 	if m.activeTab == tabbar.TabConfiguration && m.configView.IsTextInputActive() {
+		return true
+	}
+	// Queue message inspector input
+	if m.detail.QueueActive() && m.detail.Interacting() && m.detail.QueueInputFocused() {
 		return true
 	}
 	// AI tab chat input is active when the chat pane is focused
@@ -1179,8 +1194,8 @@ func (m *Model) layout() {
 	m.monitoring.SetSize(contentWidth, contentHeight)
 	m.configView.SetSize(contentWidth, contentHeight)
 	m.aiTab.SetSize(contentWidth, contentHeight)
-	// Detail content starts after: header(1) + tab bar(3) + top border(1) = 5 rows from top of terminal
-	m.detail.SetYOffset(headerHeight + tabBarHeight + 1)
+	// Detail content starts after: header(1) + tab bar(3) + dropdown(1) + right pane border(1)
+	m.detail.SetYOffset(headerHeight + tabBarHeight + 2)
 }
 
 // openURL opens a URL in the user's default browser.

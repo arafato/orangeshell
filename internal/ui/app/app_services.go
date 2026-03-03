@@ -33,10 +33,12 @@ func (m *Model) fetchStaleForSearch() []tea.Cmd {
 // If the cache is stale, it is shown immediately and a background refresh is triggered.
 // If there is no cache, a loading spinner is shown while data is fetched.
 func (m *Model) navigateToService(name string) tea.Cmd {
-	// Stop any active tail/D1/KV session when switching services
+	// Stop any active tail/D1/KV/Queue session when switching services
 	m.stopTail()
 	m.detail.ClearD1()
 	m.detail.ClearKV()
+	m.detail.ClearQueue()
+	m.detail.ClearQueueCache()
 
 	m.activeTab = tabbar.TabResources
 	m.viewState = ViewServiceList
@@ -300,7 +302,7 @@ func (m *Model) registerServices(accountID string) {
 		{Name: "KV", Integrated: true, Mode: detail.ReadWrite},
 		{Name: "R2", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "D1", Integrated: true, Mode: detail.ReadWrite},
-		{Name: "Queues", Integrated: true, Mode: detail.ReadOnly},
+		{Name: "Queues", Integrated: true, Mode: detail.ReadWrite},
 		{Name: "Vectorize", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "Hyperdrive", Integrated: true, Mode: detail.ReadOnly},
 		{Name: "Pages", Integrated: false, Mode: detail.ReadOnly},
@@ -321,6 +323,8 @@ func (m *Model) switchAccount(accountID, accountName string) tea.Cmd {
 	m.monitoring.Clear()
 	m.detail.ClearD1()
 	m.detail.ClearKV()
+	m.detail.ClearQueue()
+	m.detail.ClearQueueCache()
 	m.wrangler.ClearVersionCache()
 	m.wrangler.CloseVersionPicker()
 
@@ -511,6 +515,76 @@ func (m Model) getD1Service() *svc.D1Service {
 		return d1s
 	}
 	return nil
+}
+
+// --- Queue Message Inspector helpers ---
+
+// pullQueueMessages returns a command that pulls a message snapshot from a queue.
+func (m Model) pullQueueMessages(queueID string, batchSize int) tea.Cmd {
+	qSvc := m.getQueueService()
+	if qSvc == nil {
+		return func() tea.Msg {
+			return detail.QueuePullResultMsg{QueueID: queueID, Err: fmt.Errorf("Queue service not available")}
+		}
+	}
+	return func() tea.Msg {
+		result, err := qSvc.PullMessages(queueID, batchSize)
+		return detail.QueuePullResultMsg{QueueID: queueID, Result: result, Err: err}
+	}
+}
+
+// loadQueueConsumers returns a command that loads consumers for a queue.
+func (m Model) loadQueueConsumers(queueID string) tea.Cmd {
+	qSvc := m.getQueueService()
+	if qSvc == nil {
+		return func() tea.Msg {
+			return detail.QueueConsumersLoadedMsg{QueueID: queueID, Err: fmt.Errorf("Queue service not available")}
+		}
+	}
+	return func() tea.Msg {
+		consumers, err := qSvc.ListConsumers(queueID)
+		return detail.QueueConsumersLoadedMsg{QueueID: queueID, Consumers: consumers, Err: err}
+	}
+}
+
+// pushQueueMessage returns a command that pushes a message to a queue.
+func (m Model) pushQueueMessage(queueID, body string) tea.Cmd {
+	qSvc := m.getQueueService()
+	if qSvc == nil {
+		return func() tea.Msg {
+			return detail.QueuePushResultMsg{Err: fmt.Errorf("Queue service not available")}
+		}
+	}
+	return func() tea.Msg {
+		err := qSvc.PushMessage(queueID, body)
+		return detail.QueuePushResultMsg{Body: body, Err: err}
+	}
+}
+
+// getQueueService retrieves the QueueService from the registry (type-asserted).
+func (m Model) getQueueService() *svc.QueueService {
+	s := m.registry.Get("Queues")
+	if s == nil {
+		return nil
+	}
+	if qs, ok := s.(*svc.QueueService); ok {
+		return qs
+	}
+	return nil
+}
+
+// enableHTTPPull returns a Cmd that adds an HTTP pull consumer to a queue.
+func (m Model) enableHTTPPull(queueID string) tea.Cmd {
+	qSvc := m.getQueueService()
+	if qSvc == nil {
+		return func() tea.Msg {
+			return detail.QueueHTTPPullEnabledMsg{QueueID: queueID, Err: fmt.Errorf("queue service not available")}
+		}
+	}
+	return func() tea.Msg {
+		err := qSvc.EnableHTTPPull(queueID)
+		return detail.QueueHTTPPullEnabledMsg{QueueID: queueID, Err: err}
+	}
 }
 
 // updateManagedResources computes which resources in the current service are

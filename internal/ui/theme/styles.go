@@ -204,4 +204,13 @@ var (
 	KVSelectedRowStyle = lipgloss.NewStyle().
 				Foreground(ColorOrange).
 				Bold(true)
+
+	// Queue Message Inspector styles
+	QueuePromptStyle = lipgloss.NewStyle().
+				Foreground(ColorOrange).
+				Bold(true)
+
+	QueueHeaderStyle = lipgloss.NewStyle().
+				Foreground(ColorOrange).
+				Bold(true)
 )

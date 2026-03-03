@@ -146,6 +146,52 @@ type (
 		Err         error
 	}
 
+	// Queue Message Inspector messages
+
+	// QueuePullMsg requests the app to pull a snapshot of messages from a queue.
+	QueuePullMsg struct {
+		QueueID   string
+		BatchSize int
+	}
+	// QueuePullResultMsg carries the pulled message snapshot back.
+	QueuePullResultMsg struct {
+		QueueID string
+		Result  *service.QueuePullResult
+		Err     error
+	}
+
+	// QueueConsumersLoadMsg requests the app to load consumers for a queue.
+	QueueConsumersLoadMsg struct {
+		QueueID string
+	}
+	// QueueConsumersLoadedMsg carries the consumer list back.
+	QueueConsumersLoadedMsg struct {
+		QueueID   string
+		Consumers []service.QueueConsumer
+		Err       error
+	}
+
+	// QueuePushMsg requests the app to push a message to a queue.
+	QueuePushMsg struct {
+		QueueID string
+		Body    string
+	}
+	// QueuePushResultMsg carries the result of a push operation.
+	QueuePushResultMsg struct {
+		Body string // the message body that was sent (for optimistic local append)
+		Err  error
+	}
+
+	// QueueEnableHTTPPullMsg requests the app to add an HTTP pull consumer to a queue.
+	QueueEnableHTTPPullMsg struct {
+		QueueID string
+	}
+	// QueueHTTPPullEnabledMsg carries the result of enabling HTTP pull on a queue.
+	QueueHTTPPullEnabledMsg struct {
+		QueueID string
+		Err     error
+	}
+
 	// CopyToClipboardMsg requests the app to copy text to the system clipboard.
 	CopyToClipboardMsg struct {
 		Text string

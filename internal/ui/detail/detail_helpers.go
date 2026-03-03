@@ -12,7 +12,7 @@ import (
 func isCopyableLabel(label string) bool {
 	switch label {
 	case "Database ID", "Namespace ID", "Name", "Title", "Bucket Name",
-		"Index Name", "Config ID", "Store ID":
+		"Index Name", "Config ID", "Store ID", "Queue ID":
 		return true
 	}
 	return false
@@ -64,28 +64,6 @@ func joinSideBySide(left, right []string, divider string, leftWidth, height int)
 			l = l + strings.Repeat(" ", leftWidth-visLen)
 		}
 		result = append(result, l+divider+r)
-	}
-	return strings.Join(result, "\n")
-}
-
-// joinSideBySideNoDivider joins left pane lines and a pre-rendered right box
-// side by side without an explicit divider (the right box's border serves as separator).
-func joinSideBySideNoDivider(left []string, right []string, leftWidth, height int) string {
-	var result []string
-	for i := 0; i < height; i++ {
-		l := ""
-		if i < len(left) {
-			l = left[i]
-		}
-		r := ""
-		if i < len(right) {
-			r = right[i]
-		}
-		visLen := runeWidth(l)
-		if visLen < leftWidth {
-			l = l + strings.Repeat(" ", leftWidth-visLen)
-		}
-		result = append(result, l+r)
 	}
 	return strings.Join(result, "\n")
 }

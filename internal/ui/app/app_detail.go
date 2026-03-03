@@ -159,6 +159,12 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			schemaCmd := m.loadD1Schema(msg.ResourceID)
 			return *m, tea.Batch(schemaCmd, m.detail.SpinnerInit()), true
 		}
+		// Queues: load consumers in preview mode so the consumer table is visible.
+		if msg.Err == nil && msg.ServiceName == "Queues" && msg.Detail != nil {
+			m.detail.PreloadQueueConsumers(msg.ResourceID)
+			consCmd := m.loadQueueConsumers(msg.ResourceID)
+			return *m, tea.Batch(consCmd, m.detail.SpinnerInit()), true
+		}
 		// Workers: trigger version history fetch if needed
 		if scriptName := m.detail.NeedsVersionHistory(); scriptName != "" {
 			m.detail.StartVersionHistoryLoad(scriptName)
@@ -248,6 +254,20 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 				}
 			}
 		}
+		if msg.Mode == detail.ReadWrite && msg.ServiceName == "Queues" && msg.ResourceID != "" {
+			if !m.detail.QueueActive() || m.detail.QueueQueueID() != msg.ResourceID {
+				inputCmd := m.detail.InitQueueInspector(msg.ResourceID)
+				// Load consumers (metadata only — non-destructive).
+				// Do NOT auto-pull messages: each pull counts as a delivery attempt.
+				// The user can press 'r' to take a snapshot explicitly.
+				consCmd := m.loadQueueConsumers(msg.ResourceID)
+				cmds := []tea.Cmd{consCmd}
+				if inputCmd != nil {
+					cmds = append(cmds, inputCmd)
+				}
+				return *m, tea.Batch(cmds...), true
+			}
+		}
 		if msg.Mode == detail.ReadWrite && msg.ServiceName == "KV" && msg.ResourceID != "" {
 			if msg.IsLocal && msg.LocalResource != nil {
 				// Local KV: init explorer and auto-load keys via CLI
@@ -296,6 +316,68 @@ func (m *Model) handleDetailMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		m.detail.SetD1Schema(msg.Tables, msg.Err)
 		return *m, nil, true
+
+	// --- Queue Message Inspector messages ---
+
+	case detail.QueuePullMsg:
+		if m.client == nil {
+			return *m, nil, true
+		}
+		return *m, tea.Batch(m.pullQueueMessages(msg.QueueID, msg.BatchSize), m.detail.SpinnerInit()), true
+
+	case detail.QueuePullResultMsg:
+		// Staleness check: only apply if we're still on this queue
+		if msg.QueueID != m.detail.QueueQueueID() {
+			return *m, nil, true
+		}
+		m.detail.SetQueuePullResult(msg.Result, msg.Err)
+		return *m, nil, true
+
+	case detail.QueueConsumersLoadMsg:
+		if m.client == nil {
+			return *m, nil, true
+		}
+		return *m, m.loadQueueConsumers(msg.QueueID), true
+
+	case detail.QueueConsumersLoadedMsg:
+		// Staleness check: only apply if we're still on this queue
+		if msg.QueueID != m.detail.QueueQueueID() {
+			return *m, nil, true
+		}
+		m.detail.SetQueueConsumers(msg.Consumers, msg.Err)
+		return *m, nil, true
+
+	case detail.QueuePushMsg:
+		if m.client == nil {
+			return *m, nil, true
+		}
+		return *m, m.pushQueueMessage(msg.QueueID, msg.Body), true
+
+	case detail.QueuePushResultMsg:
+		m.detail.SetQueuePushResult(msg.Body, msg.Err)
+		return *m, nil, true
+
+	case detail.QueueEnableHTTPPullMsg:
+		if m.client == nil {
+			return *m, nil, true
+		}
+		m.detail.SetQueueEnabling()
+		return *m, tea.Batch(m.enableHTTPPull(msg.QueueID), m.detail.SpinnerInit()), true
+
+	case detail.QueueHTTPPullEnabledMsg:
+		if msg.QueueID != m.detail.QueueQueueID() {
+			return *m, nil, true
+		}
+		m.detail.SetQueueHTTPPullEnabled(msg.Err)
+		if msg.Err != nil {
+			m.setToast("Failed to enable HTTP pull: " + msg.Err.Error())
+			return *m, nil, true
+		}
+		m.setToast("HTTP pull consumer enabled — press r to take a snapshot")
+		// Reload consumers to reflect the new HTTP pull consumer.
+		// Do NOT auto-pull messages: each pull counts as a delivery attempt.
+		qID := m.detail.QueueQueueID()
+		return *m, m.loadQueueConsumers(qID), true
 
 	// --- KV Data Explorer messages ---
 

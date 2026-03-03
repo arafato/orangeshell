@@ -3,6 +3,7 @@ package detail
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -39,8 +40,8 @@ const (
 type DetailMode int
 
 const (
-	ReadOnly  DetailMode = iota // Detail view supports scrolling only (Workers, KV, R2, Queues)
-	ReadWrite                   // Detail view has interactive elements (D1 SQL console, future KV editor)
+	ReadOnly  DetailMode = iota // Detail view supports scrolling only (Workers, R2)
+	ReadWrite                   // Detail view has interactive elements (D1 SQL console, KV explorer, Queues inspector)
 )
 
 // ServiceEntry describes a service available in the dropdown selector.
@@ -131,6 +132,28 @@ type Model struct {
 	d1SchemaErr     string                // schema load error message
 	d1SchemaLoading bool                  // true while schema is being fetched
 
+	// Queue Message Inspector state
+	queueActive            bool                      // true when inspector is initialized
+	queueMessages          []service.QueueMessage    // snapshot of pulled messages
+	queueLoading           bool                      // true while pulling messages
+	queueErr               string                    // error from last pull
+	queueCursor            int                       // selected message in table
+	queueScroll            int                       // scroll offset for message table
+	queueQueueID           string                    // current queue UUID
+	queueBacklog           int                       // backlog count from last pull
+	queuePulledAt          time.Time                 // timestamp of last snapshot
+	queueConsumers         []service.QueueConsumer   // consumer details
+	queueConsLoading       bool                      // true while loading consumers
+	queueConsErr           string                    // consumer load error
+	queueInput             textinput.Model           // text input for submitting messages
+	queueInputFocus        bool                      // true when text input has focus (vs message table)
+	queuePushing           bool                      // true while pushing a message
+	queuePushResult        string                    // success/error feedback from last push
+	queueNeedsPull         bool                      // true when queue requires HTTP pull to be enabled
+	queueEnabling          bool                      // true while enabling HTTP pull consumer
+	queueHasWorkerConsumer bool                      // true when enable failed because a worker consumer exists
+	queueCache             map[string]*queueSnapshot // per-queue snapshot cache (queueID → snapshot)
+
 	// Loading spinner
 	spinner spinner.Model
 
@@ -178,6 +201,7 @@ func New() Model {
 	return Model{
 		spinner:     newSpinner(),
 		copyTargets: make(map[int]string),
+		queueCache:  make(map[string]*queueSnapshot),
 	}
 }
 
@@ -189,6 +213,7 @@ func NewLoading(serviceName string) Model {
 		loading:     true,
 		spinner:     newSpinner(),
 		copyTargets: make(map[int]string),
+		queueCache:  make(map[string]*queueSnapshot),
 	}
 }
 
@@ -706,6 +731,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 	}
 
+	// When Queue inspector is active, forward all messages to the handler
+	if m.queueActive && m.mode == viewDetail && m.focus == FocusDetail && m.interacting {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			return m.updateQueue(msg)
+		default:
+			// Forward cursor blink and other messages to textinput
+			if m.queueInputFocus {
+				var cmd tea.Cmd
+				m.queueInput, cmd = m.queueInput.Update(msg)
+				return m, cmd
+			}
+			return m, nil
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		// Dropdown takes exclusive key focus when open
@@ -785,7 +826,7 @@ func (m Model) updateList(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case "enter":
 		// Switch to interactive mode — only for ReadWrite services (e.g. D1 SQL console).
-		// ReadOnly services (Workers, R2, Queues) have preview-only detail.
+		// ReadOnly services (Workers, R2) have preview-only detail.
 		// Local resources are always ReadWrite (D1 SQL console or KV explorer).
 		canInteract := m.activeServiceMode() == ReadWrite || m.isLocalResource
 		if canInteract && len(m.resources) > 0 && m.cursor < len(m.resources) && m.mode == viewDetail {
@@ -876,6 +917,9 @@ func (m *Model) autoPreview() tea.Cmd {
 			m.d1SchemaErr = ""
 			m.d1SchemaLoading = false
 		}
+		if m.service == "Queues" {
+			m.ClearQueue()
+		}
 		return nil
 	}
 
@@ -903,6 +947,10 @@ func (m *Model) autoPreview() tea.Cmd {
 		m.d1SchemaTables = nil
 		m.d1SchemaErr = ""
 		m.d1SchemaLoading = false
+	}
+	// Clear stale queue inspector when previewing a different resource
+	if m.service == "Queues" {
+		m.ClearQueue()
 	}
 	return func() tea.Msg {
 		return LoadDetailMsg{ServiceName: m.service, ResourceID: r.ID}
@@ -1009,13 +1057,7 @@ func (m Model) View() string {
 		delete(m.copyTargets, k)
 	}
 
-	borderStyle := theme.BorderStyle
-	if m.focused {
-		borderStyle = theme.ActiveBorderStyle
-	}
-
-	// Total content height inside the border (border takes 2 lines)
-	contentHeight := m.height - 2
+	contentHeight := m.height
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -1033,29 +1075,34 @@ func (m Model) View() string {
 			contentLines = contentLines[:contentHeight]
 			content = strings.Join(contentLines, "\n")
 		}
-		return borderStyle.
-			Width(m.width - 2).
-			Height(contentHeight).
-			Render(content)
+		return content
 	}
 
 	if paneHeight < 1 {
 		paneHeight = 1
 	}
 
+	// Both panes have their own rounded border (2 chars vertical, 2 chars horizontal each).
 	// Calculate pane widths: left ~25%, right ~75%.
-	// Outer border takes 2 chars on each side. Right pane has its own rounded border (2 chars).
-	innerWidth := m.width - 4 // outer border takes 2 chars on each side
+	innerWidth := m.width
 	if innerWidth < 10 {
 		innerWidth = 10
 	}
-	leftWidth := innerWidth / 4
-	if leftWidth < 15 {
-		leftWidth = 15
+	leftOuterWidth := innerWidth / 4
+	if leftOuterWidth < 17 {
+		leftOuterWidth = 17
 	}
-	rightOuterWidth := innerWidth - leftWidth // total width for right pane including its border
+	rightOuterWidth := innerWidth - leftOuterWidth
 
-	// Right pane inner dimensions (inside its rounded border)
+	// Inner dimensions (inside each pane's rounded border)
+	leftInnerWidth := leftOuterWidth - 2
+	if leftInnerWidth < 5 {
+		leftInnerWidth = 5
+	}
+	leftInnerHeight := paneHeight - 2
+	if leftInnerHeight < 1 {
+		leftInnerHeight = 1
+	}
 	rightInnerWidth := rightOuterWidth - 2
 	if rightInnerWidth < 5 {
 		rightInnerWidth = 5
@@ -1065,8 +1112,22 @@ func (m Model) View() string {
 		rightInnerHeight = 1
 	}
 
-	leftPane := m.viewResourceList(leftWidth, paneHeight)
+	leftPaneLines := m.viewResourceList(leftInnerWidth, leftInnerHeight)
 	rightPaneLines := m.viewResourceDetail(rightInnerWidth, rightInnerHeight)
+
+	// Render left pane inside a rounded border box.
+	// Orange border when the list pane has focus, dark gray otherwise.
+	leftBorderColor := theme.ColorDarkGray
+	if m.focus == FocusList {
+		leftBorderColor = theme.ColorOrange
+	}
+	leftContent := strings.Join(leftPaneLines, "\n")
+	leftBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(leftBorderColor).
+		Width(leftInnerWidth).
+		Height(leftInnerHeight).
+		Render(leftContent)
 
 	// Render right pane inside a rounded border box.
 	// Orange border when the detail pane has focus, dark gray otherwise.
@@ -1082,11 +1143,8 @@ func (m Model) View() string {
 		Height(rightInnerHeight).
 		Render(rightContent)
 
-	// Split the rendered right box back into lines for side-by-side join
-	rightBoxLines := strings.Split(rightBox, "\n")
-
-	// Join left pane and right box side by side (no divider — the border IS the separator)
-	dualPane := joinSideBySideNoDivider(leftPane, rightBoxLines, leftWidth, paneHeight)
+	// Join the two bordered boxes side by side
+	dualPane := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
 
 	content := dropdownLine + "\n" + dualPane
 	contentLines := strings.Split(content, "\n")
@@ -1095,10 +1153,7 @@ func (m Model) View() string {
 		content = strings.Join(contentLines, "\n")
 	}
 
-	return borderStyle.
-		Width(m.width - 2).
-		Height(contentHeight).
-		Render(content)
+	return content
 }
 
 // viewResourceList renders the left pane: resource list items without outer border.
@@ -1137,8 +1192,8 @@ func (m Model) viewResourceList(width, height int) []string {
 		return lines
 	}
 
-	// Resource items
-	availableWidth := width - 4
+	// Resource items — width already excludes border; subtract 2 for cursor + padding
+	availableWidth := width - 2
 	if availableWidth < 5 {
 		availableWidth = 5
 	}
@@ -1391,6 +1446,31 @@ func (m Model) viewResourceDetail(width, height int) []string {
 		}
 		allLines = append(allLines, "")
 		allLines = append(allLines, theme.DimStyle.Render(" Press enter to open SQL console"))
+	}
+
+	// For Queues with active inspector, use the queue inspector layout
+	if m.service == "Queues" && m.queueActive {
+		return m.viewResourceDetailQueue(width, height, title, sep, allLines, copyLineMap)
+	}
+
+	// For Queues in preview mode, show consumer table + hint to open inspector
+	if m.service == "Queues" && !m.queueActive {
+		queueSep := lipgloss.NewStyle().Foreground(theme.ColorDarkGray).Render(
+			strings.Repeat("─", sepWidth))
+		allLines = append(allLines, "", queueSep)
+		if m.queueConsLoading {
+			allLines = append(allLines, fmt.Sprintf(" %s %s", m.spinner.View(), theme.DimStyle.Render("Loading consumers...")))
+		} else if m.queueConsErr != "" {
+			allLines = append(allLines, theme.ErrorStyle.Render(fmt.Sprintf(" Error: %s", m.queueConsErr)))
+		} else if len(m.queueConsumers) > 0 {
+			allLines = append(allLines, " "+theme.QueueHeaderStyle.Render("Consumers"))
+			allLines = append(allLines, m.renderConsumerTable(width)...)
+		} else if m.queueConsumers != nil {
+			allLines = append(allLines, " "+theme.QueueHeaderStyle.Render("Consumers"))
+			allLines = append(allLines, theme.DimStyle.Render("  No consumers configured"))
+		}
+		allLines = append(allLines, "")
+		allLines = append(allLines, theme.DimStyle.Render(" Press enter to open message inspector"))
 	}
 
 	// Append ExtraContent if present
